@@ -147,19 +147,22 @@ if ( $csvRows.Count -gt 0 )
 }
 
 $dashboard = Get-Content -LiteralPath $dashboardPath -Raw
-if ( $dashboard -notmatch 'data-dashboard-version="2"' ) { Add-Failure 'Dashboard is not the version 2 diagnostics application' }
+if ( $dashboard -notmatch 'data-dashboard-version="3"' ) { Add-Failure 'Dashboard is not the version 3 diagnostics application' }
 foreach ( $surface in @('view-overview', 'view-trends', 'view-scenario', 'view-runs', 'view-glossary', 'trendMetric', 'chart', 'scenarioView', 'runsView', 'glossaryView') )
 {
 	if ( $dashboard -notmatch ('id="' + [regex]::Escape( $surface ) + '"') ) { Add-Failure "Dashboard is missing the '$surface' diagnostic surface" }
 }
-foreach ( $capability in @('What needs attention', 'Biggest movers and first occurrence', 'Machine-readable diagnosis', 'Average FPS change', 'Average FPS', 'Hottest calls and work units', 'Runs and direct comparison', 'Test and metric guide') )
+foreach ( $capability in @('What needs attention', 'Biggest movers and first occurrence', 'Machine-readable diagnosis', 'Average FPS change', 'Average FPS', 'Hottest calls and work units', 'Runs and direct comparison', 'Test and metric guide', 'Omit this run', 'Omitted runs', 'Restore all', 'Display preference only') )
 {
 	if ( $dashboard -notmatch [regex]::Escape( $capability ) ) { Add-Failure "Dashboard is missing '$capability'" }
 }
 if ( $dashboard -notmatch "metric:'change_max_abs_pct'" ) { Add-Failure 'Largest percentage change is not the default trend metric' }
 if ( $dashboard -notmatch 'r\[state\.metric\]' ) { Add-Failure 'Dashboard does not exclude missing historical values from trend charts' }
 if ( $dashboard -notmatch 'window\.voxelBenchmarkDashboard=' ) { Add-Failure 'Dashboard does not expose its structured model for automated diagnosis' }
-if ( $dashboard -notmatch 'const rows=\[\{' ) { Add-Failure 'Dashboard contains no embedded historical corpus rows' }
+if ( $dashboard -notmatch 'const allRows=\[\{' ) { Add-Failure 'Dashboard contains no embedded historical corpus rows' }
+if ( $dashboard -notmatch 'localStorage\.setItem\(omissionStorageKey' ) { Add-Failure 'Dashboard does not persist omitted-run preferences' }
+if ( $dashboard -notmatch 'rows=allRows\.filter' ) { Add-Failure 'Dashboard analysis does not exclude omitted runs' }
+if ( $dashboard -notmatch 'restoreAllRuns' ) { Add-Failure 'Dashboard cannot restore omitted runs' }
 $markdown = Get-Content -LiteralPath $latestMarkdownPath -Raw
 if ( $markdown -notmatch '## Call frequency' ) { Add-Failure 'Markdown report has no call-frequency section' }
 if ( $markdown -notmatch '## Percentage change and outliers' ) { Add-Failure 'Markdown report has no percentage-change section' }
