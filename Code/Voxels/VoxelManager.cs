@@ -30,6 +30,52 @@ public sealed class VoxelManager : Component
 	private long _lastCollisionInterestTimestamp;
 	private long _worldGenerationStartTimestamp;
 	private bool _worldGenerationPending;
+	private double _lastWorldGenerationElapsedMilliseconds;
+	private double _lastWorldGenerationWorkerMilliseconds;
+	private double _lastWorldGenerationP95FrameMilliseconds;
+	private double _lastWorldGenerationMaximumFrameMilliseconds;
+	private double _lastVisualBatchElapsedMilliseconds;
+	private double _lastVisualBatchAverageFrameMilliseconds;
+	private double _lastVisualBatchP95FrameMilliseconds;
+	private double _lastVisualBatchMaximumFrameMilliseconds;
+	private int _cpuBatchCompletedBuilds;
+	private double _cpuBatchSnapshotWaitMilliseconds;
+	private double _cpuBatchSnapshotCopyMilliseconds;
+	private double _cpuBatchWorkerMeshMilliseconds;
+	private double _cpuBatchUploadMilliseconds;
+	private double _lastVisualSnapshotWaitMilliseconds;
+	private double _lastVisualSnapshotCopyMilliseconds;
+	private double _lastVisualWorkerMeshMilliseconds;
+	private double _lastVisualUploadMilliseconds;
+	private long _totalVisualBuildsCompleted;
+	private double _totalVisualBatchElapsedMilliseconds;
+	private double _totalSnapshotWaitMilliseconds;
+	private double _totalSnapshotCopyMilliseconds;
+	private double _totalWorkerMeshMilliseconds;
+	private double _totalMainThreadUploadMilliseconds;
+	private long _callManagerUpdates;
+	private long _callWorldGenerationRequests;
+	private long _callWorldGenerationPolls;
+	private long _callWorldChunksGenerated;
+	private long _callBrushRequests;
+	private long _callBrushChunkTests;
+	private long _callBrushSamplesTested;
+	private long _callBrushSamplesChanged;
+	private long _callVisualWorldStarts;
+	private long _callVisualQueuePumps;
+	private long _callVisualBuildsQueued;
+	private long _callVisualBuildsStarted;
+	private long _callSdfHaloSnapshots;
+	private long _callSdfHaloSamplesCopied;
+	private long _callVisualBuildsCompleted;
+	private long _callVisualUploads;
+	private long _callCollisionInterestRefreshes;
+	private long _callCollisionQueuePumps;
+	private long _callCollisionBuildsQueued;
+	private long _callCollisionBuildsStarted;
+	private long _callCollisionSnapshotSamplesCopied;
+	private long _callCollisionBuildsCompleted;
+	private long _callCollisionUploads;
 
 	[Property, Group( "World" ), Range( MinimumChunkSize, MaximumChunkSize )]
 	public int ChunkSize { get; set; } = 32;
@@ -70,6 +116,9 @@ public sealed class VoxelManager : Component
 	[Property, Group( "Diagnostics" )]
 	public bool LogGeneration { get; set; }
 
+	[Property, Group( "Diagnostics" )]
+	public bool CaptureCallCounts { get; set; }
+
 	[Property, Group( "Diagnostics" ), Range( 0, MaximumDetailedChunkLogs )]
 	public int DetailedChunkLogLimit { get; set; } = 64;
 
@@ -77,6 +126,11 @@ public sealed class VoxelManager : Component
 	public int LoadedChunkCount => _chunks.Count;
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
+	public bool IsWorldGenerationPending => _worldGenerationPending;
+	public bool IsTerrainSettled => LoadedChunkCount == ConfiguredChunkCount &&
+		(Application.IsDedicatedServer || _cpuChunkStates.Count == LoadedChunkCount) &&
+		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
+		!_worldGenerationPending && !_cpuBatchSummaryPending;
 
 	protected override void OnValidate()
 	{
@@ -101,6 +155,7 @@ public sealed class VoxelManager : Component
 
 	protected override void OnUpdate()
 	{
+		CountCall( ref _callManagerUpdates );
 		UpdateWorldGeneration();
 		if ( _worldGenerationPending )
 		{
@@ -130,6 +185,7 @@ public sealed class VoxelManager : Component
 
 	public void GenerateWorld()
 	{
+		CountCall( ref _callWorldGenerationRequests );
 		if ( _worldGenerationPending )
 		{
 			Log.Warning( "Voxel world generation is already running." );
@@ -175,6 +231,7 @@ public sealed class VoxelManager : Component
 						? AnalyzeChunk( chunk, 0, 0, dataElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( start ) )
 						: default;
 					generated.Add( new GeneratedChunkResult( chunk, report, System.Diagnostics.Stopwatch.GetElapsedTime( start ) ) );
+					CountCall( ref _callWorldChunksGenerated );
 				}
 				return new WorldGenerationWorkerResult( generated );
 			} ) );
@@ -185,6 +242,7 @@ public sealed class VoxelManager : Component
 
 	private void UpdateWorldGeneration()
 	{
+		CountCall( ref _callWorldGenerationPolls );
 		if ( !_worldGenerationPending )
 		{
 			return;
@@ -274,6 +332,10 @@ public sealed class VoxelManager : Component
 			? _worldGenerationFrameMilliseconds[(int)System.Math.Clamp( System.Math.Ceiling( _worldGenerationFrameMilliseconds.Count * 0.95 ) - 1, 0, _worldGenerationFrameMilliseconds.Count - 1 )]
 			: 0.0;
 		var maximumFrameMilliseconds = _worldGenerationFrameMilliseconds.Count > 0 ? _worldGenerationFrameMilliseconds[^1] : 0.0;
+		_lastWorldGenerationElapsedMilliseconds = elapsed.TotalMilliseconds;
+		_lastWorldGenerationWorkerMilliseconds = workerMilliseconds;
+		_lastWorldGenerationP95FrameMilliseconds = p95FrameMilliseconds;
+		_lastWorldGenerationMaximumFrameMilliseconds = maximumFrameMilliseconds;
 		Log.Info(
 			$"Voxel CPU SDF generation batch: result=PASS, chunks={generated.Count:N0}, workers={_worldGenerationTasks.Count:N0}, " +
 			$"workerTotal={workerMilliseconds:F2}ms, elapsed={elapsed.TotalMilliseconds:F2}ms, frames={_worldGenerationFrameMilliseconds.Count:N0}, " +
@@ -349,6 +411,135 @@ public sealed class VoxelManager : Component
 		}
 	}
 
+	public VoxelTerrainDiagnostics CaptureTerrainDiagnostics()
+	{
+		long authoritativeSdfStorageBytes = 0;
+		var uniformSdfChunks = 0;
+		lock ( _sdfLock )
+		{
+			foreach ( var chunk in _chunks.Values )
+			{
+				authoritativeSdfStorageBytes += chunk.EstimatedStorageBytes;
+				uniformSdfChunks += chunk.IsUniform ? 1 : 0;
+			}
+		}
+
+		var activeVisualChunks = 0;
+		var failedVisualChunks = 0;
+		long vertices = 0;
+		long triangles = 0;
+		foreach ( var state in _cpuChunkStates.Values )
+		{
+			activeVisualChunks += state.Renderer?.Enabled == true ? 1 : 0;
+			failedVisualChunks += state.Failed ? 1 : 0;
+			vertices += state.VertexCount;
+			triangles += state.TriangleCount;
+		}
+
+		var activeColliders = 0;
+		long collisionTriangles = 0;
+		foreach ( var state in _chunkColliders.Values )
+		{
+			activeColliders += state.Collider.Enabled ? 1 : 0;
+			collisionTriangles += state.TriangleCount;
+		}
+
+		return new VoxelTerrainDiagnostics(
+			LoadedChunkCount,
+			authoritativeSdfStorageBytes,
+			uniformSdfChunks,
+			activeVisualChunks,
+			failedVisualChunks,
+			GetPendingVisualBuildCount(),
+			_cpuBatchCompletedBuilds,
+			vertices,
+			triangles,
+			activeColliders,
+			GetPendingCollisionBuildCount(),
+			collisionTriangles,
+			_lastVisualSnapshotWaitMilliseconds,
+			_lastVisualSnapshotCopyMilliseconds,
+			_lastVisualWorkerMeshMilliseconds,
+			_lastVisualUploadMilliseconds,
+			_lastWorldGenerationElapsedMilliseconds,
+			_lastWorldGenerationWorkerMilliseconds,
+			_lastWorldGenerationP95FrameMilliseconds,
+			_lastWorldGenerationMaximumFrameMilliseconds,
+			_lastVisualBatchElapsedMilliseconds,
+			_lastVisualBatchAverageFrameMilliseconds,
+			_lastVisualBatchP95FrameMilliseconds,
+			_lastVisualBatchMaximumFrameMilliseconds,
+			_totalVisualBuildsCompleted,
+			_totalVisualBatchElapsedMilliseconds,
+			_totalSnapshotWaitMilliseconds,
+			_totalSnapshotCopyMilliseconds,
+			_totalWorkerMeshMilliseconds,
+			_totalMainThreadUploadMilliseconds
+		);
+	}
+
+	public VoxelCallCountSnapshot CaptureCallCountSnapshot()
+	{
+		return new VoxelCallCountSnapshot(
+			System.Threading.Interlocked.Read( ref _callManagerUpdates ),
+			System.Threading.Interlocked.Read( ref _callWorldGenerationRequests ),
+			System.Threading.Interlocked.Read( ref _callWorldGenerationPolls ),
+			System.Threading.Interlocked.Read( ref _callWorldChunksGenerated ),
+			System.Threading.Interlocked.Read( ref _callBrushRequests ),
+			System.Threading.Interlocked.Read( ref _callBrushChunkTests ),
+			System.Threading.Interlocked.Read( ref _callBrushSamplesTested ),
+			System.Threading.Interlocked.Read( ref _callBrushSamplesChanged ),
+			System.Threading.Interlocked.Read( ref _callVisualWorldStarts ),
+			System.Threading.Interlocked.Read( ref _callVisualQueuePumps ),
+			System.Threading.Interlocked.Read( ref _callVisualBuildsQueued ),
+			System.Threading.Interlocked.Read( ref _callVisualBuildsStarted ),
+			System.Threading.Interlocked.Read( ref _callSdfHaloSnapshots ),
+			System.Threading.Interlocked.Read( ref _callSdfHaloSamplesCopied ),
+			System.Threading.Interlocked.Read( ref _callVisualBuildsCompleted ),
+			System.Threading.Interlocked.Read( ref _callVisualUploads ),
+			System.Threading.Interlocked.Read( ref _callCollisionInterestRefreshes ),
+			System.Threading.Interlocked.Read( ref _callCollisionQueuePumps ),
+			System.Threading.Interlocked.Read( ref _callCollisionBuildsQueued ),
+			System.Threading.Interlocked.Read( ref _callCollisionBuildsStarted ),
+			System.Threading.Interlocked.Read( ref _callCollisionSnapshotSamplesCopied ),
+			System.Threading.Interlocked.Read( ref _callCollisionBuildsCompleted ),
+			System.Threading.Interlocked.Read( ref _callCollisionUploads )
+		);
+	}
+
+	private void CountCall( ref long counter, long amount = 1 )
+	{
+		if ( !CaptureCallCounts || amount <= 0 ) return;
+		System.Threading.Interlocked.Add( ref counter, amount );
+	}
+
+	private int GetPendingVisualBuildCount()
+	{
+		var pending = _cpuChunkBuildQueue.Count;
+		foreach ( var state in _cpuChunkStates.Values )
+		{
+			if ( state.Task is not null || state.CompletedGeneration < state.DesiredGeneration )
+			{
+				pending++;
+			}
+		}
+		return pending;
+	}
+
+	private int GetPendingCollisionBuildCount()
+	{
+		var pending = _collisionBuildQueue.Count;
+		foreach ( var state in _chunkColliders.Values )
+		{
+			if ( state.Task is not null || state.Dirty ||
+				(_collisionDesiredChunks.Contains( state.Coordinate ) && state.CompletedGeneration < state.DesiredGeneration) )
+			{
+				pending++;
+			}
+		}
+		return pending;
+	}
+
 	[Button]
 	public void ReportMeshTopology()
 	{
@@ -382,6 +573,7 @@ public sealed class VoxelManager : Component
 
 	public int DisplaceSdf( Vector3 worldPosition, float radius, float displacement )
 	{
+		CountCall( ref _callBrushRequests );
 		if ( radius <= 0.0f || System.MathF.Abs( displacement ) <= 0.0001f )
 		{
 			return 0;
@@ -398,6 +590,7 @@ public sealed class VoxelManager : Component
 		lock ( _sdfLock )
 		{
 			writeWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( writeWaitStart );
+			CountCall( ref _callBrushChunkTests, _chunks.Count );
 			foreach ( var pair in _chunks )
 			{
 				var changedSamples = DisplaceChunkSdf( pair.Value, brushCenter, brushRadius, sdfDisplacement );
@@ -474,6 +667,8 @@ public sealed class VoxelManager : Component
 		var sampleSize = chunk.SampleSize;
 		var sampleLayer = sampleSize * sampleSize;
 		var changedSampleCount = 0;
+		var testedSampleCount = checked( (long)(maximumX - minimumX + 1) * (maximumY - minimumY + 1) * (maximumZ - minimumZ + 1) );
+		CountCall( ref _callBrushSamplesTested, testedSampleCount );
 
 		for ( var z = minimumZ; z <= maximumZ; z++ )
 		{
@@ -502,6 +697,7 @@ public sealed class VoxelManager : Component
 			}
 		}
 
+		CountCall( ref _callBrushSamplesChanged, changedSampleCount );
 		return changedSampleCount;
 	}
 
@@ -509,6 +705,8 @@ public sealed class VoxelManager : Component
 	{
 		var haloSize = chunk.Size + 3;
 		var halo = new float[checked( haloSize * haloSize * haloSize )];
+		CountCall( ref _callSdfHaloSnapshots );
+		CountCall( ref _callSdfHaloSamplesCopied, halo.Length );
 		var origin = GetChunkVoxelOrigin( chunk.Coordinate );
 		for ( var z = -1; z <= chunk.Size + 1; z++ )
 		{
@@ -585,6 +783,7 @@ public sealed class VoxelManager : Component
 
 	private void UploadChunkCollider( ChunkCollisionState state, CollisionBuildResult result )
 	{
+		CountCall( ref _callCollisionBuildsCompleted );
 		var modelStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		var collisionModel = result.Mesh.Indices.Count > 0 ? BuildCollisionModel( result.Mesh ) : null;
 		state.Collider.Enabled = false;
@@ -601,6 +800,7 @@ public sealed class VoxelManager : Component
 		state.SnapshotTime = result.SnapshotTime;
 		state.MeshingTime = result.MeshingTime;
 		state.ModelBuildTime = System.Diagnostics.Stopwatch.GetElapsedTime( modelStart );
+		CountCall( ref _callCollisionUploads );
 		if ( LogGeneration )
 		{
 			Log.Info(
@@ -801,6 +1001,7 @@ public sealed class VoxelManager : Component
 
 	private void RefreshCollisionInterests()
 	{
+		CountCall( ref _callCollisionInterestRefreshes );
 		_lastCollisionInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		_collisionDesiredChunks.Clear();
 		_collisionBuildQueue.Clear();
@@ -910,11 +1111,13 @@ public sealed class VoxelManager : Component
 		{
 			_collisionBuildQueue.Enqueue( coordinate );
 			state.Queued = true;
+			CountCall( ref _callCollisionBuildsQueued );
 		}
 	}
 
 	private void PumpCollisionBuildQueue()
 	{
+		CountCall( ref _callCollisionQueuePumps );
 		var mainThreadStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		var uploads = 0;
 		foreach ( var state in _chunkColliders.Values )
@@ -995,6 +1198,7 @@ public sealed class VoxelManager : Component
 			var chunkSize = chunk.Size;
 			state.TaskGeneration = generation;
 			state.Queued = false;
+			CountCall( ref _callCollisionBuildsStarted );
 			state.Task = GameTask.RunInThreadAsync( () =>
 			{
 				var snapshotWaitStart = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1006,6 +1210,7 @@ public sealed class VoxelManager : Component
 					snapshotWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotWaitStart );
 					var snapshotStart = System.Diagnostics.Stopwatch.GetTimestamp();
 					distanceSnapshot = VoxelCollisionMesher.CreateDistanceSnapshot( chunk, resolutionDivisor );
+					CountCall( ref _callCollisionSnapshotSamplesCopied, distanceSnapshot.Length );
 					snapshotElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotStart );
 				}
 				var meshStart = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1020,6 +1225,7 @@ public sealed class VoxelManager : Component
 
 	private void StartCpuChunkWorld()
 	{
+		CountCall( ref _callVisualWorldStarts );
 		DisposeCpuVisualWorld();
 		if ( Application.IsDedicatedServer )
 		{
@@ -1032,6 +1238,7 @@ public sealed class VoxelManager : Component
 		_cpuBatchStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		_cpuBatchSummaryPending = true;
 		_cpuBatchFrameMilliseconds.Clear();
+		ResetCpuBatchMeasurements();
 		var orderedChunks = new List<KeyValuePair<Vector3Int, VoxelChunk>>( _chunks );
 		orderedChunks.Sort( (left, right) => GetChunkBuildPriority( left.Key ).CompareTo( GetChunkBuildPriority( right.Key ) ) );
 		foreach ( var pair in orderedChunks )
@@ -1057,6 +1264,7 @@ public sealed class VoxelManager : Component
 			_cpuBatchSummaryPending = true;
 			_cpuBatchStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 			_cpuBatchFrameMilliseconds.Clear();
+			ResetCpuBatchMeasurements();
 		}
 		QueueCpuChunkBuild( state );
 	}
@@ -1065,10 +1273,12 @@ public sealed class VoxelManager : Component
 	{
 		if ( state.Task is not null || state.CompletedGeneration >= state.DesiredGeneration || !_cpuQueuedChunks.Add( state.Coordinate ) ) return;
 		_cpuChunkBuildQueue.Enqueue( state.Coordinate );
+		CountCall( ref _callVisualBuildsQueued );
 	}
 
 	private void PumpCpuChunkBuildQueue()
 	{
+		CountCall( ref _callVisualQueuePumps );
 		var mainThreadStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		var scheduled = 0;
 		var inFlight = 0;
@@ -1086,6 +1296,7 @@ public sealed class VoxelManager : Component
 			var chunkSize = ChunkSize;
 			var voxelSize = VoxelSize;
 			state.TaskGeneration = generation;
+			CountCall( ref _callVisualBuildsStarted );
 			state.Task = GameTask.RunInThreadAsync( () =>
 			{
 				var snapshotWaitStart = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1152,6 +1363,7 @@ public sealed class VoxelManager : Component
 
 	private void UploadCpuChunkMesh( CpuChunkRuntime state, CpuBuildResult result )
 	{
+		CountCall( ref _callVisualBuildsCompleted );
 		var uploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( result.Generation > 1 && LogGeneration )
 		{
@@ -1208,6 +1420,17 @@ public sealed class VoxelManager : Component
 		state.SnapshotTime = result.SnapshotTime;
 		state.MeshingTime = result.MeshingTime;
 		state.UploadTime = System.Diagnostics.Stopwatch.GetElapsedTime( uploadStart );
+		CountCall( ref _callVisualUploads );
+		_cpuBatchCompletedBuilds++;
+		_cpuBatchSnapshotWaitMilliseconds += result.SnapshotWaitTime.TotalMilliseconds;
+		_cpuBatchSnapshotCopyMilliseconds += result.SnapshotTime.TotalMilliseconds;
+		_cpuBatchWorkerMeshMilliseconds += result.MeshingTime.TotalMilliseconds;
+		_cpuBatchUploadMilliseconds += state.UploadTime.TotalMilliseconds;
+		_totalVisualBuildsCompleted++;
+		_totalSnapshotWaitMilliseconds += result.SnapshotWaitTime.TotalMilliseconds;
+		_totalSnapshotCopyMilliseconds += result.SnapshotTime.TotalMilliseconds;
+		_totalWorkerMeshMilliseconds += result.MeshingTime.TotalMilliseconds;
+		_totalMainThreadUploadMilliseconds += state.UploadTime.TotalMilliseconds;
 		if ( LogGeneration )
 		{
 			Log.Info(
@@ -1225,10 +1448,6 @@ public sealed class VoxelManager : Component
 		var failed = 0;
 		long vertices = 0;
 		long triangles = 0;
-		double snapshotWaitMilliseconds = 0.0;
-		double snapshotMilliseconds = 0.0;
-		double workerMilliseconds = 0.0;
-		double uploadMilliseconds = 0.0;
 		foreach ( var state in _cpuChunkStates.Values )
 		{
 			inFlight += state.Task is not null ? 1 : 0;
@@ -1236,10 +1455,6 @@ public sealed class VoxelManager : Component
 			failed += state.Failed ? 1 : 0;
 			vertices += state.VertexCount;
 			triangles += state.TriangleCount;
-			snapshotWaitMilliseconds += state.SnapshotWaitTime.TotalMilliseconds;
-			snapshotMilliseconds += state.SnapshotTime.TotalMilliseconds;
-			workerMilliseconds += state.MeshingTime.TotalMilliseconds;
-			uploadMilliseconds += state.UploadTime.TotalMilliseconds;
 		}
 		if ( inFlight != 0 || pending != 0 ) return;
 		var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime( _cpuBatchStartTimestamp );
@@ -1249,13 +1464,31 @@ public sealed class VoxelManager : Component
 		averageFrameMilliseconds = _cpuBatchFrameMilliseconds.Count > 0 ? averageFrameMilliseconds / _cpuBatchFrameMilliseconds.Count : 0.0;
 		var p95FrameMilliseconds = _cpuBatchFrameMilliseconds.Count > 0 ? _cpuBatchFrameMilliseconds[(int)System.Math.Clamp( System.Math.Ceiling( _cpuBatchFrameMilliseconds.Count * 0.95 ) - 1, 0, _cpuBatchFrameMilliseconds.Count - 1 )] : 0.0;
 		var maximumFrameMilliseconds = _cpuBatchFrameMilliseconds.Count > 0 ? _cpuBatchFrameMilliseconds[^1] : 0.0;
+		_lastVisualBatchElapsedMilliseconds = elapsed.TotalMilliseconds;
+		_lastVisualBatchAverageFrameMilliseconds = averageFrameMilliseconds;
+		_lastVisualBatchP95FrameMilliseconds = p95FrameMilliseconds;
+		_lastVisualBatchMaximumFrameMilliseconds = maximumFrameMilliseconds;
+		_lastVisualSnapshotWaitMilliseconds = _cpuBatchSnapshotWaitMilliseconds;
+		_lastVisualSnapshotCopyMilliseconds = _cpuBatchSnapshotCopyMilliseconds;
+		_lastVisualWorkerMeshMilliseconds = _cpuBatchWorkerMeshMilliseconds;
+		_lastVisualUploadMilliseconds = _cpuBatchUploadMilliseconds;
+		_totalVisualBatchElapsedMilliseconds += elapsed.TotalMilliseconds;
 		Log.Info(
-			$"Voxel CPU Transvoxel batch: result={(failed == 0 ? "PASS" : "FAIL")}, chunks={_cpuChunkStates.Count:N0}, failed={failed:N0}, workers={CpuChunkBuildConcurrency:N0}, " +
-			$"vertices={vertices:N0}, triangles={triangles:N0}, snapshotWaitTotal={snapshotWaitMilliseconds:F2}ms, snapshotCopyTotal={snapshotMilliseconds:F2}ms, workerMeshTotal={workerMilliseconds:F2}ms, " +
-			$"mainUploadTotal={uploadMilliseconds:F2}ms, batchElapsed={elapsed.TotalMilliseconds:F2}ms, " +
+			$"Voxel CPU Transvoxel batch: result={(failed == 0 ? "PASS" : "FAIL")}, worldChunks={_cpuChunkStates.Count:N0}, builtChunks={_cpuBatchCompletedBuilds:N0}, failed={failed:N0}, workers={CpuChunkBuildConcurrency:N0}, " +
+			$"vertices={vertices:N0}, triangles={triangles:N0}, snapshotWaitTotal={_cpuBatchSnapshotWaitMilliseconds:F2}ms, snapshotCopyTotal={_cpuBatchSnapshotCopyMilliseconds:F2}ms, workerMeshTotal={_cpuBatchWorkerMeshMilliseconds:F2}ms, " +
+			$"mainUploadTotal={_cpuBatchUploadMilliseconds:F2}ms, batchElapsed={elapsed.TotalMilliseconds:F2}ms, " +
 			$"frames={_cpuBatchFrameMilliseconds.Count:N0}, frameMs(avg/p95/max)={averageFrameMilliseconds:F2}/{p95FrameMilliseconds:F2}/{maximumFrameMilliseconds:F2}, topology=CPU, rendering=GPU-rasterized."
 		);
 		_cpuBatchSummaryPending = false;
+	}
+
+	private void ResetCpuBatchMeasurements()
+	{
+		_cpuBatchCompletedBuilds = 0;
+		_cpuBatchSnapshotWaitMilliseconds = 0.0;
+		_cpuBatchSnapshotCopyMilliseconds = 0.0;
+		_cpuBatchWorkerMeshMilliseconds = 0.0;
+		_cpuBatchUploadMilliseconds = 0.0;
 	}
 
 	private void DisposeCpuVisualWorld()
