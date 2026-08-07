@@ -55,6 +55,11 @@ CS
 	int CellCount < Attribute("CellCount"); >;
 	int EdgeSlotCount < Attribute("EdgeSlotCount"); >;
 	int Phase < Attribute("Phase"); >;
+	groupshared uint ScanTotals[256];
+	groupshared uint ScanBases[256];
+	groupshared uint ScanEdgeTotal;
+	groupshared uint ScanCenterTotal;
+	groupshared uint ScanIndexTotal;
 
 	uint SampleIndex(uint3 p) { return p.x + SampleSize*(p.y + SampleSize*p.z); }
 	uint CellIndex(uint3 p) { return p.x + ChunkSize*(p.y + ChunkSize*p.z); }
@@ -134,11 +139,34 @@ CS
 	float3 EdgePosition(uint3 c,uint e,float v[8]){uint2 ec=EdgeCorners[e];float t=v[ec.x]/(v[ec.x]-v[ec.y]+1e-7f);return (float3(c)+lerp((float3)Corners[ec.x],(float3)Corners[ec.y],saturate(t)))*VoxelSize+ChunkWorldOrigin;}
 
 	[numthreads(8,8,4)] void MainCs(uint3 p:SV_DispatchThreadID) {
-		if(Phase==1){if(any(p!=0))return;uint next=0;for(uint i=0;i<(uint)EdgeSlotCount;i++){EdgeVertexIds[i]=next;if(EdgeFlags[i]!=0)next++;}for(uint i=0;i<(uint)CellCount;i++){CellCenterIds[i]=next;if((CellSelections[i].w&0x10000)!=0)next++;}uint indices=0;for(uint i=0;i<(uint)CellCount;i++){CellIndexOffsets[i]=indices;indices+=(CellSelections[i].w&0xffff)*3;}Statistics[5]=next;Statistics[6]=indices;Statistics[4]=(next>(uint)MaxVertices||indices>(uint)MaxIndices)?1:0;return;}
+		if(Phase==1){
+			uint lane=p.x+8*(p.y+8*p.z);
+			uint edgeBlock=((uint)EdgeSlotCount+255)/256,edgeStart=lane*edgeBlock,edgeEnd=min(edgeStart+edgeBlock,(uint)EdgeSlotCount),local=0;
+			for(uint i=edgeStart;i<edgeEnd;i++)local+=EdgeFlags[i]!=0?1:0;
+			ScanTotals[lane]=local;GroupMemoryBarrierWithGroupSync();
+			if(lane==0){uint prefix=0;for(uint i=0;i<256;i++){ScanBases[i]=prefix;prefix+=ScanTotals[i];}ScanEdgeTotal=prefix;}
+			GroupMemoryBarrierWithGroupSync();local=ScanBases[lane];
+			for(uint i=edgeStart;i<edgeEnd;i++){EdgeVertexIds[i]=local;if(EdgeFlags[i]!=0)local++;}
+			GroupMemoryBarrierWithGroupSync();
+			uint cellBlock=((uint)CellCount+255)/256,cellStart=lane*cellBlock,cellEnd=min(cellStart+cellBlock,(uint)CellCount);local=0;
+			for(uint i=cellStart;i<cellEnd;i++)local+=(CellSelections[i].w&0x10000)!=0?1:0;
+			ScanTotals[lane]=local;GroupMemoryBarrierWithGroupSync();
+			if(lane==0){uint prefix=ScanEdgeTotal;for(uint i=0;i<256;i++){ScanBases[i]=prefix;prefix+=ScanTotals[i];}ScanCenterTotal=prefix;}
+			GroupMemoryBarrierWithGroupSync();local=ScanBases[lane];
+			for(uint i=cellStart;i<cellEnd;i++){CellCenterIds[i]=local;if((CellSelections[i].w&0x10000)!=0)local++;}
+			GroupMemoryBarrierWithGroupSync();local=0;
+			for(uint i=cellStart;i<cellEnd;i++)local+=(CellSelections[i].w&0xffff)*3;
+			ScanTotals[lane]=local;GroupMemoryBarrierWithGroupSync();
+			if(lane==0){uint prefix=0;for(uint i=0;i<256;i++){ScanBases[i]=prefix;prefix+=ScanTotals[i];}ScanIndexTotal=prefix;}
+			GroupMemoryBarrierWithGroupSync();local=ScanBases[lane];
+			for(uint i=cellStart;i<cellEnd;i++){CellIndexOffsets[i]=local;local+=(CellSelections[i].w&0xffff)*3;}
+			GroupMemoryBarrierWithGroupSync();
+			if(lane==0){Statistics[5]=ScanCenterTotal;Statistics[6]=ScanIndexTotal;Statistics[4]=(ScanCenterTotal>(uint)MaxVertices||ScanIndexTotal>(uint)MaxIndices)?1:0;}return;
+		}
 		if(any(p>=(uint)SampleSize))return;
 		if(Phase==0){for(uint a=0;a<3;a++){bool valid=(a==0?p.x<(uint)ChunkSize:(a==1?p.y<(uint)ChunkSize:p.z<(uint)ChunkSize));uint slot=EdgeSlot(p,a);float va=Distance((int3)p),vb=Distance((int3)p+(a==0?int3(1,0,0):(a==1?int3(0,1,0):int3(0,0,1))));EdgeFlags[slot]=valid&&((va>0)!=(vb>0));}if(any(p>=(uint)ChunkSize))return;float v[8];[unroll]for(uint i=0;i<8;i++)v[i]=Distance((int3)(p+Corners[i]));uint4 s=Selection(p,v);CellSelections[CellIndex(p)]=s;uint old;InterlockedAdd(Statistics[0],1,old);if((s.w&0xffff)>0)InterlockedAdd(Statistics[1],1,old);return;}
 		if(Statistics[4]!=0)return;
-		for(uint a=0;a<3;a++){uint slot=EdgeSlot(p,a);if(EdgeFlags[slot]==0)continue;int3 q=(int3)p, r=q+(a==0?int3(1,0,0):(a==1?int3(0,1,0):int3(0,0,1)));float va=Distance(q),vb=Distance(r),t=saturate(va/(va-vb+1e-7f));float3 pos=(lerp((float3)q,(float3)r,t)*VoxelSize)+ChunkWorldOrigin;float3 n=SafeNormal(lerp(Gradient(q),Gradient(r),t),float3(0,0,1));PrototypeVertex o;o.Position=pos;o.Normal=n;o.Tangent=Tangent(n);o.TexCoord=pos.xy/128;OutputVertices[EdgeVertexIds[slot]]=o;}
+		if(Phase==2){for(uint a=0;a<3;a++){uint slot=EdgeSlot(p,a);if(EdgeFlags[slot]==0)continue;int3 q=(int3)p, r=q+(a==0?int3(1,0,0):(a==1?int3(0,1,0):int3(0,0,1)));float va=Distance(q),vb=Distance(r),t=saturate(va/(va-vb+1e-7f));float3 pos=(lerp((float3)q,(float3)r,t)*VoxelSize)+ChunkWorldOrigin;float3 n=SafeNormal(lerp(Gradient(q),Gradient(r),t),float3(0,0,1));PrototypeVertex o;o.Position=pos;o.Normal=n;o.Tangent=Tangent(n);o.TexCoord=pos.xy/128;OutputVertices[EdgeVertexIds[slot]]=o;}return;}
 		if(any(p>=(uint)ChunkSize))return;uint ci=CellIndex(p);uint4 s=CellSelections[ci];uint tc=s.w&0xffff;if(tc==0)return;float v[8];[unroll]for(uint i=0;i<8;i++)v[i]=Distance((int3)(p+Corners[i]));if((s.w&0x10000)!=0){float3 cp=0,cn=0;uint count=0;[unroll]for(uint e=0;e<12;e++){uint slot=CellEdgeSlot(p,e);if(EdgeFlags[slot]!=0){PrototypeVertex ev=OutputVertices[EdgeVertexIds[slot]];cp+=ev.Position;cn+=ev.Normal;count++;}}PrototypeVertex cv;cv.Position=cp/max(count,1);cv.Normal=SafeNormal(cn,float3(0,0,1));cv.Tangent=Tangent(cv.Normal);cv.TexCoord=cv.Position.xy/128;OutputVertices[CellCenterIds[ci]]=cv;}
 		uint off=CellIndexOffsets[ci];for(uint t=0;t<tc;t++){uint ids[3];float3 ps[3];[unroll]for(uint k=0;k<3;k++){int e=TilingEdge(s,t*3+k);ids[k]=e==12?CellCenterIds[ci]:EdgeVertexIds[CellEdgeSlot(p,e)];ps[k]=OutputVertices[ids[k]].Position;}float3 fn=cross(ps[1]-ps[0],ps[2]-ps[0]);float3 en=OutputVertices[ids[0]].Normal+OutputVertices[ids[1]].Normal+OutputVertices[ids[2]].Normal;if(dot(fn,en)<0){uint tmp=ids[1];ids[1]=ids[2];ids[2]=tmp;fn=-fn;}float a2=dot(fn,fn);if(a2<1e-12f){uint old;InterlockedAdd(Statistics[3],1,old);}float l0=dot(ps[1]-ps[0],ps[1]-ps[0]),l1=dot(ps[2]-ps[1],ps[2]-ps[1]),l2=dot(ps[0]-ps[2],ps[0]-ps[2]);float quality=2*sqrt(3*a2)/max(l0+l1+l2,1e-12f);if(quality<0.08f){uint old;InterlockedAdd(Statistics[7],1,old);}OutputIndices[off+t*3]=ids[0];OutputIndices[off+t*3+1]=ids[1];OutputIndices[off+t*3+2]=ids[2];}
 		uint old;InterlockedAdd(Statistics[2],tc,old);

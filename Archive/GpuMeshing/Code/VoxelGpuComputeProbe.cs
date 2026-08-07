@@ -73,6 +73,7 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 	private readonly ComputeShader _classifyShader;
 	private readonly ComputeShader _scanShader;
 	private readonly ComputeShader _emitShader;
+	private readonly ComputeShader _topologyShader;
 	private GpuBuffer<float> _sdfSamples;
 	private readonly GpuBuffer<SimpleVertex>[] _vertexBuffers = new GpuBuffer<SimpleVertex>[2];
 	private readonly GpuBuffer<uint>[] _indexBuffers = new GpuBuffer<uint>[2];
@@ -192,6 +193,7 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 		_classifyShader = new ComputeShader( ComputeShaderName );
 		_scanShader = new ComputeShader( ComputeShaderName );
 		_emitShader = new ComputeShader( ComputeShaderName );
+		_topologyShader = new ComputeShader( ComputeShaderName );
 		AllocateVertexBuffer( 0, 3 );
 		AllocateIndexBuffer( 0, 3 );
 		for ( var index = 0; index < _indirectArgumentBuffers.Length; index++ )
@@ -282,6 +284,8 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 			EnsureIndexBufferCapacity( _generationVertexBufferIndex, _requiredIndexCount );
 			_emitShader.Attributes.Set( "OutputVertices", _vertexBuffers[_generationVertexBufferIndex] );
 			_emitShader.Attributes.Set( "OutputIndices", _indexBuffers[_generationVertexBufferIndex] );
+			_topologyShader.Attributes.Set( "OutputVertices", _vertexBuffers[_generationVertexBufferIndex] );
+			_topologyShader.Attributes.Set( "OutputIndices", _indexBuffers[_generationVertexBufferIndex] );
 			_state = ProbeState.EmitPending;
 			return true;
 		}
@@ -423,6 +427,7 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 			BindShader( _classifyShader, 0, _worldOrigin, _chunkSize, sampleSize, haloSize, _voxelSize, _maximumVertexCount, cellCount, edgeSlotCount );
 			BindShader( _scanShader, 1, _worldOrigin, _chunkSize, sampleSize, haloSize, _voxelSize, _maximumVertexCount, cellCount, edgeSlotCount );
 			BindShader( _emitShader, 2, _worldOrigin, _chunkSize, sampleSize, haloSize, _voxelSize, _maximumVertexCount, cellCount, edgeSlotCount );
+			BindShader( _topologyShader, 3, _worldOrigin, _chunkSize, sampleSize, haloSize, _voxelSize, _maximumVertexCount, cellCount, edgeSlotCount );
 		}
 		catch
 		{
@@ -511,6 +516,11 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 				case ProbeState.EmitPending:
 					_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 					_emitShader.Dispatch( _chunkSize + 1, _chunkSize + 1, _chunkSize + 1 );
+					_state = ProbeState.EmitFenceInFlight;
+					_statistics.GetDataAsync<uint>( OnEmitFence );
+					break;
+				case ProbeState.TopologyPending:
+					_topologyShader.Dispatch( _chunkSize, _chunkSize, _chunkSize );
 					_state = ProbeState.ReadbackInFlight;
 					_statistics.GetDataAsync<uint>( OnStatisticsRead );
 					break;
@@ -546,6 +556,17 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 				_requiredVertexCount = statistics.Length > 5 ? checked( (int)statistics[5] ) : 0;
 				_requiredIndexCount = statistics.Length > 6 ? checked( (int)statistics[6] ) : 0;
 				_state = ProbeState.OutputCapacityPending;
+			}
+		}
+	}
+
+	private void OnEmitFence( System.ReadOnlySpan<uint> statistics )
+	{
+		lock ( _resultLock )
+		{
+			if ( !_disposed && _state == ProbeState.EmitFenceInFlight )
+			{
+				_state = ProbeState.TopologyPending;
 			}
 		}
 	}
@@ -725,11 +746,7 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 	private static float[] CopyDistances( VoxelChunk chunk )
 	{
 		var distances = new float[chunk.SampleCount];
-		for ( var index = 0; index < distances.Length; index++ )
-		{
-			distances[index] = chunk.Voxels[index].Distance;
-		}
-
+		chunk.CopyDistancesTo( distances );
 		return distances;
 	}
 
@@ -914,6 +931,8 @@ internal sealed class VoxelGpuComputeProbe : SceneCustomObject, System.IDisposab
 		ScanFenceInFlight,
 		OutputCapacityPending,
 		EmitPending,
+		EmitFenceInFlight,
+		TopologyPending,
 		ReadbackInFlight,
 		VertexReadbackPending,
 		VertexReadbackInFlight,

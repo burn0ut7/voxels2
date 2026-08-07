@@ -10,7 +10,7 @@ internal sealed class VoxelMeshData
 	}
 }
 
-internal static class VoxelMesher
+internal static class VoxelCollisionMesher
 {
 	private static readonly sbyte[] Tetrahedra =
 	{
@@ -45,56 +45,98 @@ internal static class VoxelMesher
 		0, -1, -1, -1, -1, -1, -1
 	};
 
-	public static VoxelMeshData Build( VoxelChunk chunk, float voxelSize )
+	public static VoxelMeshData Build( VoxelChunk chunk, float voxelSize, int resolutionDivisor )
 	{
-		var size = chunk.Size;
+		var distanceSamples = CreateDistanceSnapshot( chunk, resolutionDivisor );
+		return Build( distanceSamples, chunk.Size, voxelSize, resolutionDivisor );
+	}
+
+	public static float[] CreateDistanceSnapshot( VoxelChunk chunk, int resolutionDivisor )
+	{
+		resolutionDivisor = System.Math.Clamp( resolutionDivisor, 1, chunk.Size );
+		var size = (chunk.Size + resolutionDivisor - 1) / resolutionDivisor;
+		var sampleSize = size + 1;
+		var distanceSamples = new float[checked( sampleSize * sampleSize * sampleSize )];
+		for ( var z = 0; z < sampleSize; z++ )
+		for ( var y = 0; y < sampleSize; y++ )
+		for ( var x = 0; x < sampleSize; x++ )
+		{
+			distanceSamples[x + sampleSize * (y + sampleSize * z)] = chunk.GetVoxel(
+				System.Math.Min( x * resolutionDivisor, chunk.Size ),
+				System.Math.Min( y * resolutionDivisor, chunk.Size ),
+				System.Math.Min( z * resolutionDivisor, chunk.Size )
+			).Distance;
+		}
+		return distanceSamples;
+	}
+
+	public static VoxelMeshData Build( float[] distanceSamples, int chunkSize, float voxelSize, int resolutionDivisor )
+	{
+		resolutionDivisor = System.Math.Clamp( resolutionDivisor, 1, chunkSize );
+		var size = (chunkSize + resolutionDivisor - 1) / resolutionDivisor;
 		var estimatedSurfaceVertices = checked( size * size * 4 );
 		var meshData = new VoxelMeshData( estimatedSurfaceVertices, estimatedSurfaceVertices * 3 );
 		var edgeVertices = new Dictionary<long, int>( estimatedSurfaceVertices );
-		var sampleSize = chunk.SampleSize;
+		var sampleSize = size + 1;
 		var sampleLayer = sampleSize * sampleSize;
-		var voxels = chunk.Voxels;
+		var collisionSampleCount = checked( sampleSize * sampleSize * sampleSize );
+		if ( distanceSamples is null || distanceSamples.Length < collisionSampleCount )
+		{
+			throw new System.ArgumentException( "Collision distance snapshot is smaller than the requested resolution.", nameof( distanceSamples ) );
+		}
+		var sampleCoordinates = System.Buffers.ArrayPool<int>.Shared.Rent( sampleSize );
+		for ( var index = 0; index < sampleSize; index++ )
+		{
+			sampleCoordinates[index] = System.Math.Min( index * resolutionDivisor, chunkSize );
+		}
 
 		System.Span<int> sampleIndices = stackalloc int[8];
 		System.Span<Vector3> positions = stackalloc Vector3[8];
 		System.Span<float> distances = stackalloc float[8];
 
-		for ( var z = 0; z < size; z++ )
+		try
 		{
-			for ( var y = 0; y < size; y++ )
+			for ( var z = 0; z < size; z++ )
 			{
-				for ( var x = 0; x < size; x++ )
+				for ( var y = 0; y < size; y++ )
 				{
-					var firstSample = x + sampleSize * (y + sampleSize * z);
-					SetCubeCorners( sampleIndices, positions, firstSample, x, y, z, sampleSize, sampleLayer );
-
-					var hasSolid = false;
-					var hasAir = false;
-					for ( var corner = 0; corner < 8; corner++ )
+					for ( var x = 0; x < size; x++ )
 					{
-						var distance = voxels[sampleIndices[corner]].Distance;
-						distances[corner] = distance;
-						hasSolid |= distance < 0.0f;
-						hasAir |= distance >= 0.0f;
-					}
+						var firstSample = x + sampleSize * (y + sampleSize * z);
+						SetCubeCorners( sampleIndices, positions, firstSample, x, y, z, sampleSize, sampleLayer, sampleCoordinates );
 
-					if ( !hasSolid || !hasAir )
-					{
-						continue;
-					}
+						var hasSolid = false;
+						var hasAir = false;
+						for ( var corner = 0; corner < 8; corner++ )
+						{
+							var distance = distanceSamples[sampleIndices[corner]];
+							distances[corner] = distance;
+							hasSolid |= distance < 0.0f;
+							hasAir |= distance >= 0.0f;
+						}
 
-					for ( var tetrahedron = 0; tetrahedron < 6; tetrahedron++ )
-					{
-						PolygonizeTetrahedron( chunk, voxelSize, tetrahedron, sampleIndices, positions, distances, edgeVertices, meshData );
+						if ( !hasSolid || !hasAir )
+						{
+							continue;
+						}
+
+						for ( var tetrahedron = 0; tetrahedron < 6; tetrahedron++ )
+						{
+							PolygonizeTetrahedron( distanceSamples, sampleSize, voxelSize, tetrahedron, sampleIndices, positions, distances, edgeVertices, meshData );
+						}
 					}
 				}
 			}
+		}
+		finally
+		{
+			System.Buffers.ArrayPool<int>.Shared.Return( sampleCoordinates );
 		}
 
 		return meshData;
 	}
 
-	private static void SetCubeCorners( System.Span<int> indices, System.Span<Vector3> positions, int first, int x, int y, int z, int sampleSize, int sampleLayer )
+	private static void SetCubeCorners( System.Span<int> indices, System.Span<Vector3> positions, int first, int x, int y, int z, int sampleSize, int sampleLayer, int[] sampleCoordinates )
 	{
 		indices[0] = first;
 		indices[1] = first + 1;
@@ -105,18 +147,25 @@ internal static class VoxelMesher
 		indices[6] = first + sampleLayer + sampleSize + 1;
 		indices[7] = first + sampleLayer + sampleSize;
 
-		positions[0] = new Vector3( x, y, z );
-		positions[1] = new Vector3( x + 1, y, z );
-		positions[2] = new Vector3( x + 1, y + 1, z );
-		positions[3] = new Vector3( x, y + 1, z );
-		positions[4] = new Vector3( x, y, z + 1 );
-		positions[5] = new Vector3( x + 1, y, z + 1 );
-		positions[6] = new Vector3( x + 1, y + 1, z + 1 );
-		positions[7] = new Vector3( x, y + 1, z + 1 );
+		var x0 = sampleCoordinates[x];
+		var x1 = sampleCoordinates[x + 1];
+		var y0 = sampleCoordinates[y];
+		var y1 = sampleCoordinates[y + 1];
+		var z0 = sampleCoordinates[z];
+		var z1 = sampleCoordinates[z + 1];
+		positions[0] = new Vector3( x0, y0, z0 );
+		positions[1] = new Vector3( x1, y0, z0 );
+		positions[2] = new Vector3( x1, y1, z0 );
+		positions[3] = new Vector3( x0, y1, z0 );
+		positions[4] = new Vector3( x0, y0, z1 );
+		positions[5] = new Vector3( x1, y0, z1 );
+		positions[6] = new Vector3( x1, y1, z1 );
+		positions[7] = new Vector3( x0, y1, z1 );
 	}
 
 	private static void PolygonizeTetrahedron(
-		VoxelChunk chunk,
+		float[] distanceSamples,
+		int sampleSize,
 		float voxelSize,
 		int tetrahedron,
 		System.Span<int> cubeSampleIndices,
@@ -140,9 +189,9 @@ internal static class VoxelMesher
 		var edgeCount = TriangleTable[tableOffset];
 		for ( var edge = 0; edge < edgeCount; edge += 3 )
 		{
-			var first = GetOrCreateVertex( chunk, voxelSize, tetrahedronOffset, TriangleTable[tableOffset + edge + 1], cubeSampleIndices, cubePositions, cubeDistances, edgeVertices, meshData.Vertices );
-			var second = GetOrCreateVertex( chunk, voxelSize, tetrahedronOffset, TriangleTable[tableOffset + edge + 2], cubeSampleIndices, cubePositions, cubeDistances, edgeVertices, meshData.Vertices );
-			var third = GetOrCreateVertex( chunk, voxelSize, tetrahedronOffset, TriangleTable[tableOffset + edge + 3], cubeSampleIndices, cubePositions, cubeDistances, edgeVertices, meshData.Vertices );
+			var first = GetOrCreateVertex( distanceSamples, sampleSize, voxelSize, tetrahedronOffset, TriangleTable[tableOffset + edge + 1], cubeSampleIndices, cubePositions, cubeDistances, edgeVertices, meshData.Vertices );
+			var second = GetOrCreateVertex( distanceSamples, sampleSize, voxelSize, tetrahedronOffset, TriangleTable[tableOffset + edge + 2], cubeSampleIndices, cubePositions, cubeDistances, edgeVertices, meshData.Vertices );
+			var third = GetOrCreateVertex( distanceSamples, sampleSize, voxelSize, tetrahedronOffset, TriangleTable[tableOffset + edge + 3], cubeSampleIndices, cubePositions, cubeDistances, edgeVertices, meshData.Vertices );
 
 			if ( first == second || second == third || third == first )
 			{
@@ -154,7 +203,8 @@ internal static class VoxelMesher
 	}
 
 	private static int GetOrCreateVertex(
-		VoxelChunk chunk,
+		float[] distanceSamples,
+		int sampleSize,
 		float voxelSize,
 		int tetrahedronOffset,
 		int tetrahedronEdge,
@@ -184,8 +234,8 @@ internal static class VoxelMesher
 		interpolation = System.Math.Clamp( interpolation, 0.0f, 1.0f );
 
 		var position = Vector3.Lerp( cubePositions[cubeCornerA], cubePositions[cubeCornerB], interpolation ) * voxelSize;
-		var gradientA = GetGradient( chunk, sampleA );
-		var gradientB = GetGradient( chunk, sampleB );
+		var gradientA = GetGradient( sampleSize, distanceSamples, sampleA );
+		var gradientB = GetGradient( sampleSize, distanceSamples, sampleB );
 		var normal = Vector3.Lerp( gradientA, gradientB, interpolation );
 		normal = normal.LengthSquared > 0.000001f ? normal.Normal : Vector3.Up;
 		var tangent = CreateTangent( normal );
@@ -203,23 +253,21 @@ internal static class VoxelMesher
 		return vertexIndex;
 	}
 
-	private static Vector3 GetGradient( VoxelChunk chunk, int sampleIndex )
+	private static Vector3 GetGradient( int sampleSize, float[] distances, int sampleIndex )
 	{
-		var sampleSize = chunk.SampleSize;
 		var sampleLayer = sampleSize * sampleSize;
 		var z = sampleIndex / sampleLayer;
 		var remainder = sampleIndex - z * sampleLayer;
 		var y = remainder / sampleSize;
 		var x = remainder - y * sampleSize;
-		var voxels = chunk.Voxels;
-		var center = voxels[sampleIndex].Distance;
+		var center = distances[sampleIndex];
 
-		var xBefore = x > 0 ? voxels[sampleIndex - 1].Distance : center;
-		var xAfter = x + 1 < sampleSize ? voxels[sampleIndex + 1].Distance : center;
-		var yBefore = y > 0 ? voxels[sampleIndex - sampleSize].Distance : center;
-		var yAfter = y + 1 < sampleSize ? voxels[sampleIndex + sampleSize].Distance : center;
-		var zBefore = z > 0 ? voxels[sampleIndex - sampleLayer].Distance : center;
-		var zAfter = z + 1 < sampleSize ? voxels[sampleIndex + sampleLayer].Distance : center;
+		var xBefore = x > 0 ? distances[sampleIndex - 1] : center;
+		var xAfter = x + 1 < sampleSize ? distances[sampleIndex + 1] : center;
+		var yBefore = y > 0 ? distances[sampleIndex - sampleSize] : center;
+		var yAfter = y + 1 < sampleSize ? distances[sampleIndex + sampleSize] : center;
+		var zBefore = z > 0 ? distances[sampleIndex - sampleLayer] : center;
+		var zAfter = z + 1 < sampleSize ? distances[sampleIndex + sampleLayer] : center;
 
 		return new Vector3( xAfter - xBefore, yAfter - yBefore, zAfter - zBefore );
 	}
