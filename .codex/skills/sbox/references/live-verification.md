@@ -20,6 +20,8 @@ Tool schemas can change after a hotload. A fresh `search_tools` or `describe_too
 
 Find `compile_status` through the registry and inspect all compiler records. Its build flags show whether compilation is still active or pending; its success state and diagnostics describe the latest settled build.
 
+Shader gotcha: after changing shader or material source, explicitly compile the shaders through the discovered live editor tool before judging the result. A successful code compile or hotload does not guarantee that shader changes have been compiled and applied; rediscover the registry afterward if the shader compile changes any hotloaded tools or state.
+
 After a source edit, the useful live signals are:
 
 - a settled `compile_status` result;
