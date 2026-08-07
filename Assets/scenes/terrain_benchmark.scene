@@ -119,7 +119,6 @@
           "CpuMeshUploadsPerFrame": 4,
           "DetailedChunkLogLimit": 0,
           "LogGeneration": false,
-          "ProtectPlayersDuringTerrainWork": true,
           "SdfClampDistance": 8,
           "TerrainMaterial": null,
           "VoxelSize": 32

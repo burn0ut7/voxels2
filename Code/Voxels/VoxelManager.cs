@@ -80,6 +80,7 @@ public sealed class VoxelManager : Component
 	private long _callPlayerSafetyActivations;
 	private long _callPlayerSafetyUpdates;
 	private long _callPlayersRepositioned;
+	private bool _benchmarkPlayerProtectionEnabled;
 	private bool _playerSafetyActive;
 	private bool _protectAllPlayers;
 
@@ -118,9 +119,6 @@ public sealed class VoxelManager : Component
 
 	[Property, Group( "Collision" ), Range( 1, MaximumConcurrentCollisionBuilds )]
 	public int CollisionBuildConcurrency { get; set; } = 2;
-
-	[Property, Group( "Collision" )]
-	public bool ProtectPlayersDuringTerrainWork { get; set; } = true;
 
 	[Property, Group( "Diagnostics" )]
 	public bool LogGeneration { get; set; }
@@ -540,7 +538,7 @@ public sealed class VoxelManager : Component
 
 	private void ActivatePlayerSafety()
 	{
-		if ( !ProtectPlayersDuringTerrainWork )
+		if ( !_benchmarkPlayerProtectionEnabled )
 		{
 			_playerSafetyActive = false;
 			_protectAllPlayers = false;
@@ -555,9 +553,23 @@ public sealed class VoxelManager : Component
 		RepositionPlayersAtOrigin();
 	}
 
+	internal void SetBenchmarkPlayerProtection( bool active )
+	{
+		_benchmarkPlayerProtectionEnabled = active;
+		if ( active )
+		{
+			ActivatePlayerSafety();
+			return;
+		}
+
+		_playerSafetyActive = false;
+		_protectAllPlayers = false;
+		_protectedPlayerIds.Clear();
+	}
+
 	private void ActivatePlayerSafetyForEdit( List<Vector3Int> changedChunks )
 	{
-		if ( !ProtectPlayersDuringTerrainWork || changedChunks.Count == 0 ) return;
+		if ( !_benchmarkPlayerProtectionEnabled || changedChunks.Count == 0 ) return;
 		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
 		{
 			if ( !CanControlPlayer( controller ) ) continue;
@@ -580,7 +592,7 @@ public sealed class VoxelManager : Component
 	{
 		if ( !_playerSafetyActive ) return;
 		CountCall( ref _callPlayerSafetyUpdates );
-		if ( !ProtectPlayersDuringTerrainWork || IsTerrainSettled )
+		if ( !_benchmarkPlayerProtectionEnabled || IsTerrainSettled )
 		{
 			_playerSafetyActive = false;
 			_protectAllPlayers = false;

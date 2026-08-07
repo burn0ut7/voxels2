@@ -107,12 +107,14 @@ public sealed class VoxelTerrainBenchmark : Component
 	protected override void OnDisabled()
 	{
 		RestoreCallCountSetting();
+		RestorePlayerProtectionSetting();
 		DestroyPlayerSafetyFixture();
 	}
 
 	protected override void OnDestroy()
 	{
 		RestoreCallCountSetting();
+		RestorePlayerProtectionSetting();
 		DestroyPlayerSafetyFixture();
 	}
 
@@ -235,6 +237,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			_reproductionTargets = null;
 		}
 		_manager.CaptureCallCounts = true;
+		_manager.SetBenchmarkPlayerProtection( true );
 		_results.Clear();
 		_comparisons.Clear();
 		_runId = System.DateTime.UtcNow.ToString( "yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture );
@@ -571,6 +574,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		WriteReports( reason );
 		_phase = BenchmarkPhase.Failed;
 		RestoreCallCountSetting();
+		RestorePlayerProtectionSetting();
 	}
 
 	private bool WriteReports( string failure = null )
@@ -588,12 +592,14 @@ public sealed class VoxelTerrainBenchmark : Component
 			Log.Info( $"Voxel terrain benchmark report: {LastReportPath}" );
 			Log.Info( $"Voxel terrain benchmark dashboard: {FileSystem.Data.GetFullPath( DashboardPath )}" );
 			RestoreCallCountSetting();
+			RestorePlayerProtectionSetting();
 			return failure is null && _results.All( result => result.Passed );
 		}
 		catch ( System.Exception exception )
 		{
 			Log.Error( $"Voxel terrain benchmark could not write reports: {exception.Message}" );
 			RestoreCallCountSetting();
+			RestorePlayerProtectionSetting();
 			return false;
 		}
 	}
@@ -622,6 +628,11 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		if ( !_callCountSettingCaptured || _manager is null ) return;
 		_manager.CaptureCallCounts = _originalCaptureCallCounts;
+	}
+
+	private void RestorePlayerProtectionSetting()
+	{
+		_manager?.SetBenchmarkPlayerProtection( false );
 	}
 
 	private void AppendHistoryCsv()
