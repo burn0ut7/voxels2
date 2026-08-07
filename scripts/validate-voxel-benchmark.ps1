@@ -150,6 +150,9 @@ $dashboard = Get-Content -LiteralPath $dashboardPath -Raw
 if ( $dashboard -notmatch "label='Call frequency'" ) { Add-Failure 'Dashboard has no call-frequency graph group' }
 if ( $dashboard -notmatch "label='Change from previous'" ) { Add-Failure 'Dashboard has no percentage-change graph group' }
 if ( $dashboard -notmatch '<option value=change_max_abs_pct selected>' ) { Add-Failure 'Percentage change is not the default dashboard chart' }
+if ( $dashboard -notmatch 'Average FPS change \(%\)' ) { Add-Failure 'Dashboard does not distinguish FPS percentage change from raw FPS' }
+if ( $dashboard -notmatch 'Average FPS \(raw\)' ) { Add-Failure 'Dashboard does not label the raw FPS series' }
+if ( $dashboard -notmatch "isSignedChange=key.startsWith\('change_'\)" ) { Add-Failure 'Dashboard does not isolate signed axes to percentage-change charts' }
 if ( $dashboard -notmatch 'suite_complete' ) { Add-Failure 'Dashboard does not expose suite completeness' }
 $markdown = Get-Content -LiteralPath $latestMarkdownPath -Raw
 if ( $markdown -notmatch '## Call frequency' ) { Add-Failure 'Markdown report has no call-frequency section' }
