@@ -7,7 +7,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
 	private const int SuiteVersion = 3;
-	private static readonly string[] RequiredScenarios =
+	private static string[] RequiredScenarios => new[]
 	{
 		"cold_generation",
 		"chunk_seam_edit_coherence",
