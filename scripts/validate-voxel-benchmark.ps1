@@ -153,6 +153,7 @@ if ( $dashboard -notmatch '<option value=change_max_abs_pct selected>' ) { Add-F
 if ( $dashboard -notmatch 'Average FPS change \(%\)' ) { Add-Failure 'Dashboard does not distinguish FPS percentage change from raw FPS' }
 if ( $dashboard -notmatch 'Average FPS \(raw\)' ) { Add-Failure 'Dashboard does not label the raw FPS series' }
 if ( $dashboard -notmatch "isSignedChange=key.startsWith\('change_'\)" ) { Add-Failure 'Dashboard does not isolate signed axes to percentage-change charts' }
+if ( $dashboard -notmatch 'r\[key\]!=null' ) { Add-Failure 'Dashboard does not exclude missing historical values from charts' }
 if ( $dashboard -notmatch 'suite_complete' ) { Add-Failure 'Dashboard does not expose suite completeness' }
 $markdown = Get-Content -LiteralPath $latestMarkdownPath -Raw
 if ( $markdown -notmatch '## Call frequency' ) { Add-Failure 'Markdown report has no call-frequency section' }
