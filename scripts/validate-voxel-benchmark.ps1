@@ -147,14 +147,19 @@ if ( $csvRows.Count -gt 0 )
 }
 
 $dashboard = Get-Content -LiteralPath $dashboardPath -Raw
-if ( $dashboard -notmatch "label='Call frequency'" ) { Add-Failure 'Dashboard has no call-frequency graph group' }
-if ( $dashboard -notmatch "label='Change from previous'" ) { Add-Failure 'Dashboard has no percentage-change graph group' }
-if ( $dashboard -notmatch '<option value=change_max_abs_pct selected>' ) { Add-Failure 'Percentage change is not the default dashboard chart' }
-if ( $dashboard -notmatch 'Average FPS change \(%\)' ) { Add-Failure 'Dashboard does not distinguish FPS percentage change from raw FPS' }
-if ( $dashboard -notmatch 'Average FPS \(raw\)' ) { Add-Failure 'Dashboard does not label the raw FPS series' }
-if ( $dashboard -notmatch "isSignedChange=key.startsWith\('change_'\)" ) { Add-Failure 'Dashboard does not isolate signed axes to percentage-change charts' }
-if ( $dashboard -notmatch 'r\[key\]!=null' ) { Add-Failure 'Dashboard does not exclude missing historical values from charts' }
-if ( $dashboard -notmatch 'suite_complete' ) { Add-Failure 'Dashboard does not expose suite completeness' }
+if ( $dashboard -notmatch 'data-dashboard-version="2"' ) { Add-Failure 'Dashboard is not the version 2 diagnostics application' }
+foreach ( $surface in @('view-overview', 'view-trends', 'view-scenario', 'view-runs', 'view-glossary', 'trendMetric', 'chart', 'scenarioView', 'runsView', 'glossaryView') )
+{
+	if ( $dashboard -notmatch ('id="' + [regex]::Escape( $surface ) + '"') ) { Add-Failure "Dashboard is missing the '$surface' diagnostic surface" }
+}
+foreach ( $capability in @('What needs attention', 'Biggest movers and first occurrence', 'Machine-readable diagnosis', 'Average FPS change', 'Average FPS', 'Hottest calls and work units', 'Runs and direct comparison', 'Test and metric guide') )
+{
+	if ( $dashboard -notmatch [regex]::Escape( $capability ) ) { Add-Failure "Dashboard is missing '$capability'" }
+}
+if ( $dashboard -notmatch "metric:'change_max_abs_pct'" ) { Add-Failure 'Largest percentage change is not the default trend metric' }
+if ( $dashboard -notmatch 'r\[state\.metric\]' ) { Add-Failure 'Dashboard does not exclude missing historical values from trend charts' }
+if ( $dashboard -notmatch 'window\.voxelBenchmarkDashboard=' ) { Add-Failure 'Dashboard does not expose its structured model for automated diagnosis' }
+if ( $dashboard -notmatch 'const rows=\[\{' ) { Add-Failure 'Dashboard contains no embedded historical corpus rows' }
 $markdown = Get-Content -LiteralPath $latestMarkdownPath -Raw
 if ( $markdown -notmatch '## Call frequency' ) { Add-Failure 'Markdown report has no call-frequency section' }
 if ( $markdown -notmatch '## Percentage change and outliers' ) { Add-Failure 'Markdown report has no percentage-change section' }
