@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 $requiredScenarios = @(
 	'cold_generation',
+	'chunk_seam_edit_coherence',
 	'varied_edits',
 	'bulk_edit',
 	'sustained_world_sweep_and_depth_dig_20hz',
@@ -19,6 +20,7 @@ $requiredMetrics = @(
 	'stutter_events', 'gpu_p95_ms', 'edit_call_p95_ms', 'post_edit_settle_ms', 'update_max_ms',
 	'render_max_ms', 'physics_max_ms', 'allocated_bytes', 'gc_pause_ms', 'peak_memory_bytes',
 	'draw_calls_avg', 'triangles_rendered_avg', 'authoritative_sdf_bytes', 'visual_triangles', 'collision_triangles', 'player_safety_active',
+	'visual_coherence_violation_frames',
 	'worker_mesh_ms', 'upload_ms'
 )
 $requiredCallMetrics = @(
@@ -73,7 +75,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 2 ) { Add-Failure "Expected suite version 2, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 3 ) { Add-Failure "Expected suite version 3, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id') )
 {
@@ -109,6 +111,7 @@ foreach ( $scenario in $scenarios )
 	$context = "Scenario '$($scenario.scenario)'"
 	if ( $scenario.passed -ne $true ) { Add-Failure "$context failed" }
 	if ( [int]$scenario.frames -le 0 ) { Add-Failure "$context recorded no frames" }
+	if ( [int]$scenario.visual_coherence_violation_frames -ne 0 ) { Add-Failure "$context published a partial visual edit" }
 	if ( $scenario.player_safety_active -ne $false ) { Add-Failure "$context completed while player safety was still active" }
 	if ( [long]$scenario.calls_safety_players_repositioned -le 0 ) { Add-Failure "$context did not exercise player repositioning" }
 	foreach ( $metric in $requiredMetrics + $requiredCallMetrics + $requiredComparisonMetrics )

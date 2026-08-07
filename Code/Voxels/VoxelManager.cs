@@ -22,6 +22,7 @@ public sealed class VoxelManager : Component
 	private readonly Dictionary<Vector3Int, CpuChunkRuntime> _cpuChunkStates = new();
 	private readonly Queue<Vector3Int> _cpuChunkBuildQueue = new();
 	private readonly HashSet<Vector3Int> _cpuQueuedChunks = new();
+	private readonly List<HashSet<Vector3Int>> _coherentVisualEditBatches = new();
 	private readonly HashSet<System.Guid> _protectedPlayerIds = new();
 	private readonly List<double> _cpuBatchFrameMilliseconds = new( 4096 );
 	private readonly List<System.Threading.Tasks.Task<WorldGenerationWorkerResult>> _worldGenerationTasks = new();
@@ -139,6 +140,27 @@ public sealed class VoxelManager : Component
 		(Application.IsDedicatedServer || _cpuChunkStates.Count == LoadedChunkCount) &&
 		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
 		!_worldGenerationPending && !_cpuBatchSummaryPending;
+	public bool HasPartialVisualEditPublication
+	{
+		get
+		{
+			var hasPublishedChunk = false;
+			var hasPendingChunk = false;
+			foreach ( var batch in _coherentVisualEditBatches )
+			{
+				foreach ( var coordinate in batch )
+				{
+					if ( !_cpuChunkStates.TryGetValue( coordinate, out var state ) ) continue;
+					hasPublishedChunk |= state.CompletedGeneration >= state.DesiredGeneration;
+					hasPendingChunk |= state.CompletedGeneration < state.DesiredGeneration;
+				}
+				if ( hasPublishedChunk && hasPendingChunk ) return true;
+				hasPublishedChunk = false;
+				hasPendingChunk = false;
+			}
+			return false;
+		}
+	}
 
 	protected override void OnValidate()
 	{
@@ -726,6 +748,7 @@ public sealed class VoxelManager : Component
 			}
 			MarkCollisionDirty( coordinate );
 		}
+		MergeCoherentVisualEditBatch( changedChunks );
 		ActivatePlayerSafetyForEdit( changedChunks );
 
 		PumpCpuChunkBuildQueue();
@@ -1373,6 +1396,7 @@ public sealed class VoxelManager : Component
 	private void MarkCpuChunkDirty( CpuChunkRuntime state )
 	{
 		state.DesiredGeneration++;
+		state.ReadyResult = null;
 		state.Failed = false;
 		if ( !_cpuBatchSummaryPending )
 		{
@@ -1384,9 +1408,28 @@ public sealed class VoxelManager : Component
 		QueueCpuChunkBuild( state );
 	}
 
+	private void MergeCoherentVisualEditBatch( List<Vector3Int> changedChunks )
+	{
+		var mergedBatch = new HashSet<Vector3Int>();
+		foreach ( var coordinate in changedChunks )
+		{
+			if ( _cpuChunkStates.ContainsKey( coordinate ) ) mergedBatch.Add( coordinate );
+		}
+		if ( mergedBatch.Count == 0 ) return;
+
+		for ( var index = _coherentVisualEditBatches.Count - 1; index >= 0; index-- )
+		{
+			var existingBatch = _coherentVisualEditBatches[index];
+			if ( !existingBatch.Overlaps( mergedBatch ) ) continue;
+			mergedBatch.UnionWith( existingBatch );
+			_coherentVisualEditBatches.RemoveAt( index );
+		}
+		_coherentVisualEditBatches.Add( mergedBatch );
+	}
+
 	private void QueueCpuChunkBuild( CpuChunkRuntime state )
 	{
-		if ( state.Task is not null || state.CompletedGeneration >= state.DesiredGeneration || !_cpuQueuedChunks.Add( state.Coordinate ) ) return;
+		if ( state.Task is not null || state.ReadyResult.HasValue || state.CompletedGeneration >= state.DesiredGeneration || !_cpuQueuedChunks.Add( state.Coordinate ) ) return;
 		_cpuChunkBuildQueue.Enqueue( state.Coordinate );
 		CountCall( ref _callVisualBuildsQueued );
 	}
@@ -1442,11 +1485,8 @@ public sealed class VoxelManager : Component
 			_cpuBatchFrameMilliseconds.Add( Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0 );
 		}
 		var mainThreadStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		var uploadsRemaining = CpuMeshUploadsPerFrame;
 		foreach ( var state in _cpuChunkStates.Values )
 		{
-			if ( uploadsRemaining <= 0 ) break;
-			if ( uploadsRemaining < CpuMeshUploadsPerFrame && System.Diagnostics.Stopwatch.GetElapsedTime( mainThreadStart ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
 			if ( state.Task is null || !state.Task.IsCompleted ) continue;
 			var task = state.Task;
 			state.Task = null;
@@ -1469,11 +1509,64 @@ public sealed class VoxelManager : Component
 				QueueCpuChunkBuild( state );
 				continue;
 			}
-			UploadCpuChunkMesh( state, result );
-			uploadsRemaining--;
+			state.ReadyResult = result;
 		}
+		var coherentUploads = UploadCoherentVisualEditBatches( mainThreadStart );
+		UploadReadyCpuChunkMeshes( mainThreadStart, System.Math.Max( 0, CpuMeshUploadsPerFrame - coherentUploads ) );
 		PumpCpuChunkBuildQueue();
 		TryLogCpuBatchSummary();
+	}
+
+	private int UploadCoherentVisualEditBatches( long mainThreadStart )
+	{
+		var uploads = 0;
+		for ( var batchIndex = _coherentVisualEditBatches.Count - 1; batchIndex >= 0; batchIndex-- )
+		{
+			var batch = _coherentVisualEditBatches[batchIndex];
+			var ready = true;
+			foreach ( var coordinate in batch )
+			{
+				if ( _cpuChunkStates.TryGetValue( coordinate, out var state ) &&
+					state.ReadyResult.HasValue && state.ReadyResult.Value.Generation == state.DesiredGeneration ) continue;
+				ready = false;
+				break;
+			}
+			if ( !ready ) continue;
+			if ( uploads > 0 && (uploads + batch.Count > CpuMeshUploadsPerFrame ||
+				System.Diagnostics.Stopwatch.GetElapsedTime( mainThreadStart ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds) ) continue;
+
+			foreach ( var coordinate in batch )
+			{
+				var state = _cpuChunkStates[coordinate];
+				UploadCpuChunkMesh( state, state.ReadyResult.Value );
+				state.ReadyResult = null;
+				uploads++;
+			}
+			_coherentVisualEditBatches.RemoveAt( batchIndex );
+		}
+		return uploads;
+	}
+
+	private void UploadReadyCpuChunkMeshes( long mainThreadStart, int uploadsRemaining )
+	{
+		foreach ( var state in _cpuChunkStates.Values )
+		{
+			if ( uploadsRemaining <= 0 ) break;
+			if ( uploadsRemaining < CpuMeshUploadsPerFrame && System.Diagnostics.Stopwatch.GetElapsedTime( mainThreadStart ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
+			if ( IsInCoherentVisualEditBatch( state.Coordinate ) || !state.ReadyResult.HasValue ) continue;
+			UploadCpuChunkMesh( state, state.ReadyResult.Value );
+			state.ReadyResult = null;
+			uploadsRemaining--;
+		}
+	}
+
+	private bool IsInCoherentVisualEditBatch( Vector3Int coordinate )
+	{
+		foreach ( var batch in _coherentVisualEditBatches )
+		{
+			if ( batch.Contains( coordinate ) ) return true;
+		}
+		return false;
 	}
 
 	private void UploadCpuChunkMesh( CpuChunkRuntime state, CpuBuildResult result )
@@ -1616,6 +1709,7 @@ public sealed class VoxelManager : Component
 		_cpuChunkStates.Clear();
 		_cpuChunkBuildQueue.Clear();
 		_cpuQueuedChunks.Clear();
+		_coherentVisualEditBatches.Clear();
 		_cpuBatchFrameMilliseconds.Clear();
 		_cpuBatchSummaryPending = false;
 	}
@@ -1628,6 +1722,7 @@ public sealed class VoxelManager : Component
 		public ModelRenderer Renderer { get; set; }
 		public Mesh Mesh { get; set; }
 		public System.Threading.Tasks.Task<CpuBuildResult> Task { get; set; }
+		public CpuBuildResult? ReadyResult { get; set; }
 		public int DesiredGeneration { get; set; }
 		public int TaskGeneration { get; set; }
 		public int CompletedGeneration { get; set; }
