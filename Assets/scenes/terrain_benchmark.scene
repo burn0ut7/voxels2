@@ -129,6 +129,7 @@
           "__guid": "199f466a-ffb2-421d-b84e-bd11b0f50b7e",
           "__enabled": true,
           "Flags": 0,
+          "MajorOutlierThresholdPercent": 20,
           "Revision": "dfc6358+working-tree",
           "RunOnStart": true,
           "ScenarioTimeoutSeconds": 90,

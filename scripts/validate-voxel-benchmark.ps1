@@ -30,6 +30,14 @@ $requiredCallMetrics = @(
 	'calls_collision_builds_started', 'calls_collision_snapshot_samples_copied', 'calls_collision_builds_completed',
 	'calls_collision_uploads', 'calls_safety_activations', 'calls_safety_update_calls', 'calls_safety_players_repositioned'
 )
+$requiredComparisonMetrics = @(
+	'configuration_id', 'comparison_baseline_run_id', 'comparison_has_baseline', 'change_max_abs_pct',
+	'outlier_detected', 'outlier_metrics', 'reproduction_of_run_id', 'reproduction_status',
+	'change_avg_fps_pct', 'change_one_percent_low_fps_pct', 'change_frame_p95_ms_pct',
+	'change_frame_max_ms_pct', 'change_gpu_p95_ms_pct', 'change_edit_call_p95_ms_pct',
+	'change_post_edit_settle_ms_pct', 'change_allocated_bytes_pct', 'change_visual_batch_ms_pct',
+	'change_worker_mesh_ms_pct', 'change_upload_ms_pct'
+)
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure( [string] $Message )
@@ -67,6 +75,10 @@ if ( $failures.Count -gt 0 )
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
 if ( $report.suite_version -ne 2 ) { Add-Failure "Expected suite version 2, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
+foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id') )
+{
+	Test-RequiredProperty $report $property 'Latest report'
+}
 $headRevision = (& git -C $ProjectRoot rev-parse HEAD).Trim()
 if ( $LASTEXITCODE -ne 0 ) { throw "Could not resolve Git HEAD for '$ProjectRoot'" }
 $workingChanges = @(& git -C $ProjectRoot status --porcelain)
@@ -99,10 +111,11 @@ foreach ( $scenario in $scenarios )
 	if ( [int]$scenario.frames -le 0 ) { Add-Failure "$context recorded no frames" }
 	if ( $scenario.player_safety_active -ne $false ) { Add-Failure "$context completed while player safety was still active" }
 	if ( [long]$scenario.calls_safety_players_repositioned -le 0 ) { Add-Failure "$context did not exercise player repositioning" }
-	foreach ( $metric in $requiredMetrics + $requiredCallMetrics )
+	foreach ( $metric in $requiredMetrics + $requiredCallMetrics + $requiredComparisonMetrics )
 	{
 		Test-RequiredProperty $scenario $metric $context
 	}
+	if ( [string]$scenario.reproduction_status -eq 'scheduled' ) { Add-Failure "$context is still awaiting its required reproduction run" }
 }
 
 $historyRows = @(
@@ -124,7 +137,7 @@ if ( $latestCsvRows.Count -ne $requiredScenarios.Count )
 }
 if ( $csvRows.Count -gt 0 )
 {
-	foreach ( $column in @('suite_version', 'suite_complete') + $requiredMetrics + $requiredCallMetrics )
+	foreach ( $column in @('suite_version', 'suite_complete') + $requiredMetrics + $requiredCallMetrics + $requiredComparisonMetrics )
 	{
 		Test-RequiredProperty $csvRows[-1] $column 'CSV'
 	}
@@ -132,9 +145,12 @@ if ( $csvRows.Count -gt 0 )
 
 $dashboard = Get-Content -LiteralPath $dashboardPath -Raw
 if ( $dashboard -notmatch "label='Call frequency'" ) { Add-Failure 'Dashboard has no call-frequency graph group' }
+if ( $dashboard -notmatch "label='Change from previous'" ) { Add-Failure 'Dashboard has no percentage-change graph group' }
+if ( $dashboard -notmatch '<option value=change_max_abs_pct selected>' ) { Add-Failure 'Percentage change is not the default dashboard chart' }
 if ( $dashboard -notmatch 'suite_complete' ) { Add-Failure 'Dashboard does not expose suite completeness' }
 $markdown = Get-Content -LiteralPath $latestMarkdownPath -Raw
 if ( $markdown -notmatch '## Call frequency' ) { Add-Failure 'Markdown report has no call-frequency section' }
+if ( $markdown -notmatch '## Percentage change and outliers' ) { Add-Failure 'Markdown report has no percentage-change section' }
 if ( $markdown -notmatch 'completeness: \*\*COMPLETE\*\*' ) { Add-Failure 'Markdown report is not marked complete' }
 
 if ( $failures.Count -gt 0 )
