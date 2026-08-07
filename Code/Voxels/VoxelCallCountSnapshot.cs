@@ -23,7 +23,10 @@ public readonly record struct VoxelCallCountSnapshot(
 	long CollisionBuildsStarted,
 	long CollisionSnapshotSamplesCopied,
 	long CollisionBuildsCompleted,
-	long CollisionUploads
+	long CollisionUploads,
+	long PlayerSafetyActivations,
+	long PlayerSafetyUpdates,
+	long PlayersRepositioned
 )
 {
 	public VoxelCallCountSnapshot Subtract( VoxelCallCountSnapshot baseline )
@@ -51,7 +54,10 @@ public readonly record struct VoxelCallCountSnapshot(
 			System.Math.Max( 0, CollisionBuildsStarted - baseline.CollisionBuildsStarted ),
 			System.Math.Max( 0, CollisionSnapshotSamplesCopied - baseline.CollisionSnapshotSamplesCopied ),
 			System.Math.Max( 0, CollisionBuildsCompleted - baseline.CollisionBuildsCompleted ),
-			System.Math.Max( 0, CollisionUploads - baseline.CollisionUploads )
+			System.Math.Max( 0, CollisionUploads - baseline.CollisionUploads ),
+			System.Math.Max( 0, PlayerSafetyActivations - baseline.PlayerSafetyActivations ),
+			System.Math.Max( 0, PlayerSafetyUpdates - baseline.PlayerSafetyUpdates ),
+			System.Math.Max( 0, PlayersRepositioned - baseline.PlayersRepositioned )
 		);
 	}
 
@@ -80,5 +86,8 @@ public readonly record struct VoxelCallCountSnapshot(
 		yield return new( "collision.snapshot_samples_copied", CollisionSnapshotSamplesCopied );
 		yield return new( "collision.builds_completed", CollisionBuildsCompleted );
 		yield return new( "collision.uploads", CollisionUploads );
+		yield return new( "safety.activations", PlayerSafetyActivations );
+		yield return new( "safety.update_calls", PlayerSafetyUpdates );
+		yield return new( "safety.players_repositioned", PlayersRepositioned );
 	}
 }

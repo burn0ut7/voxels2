@@ -6,7 +6,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 1;
+	private const int SuiteVersion = 2;
 	private static readonly string[] RequiredScenarios =
 	{
 		"cold_generation",
@@ -30,6 +30,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private BenchmarkPhase _phaseAfterReset;
 	private bool _originalCaptureCallCounts;
 	private bool _callCountSettingCaptured;
+	private GameObject _playerSafetyFixture;
 
 	[Property, Group( "Run" )]
 	public bool RunOnStart { get; set; } = true;
@@ -70,6 +71,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			return;
 		}
 
+		EnsurePlayerSafetyFixture();
 		_originalCaptureCallCounts = _manager.CaptureCallCounts;
 		_callCountSettingCaptured = true;
 		BuildVariedEditFixture();
@@ -79,9 +81,35 @@ public sealed class VoxelTerrainBenchmark : Component
 		}
 	}
 
-	protected override void OnDisabled() => RestoreCallCountSetting();
+	protected override void OnDisabled()
+	{
+		RestoreCallCountSetting();
+		DestroyPlayerSafetyFixture();
+	}
 
-	protected override void OnDestroy() => RestoreCallCountSetting();
+	protected override void OnDestroy()
+	{
+		RestoreCallCountSetting();
+		DestroyPlayerSafetyFixture();
+	}
+
+	private void EnsurePlayerSafetyFixture()
+	{
+		if ( Scene.GetAllComponents<PlayerController>().Any() ) return;
+		_playerSafetyFixture = new GameObject( true, "Voxel Benchmark Player Safety Fixture" );
+		_playerSafetyFixture.WorldPosition = Vector3.Zero;
+		var body = _playerSafetyFixture.AddComponent<Rigidbody>();
+		body.Gravity = true;
+		body.MotionEnabled = true;
+		_playerSafetyFixture.AddComponent<PlayerController>();
+	}
+
+	private void DestroyPlayerSafetyFixture()
+	{
+		if ( _playerSafetyFixture is null ) return;
+		_playerSafetyFixture.Destroy();
+		_playerSafetyFixture = null;
+	}
 
 	protected override void OnUpdate()
 	{
@@ -415,7 +443,7 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void AppendHistoryCsv()
 	{
-		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms," +
+		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms," +
 			string.Join( ",", default(VoxelCallCountSnapshot).Enumerate().Select( entry => CallCountKey( entry.Name ) ) );
 		var builder = new System.Text.StringBuilder();
 		if ( FileSystem.Data.FileExists( HistoryCsvPath ) )
@@ -519,12 +547,12 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine();
 		builder.AppendLine( "## Pipeline detail" );
 		builder.AppendLine();
-		builder.AppendLine( "| Scenario | Generation | Visual batch | Snapshot wait | Snapshot copy | Worker mesh | Main upload | Collision triangles |" );
-		builder.AppendLine( "|---|---:|---:|---:|---:|---:|---:|---:|" );
+		builder.AppendLine( "| Scenario | Generation | Visual batch | Snapshot wait | Snapshot copy | Worker mesh | Main upload | Collision triangles | Safety released |" );
+		builder.AppendLine( "|---|---:|---:|---:|---:|---:|---:|---:|---:|" );
 		foreach ( var result in _results )
 		{
 			var diagnostics = result.Diagnostics;
-			builder.AppendLine( $"| {result.Name} | {diagnostics.GenerationElapsedMilliseconds:F2} ms | {diagnostics.VisualBatchElapsedMilliseconds:F2} ms | {diagnostics.SnapshotWaitMilliseconds:F2} ms | {diagnostics.SnapshotCopyMilliseconds:F2} ms | {diagnostics.WorkerMeshMilliseconds:F2} ms | {diagnostics.MainThreadUploadMilliseconds:F2} ms | {diagnostics.CollisionTriangles:N0} |" );
+			builder.AppendLine( $"| {result.Name} | {diagnostics.GenerationElapsedMilliseconds:F2} ms | {diagnostics.VisualBatchElapsedMilliseconds:F2} ms | {diagnostics.SnapshotWaitMilliseconds:F2} ms | {diagnostics.SnapshotCopyMilliseconds:F2} ms | {diagnostics.WorkerMeshMilliseconds:F2} ms | {diagnostics.MainThreadUploadMilliseconds:F2} ms | {diagnostics.CollisionTriangles:N0} | {(!diagnostics.PlayerSafetyActive ? "yes" : "no")} |" );
 		}
 		builder.AppendLine();
 		builder.AppendLine( "## Call frequency" );
@@ -576,7 +604,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		var callCountOptions = string.Join( string.Empty, default(VoxelCallCountSnapshot).Enumerate().Select( entry => $"<option value={CallCountKey( entry.Name )}>{entry.Name}</option>" ) );
 		return "<!doctype html><html><head><meta charset=\"utf-8\"><title>Voxel Terrain Benchmark</title><style>" +
 			"body{font:14px system-ui;background:#10151d;color:#e8eef7;margin:0;padding:28px}h1{margin-top:0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card,section{background:#182231;border:1px solid #2a3a50;border-radius:9px;padding:16px;margin:14px 0}.value{font-size:24px;font-weight:700;color:#82d8a7}select{background:#10151d;color:#fff;padding:7px;border:1px solid #526780}canvas{width:100%;height:380px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:7px;border-bottom:1px solid #2a3a50;text-align:right}th:first-child,td:first-child{text-align:left}.muted{color:#9fb0c5}</style></head><body>" +
-			"<h1>Voxel Terrain Benchmark</h1><p class=muted>Commit-tagged terrain generation, editing, frame pacing, memory, cache, network, and call-frequency history.</p><div id=cards class=cards></div><section><label>Metric <select id=metric><optgroup label='Frame rate and pacing'><option value=avg_fps>Average FPS</option><option value=one_percent_low_fps>1% low FPS</option><option value=point_one_percent_low_fps>0.1% low FPS</option><option value=min_fps>Minimum FPS</option><option value=frame_p95_ms>Frame p95 (ms)</option><option value=frame_p99_ms>Frame p99 (ms)</option><option value=frame_max_ms>Worst frame (ms)</option><option value=frame_stddev_ms>Frame deviation (ms)</option><option value=stutter_events>Stutter events</option><option value=frames_over_16ms>Frames over 16 ms</option><option value=frames_over_33ms>Frames over 33 ms</option><option value=frames_over_50ms>Frames over 50 ms</option></optgroup><optgroup label='Latency and pipeline'><option value=gpu_p95_ms>GPU p95 (ms)</option><option value=edit_call_p95_ms>Brush-call p95 (ms)</option><option value=edit_call_max_ms>Brush-call max (ms)</option><option value=post_edit_settle_ms>Post-edit settle (ms)</option><option value=edit_throughput_per_second>Edit throughput</option><option value=elapsed_ms>Scenario elapsed (ms)</option><option value=update_max_ms>Update max (ms)</option><option value=render_max_ms>Render max (ms)</option><option value=physics_max_ms>Physics max (ms)</option><option value=worker_mesh_ms>Worker mesh total (ms)</option><option value=visual_batch_ms>Visual batch (ms)</option><option value=snapshot_copy_ms>Snapshot copy (ms)</option><option value=upload_ms>Main upload (ms)</option></optgroup><optgroup label='Memory and cache'><option value=allocated_bytes>Managed allocated bytes</option><option value=gc_pause_ms>GC pause (ms)</option><option value=peak_memory_bytes>Peak process memory</option><option value=authoritative_sdf_bytes>Authoritative SDF bytes</option><option value=texture_pool_peak_bytes>Texture pool peak</option><option value=texture_pool_non_evictable_peak_bytes>Texture pool non-evictable</option><option value=pending_streaming_requests_max>Pending asset streams</option></optgroup><optgroup label='Networking'><option value=network_avg_ms>Network CPU average (ms)</option><option value=network_max_ms>Network CPU max (ms)</option><option value=network_out_bytes_per_second>Network outbound B/s</option><option value=network_in_bytes_per_second>Network inbound B/s</option><option value=network_ping_ms>Network ping (ms)</option><option value=maximum_connections>Connections</option><option value=messages_sent>Messages sent</option><option value=messages_received>Messages received</option></optgroup><optgroup label='Terrain and rendering'><option value=changed_chunk_events>Changed chunk events</option><option value=visual_batch_built_chunks>Rebuilt chunks</option><option value=draw_calls_avg>Average draw calls</option><option value=objects_rendered_avg>Objects rendered</option><option value=triangles_rendered_avg>Triangles rendered</option><option value=visual_vertices>Visual vertices</option><option value=visual_triangles>Visual triangles</option><option value=collision_triangles>Collision triangles</option></optgroup><optgroup label='Call frequency'>" + callCountOptions + "</optgroup></select></label><canvas id=chart width=1400 height=380></canvas></section><section><h2>All measurements</h2><div style=overflow:auto><table id=table></table></div></section><script>" +
+			"<h1>Voxel Terrain Benchmark</h1><p class=muted>Commit-tagged terrain generation, editing, frame pacing, memory, cache, network, and call-frequency history.</p><div id=cards class=cards></div><section><label>Metric <select id=metric><optgroup label='Frame rate and pacing'><option value=avg_fps>Average FPS</option><option value=one_percent_low_fps>1% low FPS</option><option value=point_one_percent_low_fps>0.1% low FPS</option><option value=min_fps>Minimum FPS</option><option value=frame_p95_ms>Frame p95 (ms)</option><option value=frame_p99_ms>Frame p99 (ms)</option><option value=frame_max_ms>Worst frame (ms)</option><option value=frame_stddev_ms>Frame deviation (ms)</option><option value=stutter_events>Stutter events</option><option value=frames_over_16ms>Frames over 16 ms</option><option value=frames_over_33ms>Frames over 33 ms</option><option value=frames_over_50ms>Frames over 50 ms</option></optgroup><optgroup label='Latency and pipeline'><option value=gpu_p95_ms>GPU p95 (ms)</option><option value=edit_call_p95_ms>Brush-call p95 (ms)</option><option value=edit_call_max_ms>Brush-call max (ms)</option><option value=post_edit_settle_ms>Post-edit settle (ms)</option><option value=edit_throughput_per_second>Edit throughput</option><option value=elapsed_ms>Scenario elapsed (ms)</option><option value=update_max_ms>Update max (ms)</option><option value=render_max_ms>Render max (ms)</option><option value=physics_max_ms>Physics max (ms)</option><option value=worker_mesh_ms>Worker mesh total (ms)</option><option value=visual_batch_ms>Visual batch (ms)</option><option value=snapshot_copy_ms>Snapshot copy (ms)</option><option value=upload_ms>Main upload (ms)</option></optgroup><optgroup label='Memory and cache'><option value=allocated_bytes>Managed allocated bytes</option><option value=gc_pause_ms>GC pause (ms)</option><option value=peak_memory_bytes>Peak process memory</option><option value=authoritative_sdf_bytes>Authoritative SDF bytes</option><option value=texture_pool_peak_bytes>Texture pool peak</option><option value=texture_pool_non_evictable_peak_bytes>Texture pool non-evictable</option><option value=pending_streaming_requests_max>Pending asset streams</option></optgroup><optgroup label='Networking'><option value=network_avg_ms>Network CPU average (ms)</option><option value=network_max_ms>Network CPU max (ms)</option><option value=network_out_bytes_per_second>Network outbound B/s</option><option value=network_in_bytes_per_second>Network inbound B/s</option><option value=network_ping_ms>Network ping (ms)</option><option value=maximum_connections>Connections</option><option value=messages_sent>Messages sent</option><option value=messages_received>Messages received</option></optgroup><optgroup label='Terrain and rendering'><option value=changed_chunk_events>Changed chunk events</option><option value=visual_batch_built_chunks>Rebuilt chunks</option><option value=draw_calls_avg>Average draw calls</option><option value=objects_rendered_avg>Objects rendered</option><option value=triangles_rendered_avg>Triangles rendered</option><option value=visual_vertices>Visual vertices</option><option value=visual_triangles>Visual triangles</option><option value=collision_triangles>Collision triangles</option><option value=player_safety_active>Player safety active at completion</option></optgroup><optgroup label='Call frequency'>" + callCountOptions + "</optgroup></select></label><canvas id=chart width=1400 height=380></canvas></section><section><h2>All measurements</h2><div style=overflow:auto><table id=table></table></div></section><script>" +
 			$"const rows=[{rows}];" +
 			"const latest=rows.length?rows[rows.length-1]:null;const runs=[...new Set(rows.map(r=>r.run_id))];const lr=latest?rows.filter(r=>r.run_id===latest.run_id):[];document.getElementById('cards').innerHTML=latest?[['Latest run',latest.run_id],['Revision',latest.revision],['Suite','v'+(latest.suite_version??'legacy')],['Complete',latest.suite_complete===true?'YES':'NO'],['Scenarios',lr.length],['Lowest 1% FPS',Math.min(...lr.map(r=>r.one_percent_low_fps||0)).toFixed(1)],['Worst p95',Math.max(...lr.map(r=>r.frame_p95_ms)).toFixed(2)+' ms'],['Worst hitch',Math.max(...lr.map(r=>r.frame_max_ms)).toFixed(2)+' ms'],['Stutters',lr.reduce((n,r)=>n+(r.stutter_events||0),0)]].map(x=>`<div class=card><div class=muted>${x[0]}</div><div class=value>${x[1]}</div></div>`).join(''):'';" +
 			"const colors=['#82d8a7','#72a7ff','#ffc46b','#df86ff','#ff7f86','#73d9dc'];function draw(){const key=document.getElementById('metric').value,c=document.getElementById('chart'),x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);const available=rows.filter(r=>r[key]!==undefined&&Number.isFinite(Number(r[key]))),pad=55,w=c.width-pad*2,h=c.height-pad*2,max=Math.max(1,...available.map(r=>Number(r[key])));x.strokeStyle='#40516a';x.beginPath();x.moveTo(pad,pad);x.lineTo(pad,pad+h);x.lineTo(pad+w,pad+h);x.stroke();const scenarios=[...new Set(available.map(r=>r.scenario))];scenarios.forEach((s,si)=>{const data=available.filter(r=>r.scenario===s);x.strokeStyle=colors[si%colors.length];x.fillStyle=x.strokeStyle;x.beginPath();data.forEach((r,i)=>{const px=pad+(runs.indexOf(r.run_id)/Math.max(1,runs.length-1))*w,py=pad+h-Number(r[key])/max*h;i?x.lineTo(px,py):x.moveTo(px,py);x.fillRect(px-3,py-3,6,6)});x.stroke();x.fillText(s,pad+si*190,20)});x.fillStyle='#9fb0c5';x.fillText(max.toFixed(2),5,pad+5);x.fillText('0',35,pad+h+5);runs.forEach((r,i)=>{if(i%Math.max(1,Math.ceil(runs.length/8))===0)x.fillText(r,pad+i/Math.max(1,runs.length-1)*w-30,c.height-10)})}document.getElementById('metric').onchange=draw;draw();" +
@@ -594,7 +622,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"\"edit_call_avg_ms\":{Number( result.EditCallAverageMilliseconds )},\"edit_call_p95_ms\":{Number( result.EditCallP95Milliseconds )},\"edit_call_max_ms\":{Number( result.EditCallMaximumMilliseconds )},\"post_edit_settle_ms\":{Number( result.PostEditSettleMilliseconds )},\"edit_throughput_per_second\":{Number( result.EditThroughputPerSecond )}," +
 			$"\"update_avg_ms\":{Number( result.UpdateAverageMilliseconds )},\"update_max_ms\":{Number( result.UpdateMaximumMilliseconds )},\"render_avg_ms\":{Number( result.RenderAverageMilliseconds )},\"render_max_ms\":{Number( result.RenderMaximumMilliseconds )},\"physics_avg_ms\":{Number( result.PhysicsAverageMilliseconds )},\"physics_max_ms\":{Number( result.PhysicsMaximumMilliseconds )},\"network_avg_ms\":{Number( result.NetworkAverageMilliseconds )},\"network_max_ms\":{Number( result.NetworkMaximumMilliseconds )},\"network_out_bytes_per_second\":{Number( result.NetworkOutBytesPerSecondAverage )},\"network_in_bytes_per_second\":{Number( result.NetworkInBytesPerSecondAverage )},\"network_ping_ms\":{Number( result.NetworkPingMillisecondsAverage )},\"maximum_connections\":{result.MaximumConnections},\"messages_sent\":{result.MessagesSent},\"messages_received\":{result.MessagesReceived}," +
 			$"\"texture_pool_peak_bytes\":{result.PeakTexturePoolUsedBytes},\"texture_pool_non_evictable_peak_bytes\":{result.PeakTexturePoolNonEvictableBytes},\"pending_streaming_requests_max\":{result.MaximumPendingStreamingRequests},\"draw_calls_avg\":{Number( result.DrawCallsAverage )},\"triangles_rendered_avg\":{Number( result.TrianglesRenderedAverage )},\"objects_rendered_avg\":{Number( result.ObjectsRenderedAverage )},\"material_changes_avg\":{Number( result.MaterialChangesAverage )}," +
-			$"\"loaded_chunks\":{d.LoadedChunks},\"authoritative_sdf_bytes\":{d.AuthoritativeSdfStorageBytes},\"uniform_sdf_chunks\":{d.UniformSdfChunks},\"visual_chunks\":{d.ActiveVisualChunks},\"failed_visual_chunks\":{d.FailedVisualChunks},\"visual_batch_built_chunks\":{d.VisualBatchBuiltChunks},\"visual_vertices\":{d.VisualVertices},\"visual_triangles\":{d.VisualTriangles},\"colliders\":{d.ActiveColliders},\"collision_triangles\":{d.CollisionTriangles}," +
+			$"\"loaded_chunks\":{d.LoadedChunks},\"authoritative_sdf_bytes\":{d.AuthoritativeSdfStorageBytes},\"uniform_sdf_chunks\":{d.UniformSdfChunks},\"visual_chunks\":{d.ActiveVisualChunks},\"failed_visual_chunks\":{d.FailedVisualChunks},\"visual_batch_built_chunks\":{d.VisualBatchBuiltChunks},\"visual_vertices\":{d.VisualVertices},\"visual_triangles\":{d.VisualTriangles},\"colliders\":{d.ActiveColliders},\"collision_triangles\":{d.CollisionTriangles},\"player_safety_active\":{d.PlayerSafetyActive.ToString().ToLowerInvariant()}," +
 			$"\"generation_ms\":{Number( d.GenerationElapsedMilliseconds )},\"visual_batch_ms\":{Number( d.VisualBatchElapsedMilliseconds )},\"snapshot_wait_ms\":{Number( d.SnapshotWaitMilliseconds )},\"snapshot_copy_ms\":{Number( d.SnapshotCopyMilliseconds )},\"worker_mesh_ms\":{Number( d.WorkerMeshMilliseconds )},\"upload_ms\":{Number( d.MainThreadUploadMilliseconds )}," +
 			SerializeCallCountsJson( result.CallCounts ) +
 			"}";
@@ -608,7 +636,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			Number( result.ElapsedMilliseconds ), result.FrameCount, Number( result.AverageFramesPerSecond ), Number( result.OnePercentLowFramesPerSecond ), Number( result.PointOnePercentLowFramesPerSecond ), Number( result.MinimumFramesPerSecond ), Number( result.FrameAverageMilliseconds ), Number( result.FrameStandardDeviationMilliseconds ), Number( result.FrameP50Milliseconds ), Number( result.FrameP95Milliseconds ), Number( result.FrameP99Milliseconds ), Number( result.FrameP999Milliseconds ), Number( result.FrameMaximumMilliseconds ), result.FramesOver16Milliseconds, result.FramesOver33Milliseconds, result.FramesOver50Milliseconds, result.FramesOver100Milliseconds, result.StutterEvents, result.LongestStutterFrames,
 			Number( result.GpuAverageMilliseconds ), Number( result.GpuP95Milliseconds ), Number( result.GpuMaximumMilliseconds ), Number( result.EditCallAverageMilliseconds ), Number( result.EditCallP95Milliseconds ), Number( result.EditCallMaximumMilliseconds ), Number( result.PostEditSettleMilliseconds ), Number( result.EditThroughputPerSecond ), Number( result.UpdateAverageMilliseconds ), Number( result.UpdateMaximumMilliseconds ), Number( result.RenderAverageMilliseconds ), Number( result.RenderMaximumMilliseconds ), Number( result.PhysicsAverageMilliseconds ), Number( result.PhysicsMaximumMilliseconds ), Number( result.NetworkAverageMilliseconds ), Number( result.NetworkMaximumMilliseconds ), Number( result.NetworkOutBytesPerSecondAverage ), Number( result.NetworkInBytesPerSecondAverage ), Number( result.NetworkPingMillisecondsAverage ), result.MaximumConnections, result.MessagesSent, result.MessagesReceived,
 			result.AllocatedBytes, Number( result.GcPauseMilliseconds ), result.Gen0Collections, result.Gen1Collections, result.Gen2Collections, result.Exceptions, result.PeakMemoryBytes, result.PeakTexturePoolUsedBytes, result.PeakTexturePoolNonEvictableBytes, result.MaximumPendingStreamingRequests, Number( result.DrawCallsAverage ), Number( result.TrianglesRenderedAverage ), Number( result.ObjectsRenderedAverage ), Number( result.MaterialChangesAverage ),
-			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds )
+			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, d.PlayerSafetyActive, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds )
 		) + "," + string.Join( ",", result.CallCounts.Enumerate().Select( entry => entry.Count.ToString( System.Globalization.CultureInfo.InvariantCulture ) ) );
 	}
 
@@ -807,7 +835,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			{
 				Name = Name,
 				Description = Description,
-				Passed = diagnostics.FailedVisualChunks == 0 && diagnostics.PendingVisualBuilds == 0 && diagnostics.PendingCollisionBuilds == 0 && _exceptions == 0,
+				Passed = diagnostics.FailedVisualChunks == 0 && diagnostics.PendingVisualBuilds == 0 && diagnostics.PendingCollisionBuilds == 0 && !diagnostics.PlayerSafetyActive && _exceptions == 0,
 				EditCount = EditCount,
 				ChangedChunkEvents = ChangedChunkEvents,
 				ElapsedMilliseconds = elapsedMilliseconds,

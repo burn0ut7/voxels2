@@ -18,7 +18,7 @@ $requiredMetrics = @(
 	'avg_fps', 'one_percent_low_fps', 'point_one_percent_low_fps', 'frame_p95_ms', 'frame_max_ms',
 	'stutter_events', 'gpu_p95_ms', 'edit_call_p95_ms', 'post_edit_settle_ms', 'update_max_ms',
 	'render_max_ms', 'physics_max_ms', 'allocated_bytes', 'gc_pause_ms', 'peak_memory_bytes',
-	'draw_calls_avg', 'triangles_rendered_avg', 'authoritative_sdf_bytes', 'visual_triangles', 'collision_triangles',
+	'draw_calls_avg', 'triangles_rendered_avg', 'authoritative_sdf_bytes', 'visual_triangles', 'collision_triangles', 'player_safety_active',
 	'worker_mesh_ms', 'upload_ms'
 )
 $requiredCallMetrics = @(
@@ -28,7 +28,7 @@ $requiredCallMetrics = @(
 	'calls_visual_halo_snapshots', 'calls_visual_halo_samples_copied', 'calls_visual_builds_completed', 'calls_visual_uploads',
 	'calls_collision_interest_refreshes', 'calls_collision_queue_pumps', 'calls_collision_builds_queued',
 	'calls_collision_builds_started', 'calls_collision_snapshot_samples_copied', 'calls_collision_builds_completed',
-	'calls_collision_uploads'
+	'calls_collision_uploads', 'calls_safety_activations', 'calls_safety_update_calls', 'calls_safety_players_repositioned'
 )
 $failures = [System.Collections.Generic.List[string]]::new()
 
@@ -65,7 +65,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 1 ) { Add-Failure "Expected suite version 1, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 2 ) { Add-Failure "Expected suite version 2, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 $headRevision = (& git -C $ProjectRoot rev-parse HEAD).Trim()
 if ( $LASTEXITCODE -ne 0 ) { throw "Could not resolve Git HEAD for '$ProjectRoot'" }
@@ -97,6 +97,8 @@ foreach ( $scenario in $scenarios )
 	$context = "Scenario '$($scenario.scenario)'"
 	if ( $scenario.passed -ne $true ) { Add-Failure "$context failed" }
 	if ( [int]$scenario.frames -le 0 ) { Add-Failure "$context recorded no frames" }
+	if ( $scenario.player_safety_active -ne $false ) { Add-Failure "$context completed while player safety was still active" }
+	if ( [long]$scenario.calls_safety_players_repositioned -le 0 ) { Add-Failure "$context did not exercise player repositioning" }
 	foreach ( $metric in $requiredMetrics + $requiredCallMetrics )
 	{
 		Test-RequiredProperty $scenario $metric $context

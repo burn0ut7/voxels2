@@ -22,6 +22,7 @@ public sealed class VoxelManager : Component
 	private readonly Dictionary<Vector3Int, CpuChunkRuntime> _cpuChunkStates = new();
 	private readonly Queue<Vector3Int> _cpuChunkBuildQueue = new();
 	private readonly HashSet<Vector3Int> _cpuQueuedChunks = new();
+	private readonly HashSet<System.Guid> _protectedPlayerIds = new();
 	private readonly List<double> _cpuBatchFrameMilliseconds = new( 4096 );
 	private readonly List<System.Threading.Tasks.Task<WorldGenerationWorkerResult>> _worldGenerationTasks = new();
 	private readonly List<double> _worldGenerationFrameMilliseconds = new( 512 );
@@ -76,6 +77,11 @@ public sealed class VoxelManager : Component
 	private long _callCollisionSnapshotSamplesCopied;
 	private long _callCollisionBuildsCompleted;
 	private long _callCollisionUploads;
+	private long _callPlayerSafetyActivations;
+	private long _callPlayerSafetyUpdates;
+	private long _callPlayersRepositioned;
+	private bool _playerSafetyActive;
+	private bool _protectAllPlayers;
 
 	[Property, Group( "World" ), Range( MinimumChunkSize, MaximumChunkSize )]
 	public int ChunkSize { get; set; } = 32;
@@ -113,6 +119,9 @@ public sealed class VoxelManager : Component
 	[Property, Group( "Collision" ), Range( 1, MaximumConcurrentCollisionBuilds )]
 	public int CollisionBuildConcurrency { get; set; } = 2;
 
+	[Property, Group( "Collision" )]
+	public bool ProtectPlayersDuringTerrainWork { get; set; } = true;
+
 	[Property, Group( "Diagnostics" )]
 	public bool LogGeneration { get; set; }
 
@@ -127,6 +136,7 @@ public sealed class VoxelManager : Component
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
+	public bool IsPlayerSafetyActive => _playerSafetyActive;
 	public bool IsTerrainSettled => LoadedChunkCount == ConfiguredChunkCount &&
 		(Application.IsDedicatedServer || _cpuChunkStates.Count == LoadedChunkCount) &&
 		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
@@ -157,16 +167,26 @@ public sealed class VoxelManager : Component
 	{
 		CountCall( ref _callManagerUpdates );
 		UpdateWorldGeneration();
+		UpdatePlayerSafety();
 		if ( _worldGenerationPending )
 		{
 			return;
 		}
 		UpdateCpuChunkWorld();
 		UpdateCpuCollisionWorld();
+		UpdatePlayerSafety();
+	}
+
+	protected override void OnFixedUpdate()
+	{
+		if ( _playerSafetyActive ) RepositionPlayersAtOrigin();
 	}
 
 	protected override void OnDisabled()
 	{
+		_playerSafetyActive = false;
+		_protectAllPlayers = false;
+		_protectedPlayerIds.Clear();
 		DisposeCpuVisualWorld();
 	}
 
@@ -191,6 +211,7 @@ public sealed class VoxelManager : Component
 			Log.Warning( "Voxel world generation is already running." );
 			return;
 		}
+		ActivatePlayerSafety();
 
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -474,7 +495,8 @@ public sealed class VoxelManager : Component
 			_totalSnapshotWaitMilliseconds,
 			_totalSnapshotCopyMilliseconds,
 			_totalWorkerMeshMilliseconds,
-			_totalMainThreadUploadMilliseconds
+			_totalMainThreadUploadMilliseconds,
+			_playerSafetyActive
 		);
 	}
 
@@ -503,7 +525,10 @@ public sealed class VoxelManager : Component
 			System.Threading.Interlocked.Read( ref _callCollisionBuildsStarted ),
 			System.Threading.Interlocked.Read( ref _callCollisionSnapshotSamplesCopied ),
 			System.Threading.Interlocked.Read( ref _callCollisionBuildsCompleted ),
-			System.Threading.Interlocked.Read( ref _callCollisionUploads )
+			System.Threading.Interlocked.Read( ref _callCollisionUploads ),
+			System.Threading.Interlocked.Read( ref _callPlayerSafetyActivations ),
+			System.Threading.Interlocked.Read( ref _callPlayerSafetyUpdates ),
+			System.Threading.Interlocked.Read( ref _callPlayersRepositioned )
 		);
 	}
 
@@ -511,6 +536,83 @@ public sealed class VoxelManager : Component
 	{
 		if ( !CaptureCallCounts || amount <= 0 ) return;
 		System.Threading.Interlocked.Add( ref counter, amount );
+	}
+
+	private void ActivatePlayerSafety()
+	{
+		if ( !ProtectPlayersDuringTerrainWork )
+		{
+			_playerSafetyActive = false;
+			_protectAllPlayers = false;
+			_protectedPlayerIds.Clear();
+			return;
+		}
+
+		if ( !_playerSafetyActive ) CountCall( ref _callPlayerSafetyActivations );
+		_playerSafetyActive = true;
+		_protectAllPlayers = true;
+		_protectedPlayerIds.Clear();
+		RepositionPlayersAtOrigin();
+	}
+
+	private void ActivatePlayerSafetyForEdit( List<Vector3Int> changedChunks )
+	{
+		if ( !ProtectPlayersDuringTerrainWork || changedChunks.Count == 0 ) return;
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			if ( !CanControlPlayer( controller ) ) continue;
+			var playerChunk = GetCollisionObserverChunk( controller.WorldPosition );
+			foreach ( var changedChunk in changedChunks )
+			{
+				if ( System.Math.Abs( changedChunk.x - playerChunk.x ) > 1 || System.Math.Abs( changedChunk.y - playerChunk.y ) > 1 ) continue;
+				_protectedPlayerIds.Add( controller.GameObject.Id );
+				break;
+			}
+		}
+
+		if ( _protectedPlayerIds.Count == 0 && !_protectAllPlayers ) return;
+		if ( !_playerSafetyActive ) CountCall( ref _callPlayerSafetyActivations );
+		_playerSafetyActive = true;
+		RepositionPlayersAtOrigin();
+	}
+
+	private void UpdatePlayerSafety()
+	{
+		if ( !_playerSafetyActive ) return;
+		CountCall( ref _callPlayerSafetyUpdates );
+		if ( !ProtectPlayersDuringTerrainWork || IsTerrainSettled )
+		{
+			_playerSafetyActive = false;
+			_protectAllPlayers = false;
+			_protectedPlayerIds.Clear();
+			return;
+		}
+
+		RepositionPlayersAtOrigin();
+	}
+
+	private void RepositionPlayersAtOrigin()
+	{
+		var repositioned = 0;
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			if ( !CanControlPlayer( controller ) ) continue;
+			if ( !_protectAllPlayers && !_protectedPlayerIds.Contains( controller.GameObject.Id ) ) continue;
+
+			controller.WorldPosition = Vector3.Zero;
+			if ( controller.Body is not null )
+			{
+				controller.Body.Velocity = Vector3.Zero;
+				controller.Body.AngularVelocity = Vector3.Zero;
+			}
+			repositioned++;
+		}
+		CountCall( ref _callPlayersRepositioned, repositioned );
+	}
+
+	private static bool CanControlPlayer( PlayerController controller )
+	{
+		return Application.IsDedicatedServer || !controller.GameObject.Network.Active || controller.GameObject.Network.IsOwner;
 	}
 
 	private int GetPendingVisualBuildCount()
@@ -612,6 +714,7 @@ public sealed class VoxelManager : Component
 			}
 			MarkCollisionDirty( coordinate );
 		}
+		ActivatePlayerSafetyForEdit( changedChunks );
 
 		PumpCpuChunkBuildQueue();
 

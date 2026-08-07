@@ -107,7 +107,7 @@
           "__guid": "ec7b855a-67a7-41ba-8639-c05f5c862f5d",
           "__enabled": true,
           "Flags": 0,
-		  "CaptureCallCounts": true,
+          "CaptureCallCounts": true,
           "ChunkRadius": 9,
           "ChunkSize": 32,
           "CollisionBuildConcurrency": 2,
@@ -119,6 +119,7 @@
           "CpuMeshUploadsPerFrame": 4,
           "DetailedChunkLogLimit": 0,
           "LogGeneration": false,
+          "ProtectPlayersDuringTerrainWork": true,
           "SdfClampDistance": 8,
           "TerrainMaterial": null,
           "VoxelSize": 32

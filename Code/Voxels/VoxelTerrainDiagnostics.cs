@@ -28,5 +28,6 @@ public readonly record struct VoxelTerrainDiagnostics(
 	double TotalSnapshotWaitMilliseconds,
 	double TotalSnapshotCopyMilliseconds,
 	double TotalWorkerMeshMilliseconds,
-	double TotalMainThreadUploadMilliseconds
+	double TotalMainThreadUploadMilliseconds,
+	bool PlayerSafetyActive
 );
