@@ -145,7 +145,11 @@ public sealed class VoxelTerrainBenchmark : Component
 		}
 
 		_sampler?.Sample();
-		if ( _manager?.HasPartialVisualEditPublication == true ) _sampler?.RecordVisualCoherenceViolation();
+		if ( _manager?.HasPartialVisualEditPublication == true ||
+			(_phase == BenchmarkPhase.WaitSeamEdit && _manager?.HasVisualCollisionMismatch == true) )
+		{
+			_sampler?.RecordVisualCoherenceViolation();
+		}
 		if ( !IsRunning )
 		{
 			return;
@@ -328,7 +332,7 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void BeginSeamEditScenario()
 	{
-		BeginScenario( "chunk_seam_edit_coherence", "One edit centered on a four-chunk intersection; affected visual meshes must publish together" );
+		BeginScenario( "chunk_seam_edit_coherence", "One edit centered on a four-chunk intersection; visual and collision meshes must publish together" );
 		var seam = _manager.ChunkSize * _manager.VoxelSize;
 		ApplyLocalEdit( new Vector3( seam, seam, 0.0f ), _manager.VoxelSize * 3.0f, _manager.VoxelSize * 1.5f );
 		_phase = BenchmarkPhase.WaitSeamEdit;
@@ -578,7 +582,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private ScenarioComparison GetComparison( ScenarioResult result ) =>
 		_comparisons.TryGetValue( result.Name, out var comparison ) ? comparison : new ScenarioComparison();
 
-	private string ConfigurationId => $"{_manager.ChunkRadius}:{_manager.ChunkSize}:{Number( _manager.VoxelSize )}:{_manager.CpuChunkBuildConcurrency}:{_manager.CollisionResolutionDivisor}:{SustainedEditCount}:{Number( SustainedEditIntervalSeconds )}";
+	private string ConfigurationId => $"{_manager.ChunkRadius}:{_manager.ChunkSize}:{Number( _manager.VoxelSize )}:{_manager.CpuChunkBuildConcurrency}:exact:{SustainedEditCount}:{Number( SustainedEditIntervalSeconds )}";
 
 	private void FailRun( string reason )
 	{
@@ -738,7 +742,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine( $"- CPU: `{Sandbox.Engine.SystemInfo.ProcessorName}` ({Sandbox.Engine.SystemInfo.ProcessorCount:F0} logical processors)" );
 		builder.AppendLine( $"- GPU: `{Sandbox.Engine.SystemInfo.Gpu}` ({FormatBytes( (long)Sandbox.Engine.SystemInfo.GpuMemory )})" );
 		builder.AppendLine( $"- Display: `{Screen.Width:F0}x{Screen.Height:F0}`, VSync `{vsync}`, frame cap `{frameCap}`" );
-		builder.AppendLine( $"- Configuration: `{_manager.ChunkRadius}` radius, `{_manager.ConfiguredChunkCount}` chunks, `{_manager.ChunkSize}^3` cells, `{_manager.CpuChunkBuildConcurrency}` visual workers, collision `{_manager.CollisionResolutionDivisor}:1`" );
+		builder.AppendLine( $"- Configuration: `{_manager.ChunkRadius}` radius, `{_manager.ConfiguredChunkCount}` chunks, `{_manager.ChunkSize}^3` cells, `{_manager.CpuChunkBuildConcurrency}` visual workers, collision `exact visual mesh`" );
 		builder.AppendLine( $"- Outlier rule: absolute change `>= {MajorOutlierThresholdPercent:F1}%` on stable comparison metrics triggers one complete-suite reproduction run" );
 		if ( _isReproductionRun ) builder.AppendLine( $"- Reproduction of run: `{_reproductionOfRunId}`" );
 		builder.AppendLine( $"- Worst frame p95/max: `{worstP95:F2} / {worstMax:F2} ms`" );

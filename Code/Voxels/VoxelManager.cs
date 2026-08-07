@@ -8,7 +8,6 @@ public sealed class VoxelManager : Component
 	private const int MaximumDetailedChunkLogs = 256;
 	private const int MaximumConcurrentCpuChunkBuilds = 32;
 	private const int MaximumCpuMeshUploadsPerFrame = 16;
-	private const double CollisionEditSettleSeconds = 0.20;
 	private const int MaximumCollisionChunkRadius = 16;
 	private const int MaximumCollisionBuildsPerFrame = 16;
 	private const int MaximumConcurrentCollisionBuilds = 8;
@@ -112,9 +111,6 @@ public sealed class VoxelManager : Component
 	[Property, Group( "Collision" ), Range( 1, MaximumCollisionChunkRadius )]
 	public int CollisionChunkRadius { get; set; } = 2;
 
-	[Property, Group( "Collision" ), Range( 1, 8 )]
-	public int CollisionResolutionDivisor { get; set; } = 2;
-
 	[Property, Group( "Collision" ), Range( 1, MaximumCollisionBuildsPerFrame )]
 	public int CollisionBuildsPerFrame { get; set; } = 4;
 
@@ -161,6 +157,28 @@ public sealed class VoxelManager : Component
 			return false;
 		}
 	}
+	public bool HasVisualCollisionMismatch
+	{
+		get
+		{
+			foreach ( var coordinate in _collisionDesiredChunks )
+			{
+				if ( !_cpuChunkStates.TryGetValue( coordinate, out var visualState ) ||
+					visualState.PublishedMeshData is null || visualState.CompletedGeneration < visualState.DesiredGeneration )
+				{
+					continue;
+				}
+
+				if ( !_chunkColliders.TryGetValue( coordinate, out var collisionState ) || !collisionState.Built ||
+					collisionState.CompletedGeneration != visualState.CompletedGeneration ||
+					collisionState.VertexCount != visualState.VertexCount || collisionState.TriangleCount != visualState.TriangleCount )
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+	}
 
 	protected override void OnValidate()
 	{
@@ -172,7 +190,6 @@ public sealed class VoxelManager : Component
 		CpuMeshUploadsPerFrame = System.Math.Clamp( CpuMeshUploadsPerFrame, 1, MaximumCpuMeshUploadsPerFrame );
 		CpuMainThreadBudgetMilliseconds = System.Math.Clamp( CpuMainThreadBudgetMilliseconds, 0.25f, 12.0f );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
-		CollisionResolutionDivisor = System.Math.Clamp( CollisionResolutionDivisor, 1, 8 );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
 		CollisionBuildConcurrency = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
 		DetailedChunkLogLimit = System.Math.Clamp( DetailedChunkLogLimit, 0, MaximumDetailedChunkLogs );
@@ -700,7 +717,7 @@ public sealed class VoxelManager : Component
 				meshingMilliseconds += state.MeshingTime.TotalMilliseconds;
 				uploadMilliseconds += state.UploadTime.TotalMilliseconds;
 			}
-			Log.Info( $"Voxel mesh topology: visualPath=CPU-Transvoxel-regular/worker-pool, visualChunks={active:N0}/{_cpuChunkStates.Count:N0}, failed={failed:N0}, vertices={vertices:N0}, triangles={triangles:N0}, snapshotWaitTotal={snapshotWaitMilliseconds:F2}ms, snapshotCopyTotal={snapshotMilliseconds:F2}ms, workerMeshTotal={meshingMilliseconds:F2}ms, mainUploadTotal={uploadMilliseconds:F2}ms; collisionPath=CPU-marching-tetrahedra/{CollisionResolutionDivisor}:1." );
+			Log.Info( $"Voxel mesh topology: visualPath=CPU-Transvoxel-regular/worker-pool, visualChunks={active:N0}/{_cpuChunkStates.Count:N0}, failed={failed:N0}, vertices={vertices:N0}, triangles={triangles:N0}, snapshotWaitTotal={snapshotWaitMilliseconds:F2}ms, snapshotCopyTotal={snapshotMilliseconds:F2}ms, workerMeshTotal={meshingMilliseconds:F2}ms, mainUploadTotal={uploadMilliseconds:F2}ms; collisionPath=CPU-Transvoxel-regular/exact-visual-mesh." );
 			return;
 		}
 
@@ -922,27 +939,32 @@ public sealed class VoxelManager : Component
 	private void UploadChunkCollider( ChunkCollisionState state, CollisionBuildResult result )
 	{
 		CountCall( ref _callCollisionBuildsCompleted );
+		UploadChunkCollider( state, result.Mesh, result.Generation, result.SnapshotWaitTime, result.SnapshotTime, result.MeshingTime );
+	}
+
+	private void UploadChunkCollider( ChunkCollisionState state, VoxelMeshData meshData, int generation, System.TimeSpan snapshotWaitTime, System.TimeSpan snapshotTime, System.TimeSpan meshingTime )
+	{
 		var modelStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		var collisionModel = result.Mesh.Indices.Count > 0 ? BuildCollisionModel( result.Mesh ) : null;
+		var collisionModel = meshData.Indices.Count > 0 ? BuildCollisionModel( meshData ) : null;
 		state.Collider.Enabled = false;
 		state.Collider.Model = collisionModel;
-		state.Collider.Enabled = result.Mesh.Indices.Count > 0;
+		state.Collider.Enabled = meshData.Indices.Count > 0;
 		state.Built = true;
 		state.Dirty = false;
 		state.Queued = false;
 		state.PinnedByEdit = false;
-		state.CompletedGeneration = result.Generation;
-		state.VertexCount = result.Mesh.Vertices.Count;
-		state.TriangleCount = result.Mesh.Indices.Count / 3;
-		state.SnapshotWaitTime = result.SnapshotWaitTime;
-		state.SnapshotTime = result.SnapshotTime;
-		state.MeshingTime = result.MeshingTime;
+		state.CompletedGeneration = generation;
+		state.VertexCount = meshData.Vertices.Count;
+		state.TriangleCount = meshData.Indices.Count / 3;
+		state.SnapshotWaitTime = snapshotWaitTime;
+		state.SnapshotTime = snapshotTime;
+		state.MeshingTime = meshingTime;
 		state.ModelBuildTime = System.Diagnostics.Stopwatch.GetElapsedTime( modelStart );
 		CountCall( ref _callCollisionUploads );
 		if ( LogGeneration )
 		{
 			Log.Info(
-				$"Voxel CPU collision: chunk={state.Coordinate}, resolution={result.Resolution}^3, " +
+				$"Voxel CPU collision: chunk={state.Coordinate}, topology=exact-visual-mesh, " +
 				$"vertices={state.VertexCount:N0}, triangles={state.TriangleCount:N0}, meshing={state.MeshingTime.TotalMilliseconds:F2}ms, " +
 				$"snapshotWait={state.SnapshotWaitTime.TotalMilliseconds:F2}ms, snapshot={state.SnapshotTime.TotalMilliseconds:F2}ms, " +
 				$"physicsModel={state.ModelBuildTime.TotalMilliseconds:F2}ms, objectReused=yes."
@@ -1187,13 +1209,13 @@ public sealed class VoxelManager : Component
 		{
 			if ( _chunkColliders.TryGetValue( coordinate, out var state ) )
 			{
+				if ( !Application.IsDedicatedServer && TryUploadPublishedVisualCollider( state ) )
+				{
+					continue;
+				}
 				if ( state.Built && !state.Dirty )
 				{
 					state.Collider.Enabled = state.TriangleCount > 0;
-					continue;
-				}
-				if ( state.Dirty && System.Diagnostics.Stopwatch.GetElapsedTime( state.DirtyTimestamp ).TotalSeconds < CollisionEditSettleSeconds )
-				{
 					continue;
 				}
 			}
@@ -1240,6 +1262,11 @@ public sealed class VoxelManager : Component
 		if ( state.DesiredGeneration == 0 )
 		{
 			state.DesiredGeneration = 1;
+		}
+		if ( !Application.IsDedicatedServer )
+		{
+			TryUploadPublishedVisualCollider( state );
+			return;
 		}
 		if ( state.Task is not null )
 		{
@@ -1317,13 +1344,6 @@ public sealed class VoxelManager : Component
 			{
 				continue;
 			}
-			if ( state.Dirty &&
-				System.Diagnostics.Stopwatch.GetElapsedTime( state.DirtyTimestamp ).TotalSeconds < CollisionEditSettleSeconds )
-			{
-				state.Queued = false;
-				continue;
-			}
-
 			if ( !_chunks.TryGetValue( coordinate, out var chunk ) )
 			{
 				state.Queued = false;
@@ -1331,7 +1351,6 @@ public sealed class VoxelManager : Component
 			}
 
 			var generation = state.DesiredGeneration;
-			var resolutionDivisor = CollisionResolutionDivisor;
 			var voxelSize = VoxelSize;
 			var chunkSize = chunk.Size;
 			state.TaskGeneration = generation;
@@ -1347,14 +1366,13 @@ public sealed class VoxelManager : Component
 				{
 					snapshotWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotWaitStart );
 					var snapshotStart = System.Diagnostics.Stopwatch.GetTimestamp();
-					distanceSnapshot = VoxelCollisionMesher.CreateDistanceSnapshot( chunk, resolutionDivisor );
+					distanceSnapshot = CreateSdfHalo( chunk );
 					CountCall( ref _callCollisionSnapshotSamplesCopied, distanceSnapshot.Length );
 					snapshotElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotStart );
 				}
 				var meshStart = System.Diagnostics.Stopwatch.GetTimestamp();
-				var mesh = VoxelCollisionMesher.Build( distanceSnapshot, chunkSize, voxelSize, resolutionDivisor );
-				var resolution = (chunkSize + resolutionDivisor - 1) / resolutionDivisor;
-				return new CollisionBuildResult( generation, mesh, resolution, snapshotWaitElapsed, snapshotElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( meshStart ) );
+				var mesh = VoxelTransvoxelMesher.Build( distanceSnapshot, chunkSize, voxelSize );
+				return new CollisionBuildResult( generation, mesh, snapshotWaitElapsed, snapshotElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( meshStart ) );
 			} );
 			inFlight++;
 		}
@@ -1581,6 +1599,13 @@ public sealed class VoxelManager : Component
 				Log.Warning( $"Voxel CPU Transvoxel edited topology anomaly: chunk={state.Coordinate}, invalid={topology.InvalidTriangleCount:N0}, degenerate={topology.DegenerateTriangleCount:N0}, reversed={topology.ReversedNormalTriangleCount:N0}, nonManifold={topology.NonManifoldEdgeCount:N0}, maxEdge={topology.MaximumEdgeLength:F2}, vertices={topology.VertexCount:N0}, triangles={topology.TriangleCount:N0}." );
 			}
 		}
+		state.PublishedMeshData = result.Mesh;
+		if ( _chunkColliders.TryGetValue( state.Coordinate, out var collisionState ) &&
+			(_collisionDesiredChunks.Contains( state.Coordinate ) || collisionState.PinnedByEdit) )
+		{
+			UploadChunkCollider( collisionState, result.Mesh, result.Generation, result.SnapshotWaitTime, result.SnapshotTime, result.MeshingTime );
+		}
+
 		if ( state.GameObject is null )
 		{
 			state.GameObject = new GameObject( true, $"Voxel CPU Visual {state.Coordinate}" );
@@ -1646,6 +1671,21 @@ public sealed class VoxelManager : Component
 				$"snapshotWait={state.SnapshotWaitTime.TotalMilliseconds:F2}ms, snapshotCopy={state.SnapshotTime.TotalMilliseconds:F2}ms, workerMesh={state.MeshingTime.TotalMilliseconds:F2}ms, mainUpload={state.UploadTime.TotalMilliseconds:F2}ms, objectReused=yes."
 			);
 		}
+	}
+
+	private bool TryUploadPublishedVisualCollider( ChunkCollisionState collisionState )
+	{
+		if ( !_cpuChunkStates.TryGetValue( collisionState.Coordinate, out var visualState ) ||
+			visualState.PublishedMeshData is null || visualState.CompletedGeneration < visualState.DesiredGeneration ||
+			collisionState.CompletedGeneration >= visualState.CompletedGeneration )
+		{
+			return false;
+		}
+
+		collisionState.DesiredGeneration = visualState.CompletedGeneration;
+		UploadChunkCollider( collisionState, visualState.PublishedMeshData, visualState.CompletedGeneration,
+			visualState.SnapshotWaitTime, visualState.SnapshotTime, visualState.MeshingTime );
+		return true;
 	}
 
 	private void TryLogCpuBatchSummary()
@@ -1721,6 +1761,7 @@ public sealed class VoxelManager : Component
 		public GameObject GameObject { get; set; }
 		public ModelRenderer Renderer { get; set; }
 		public Mesh Mesh { get; set; }
+		public VoxelMeshData PublishedMeshData { get; set; }
 		public System.Threading.Tasks.Task<CpuBuildResult> Task { get; set; }
 		public CpuBuildResult? ReadyResult { get; set; }
 		public int DesiredGeneration { get; set; }
@@ -1741,7 +1782,7 @@ public sealed class VoxelManager : Component
 	}
 
 	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
-	private readonly record struct CollisionBuildResult( int Generation, VoxelMeshData Mesh, int Resolution, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
+	private readonly record struct CollisionBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
 
 	private sealed class WorldGenerationWorkerResult
