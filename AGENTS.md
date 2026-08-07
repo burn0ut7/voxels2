@@ -28,6 +28,12 @@ Each feature has exactly one authoritative implementation and one ownership boun
 - Diagnostics must be opt-in, bounded, and inert when disabled. They may observe authoritative systems but never become alternate gameplay or data pipelines.
 - Use the `sbox` skill's evidence workflow for API discovery, compilation, live verification, and delivery.
 
+## Completion Git flow
+
+- After every completed task, commit only that task's changes and push the commit.
+- Keep commit titles to five words or fewer; never use ten or more.
+- Do not report completion until the push succeeds.
+
 ## End-user acceptance gate
 
 The final shipped feature is judged by the end-user experience. A change passes only when it advances the project goal and the resulting game behavior is correct, usable, coherent, and fit for real play.
