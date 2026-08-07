@@ -1,0 +1,12 @@
+interface:
+  display_name: "s&box Development"
+  short_description: "Build and verify s&box games with player-driven tests"
+  default_prompt: "Use $sbox to implement and verify this change in live s&box, including a representative player journey."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "sbox"
+      description: "Local s&box editor MCP server"
+      transport: "streamable_http"
+      url: "http://127.0.0.1:7269/mcp"
