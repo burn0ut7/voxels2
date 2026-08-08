@@ -382,6 +382,11 @@ public sealed class VoxelTerrainBenchmark : Component
 			FailRun( $"streaming traversal active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
 			return;
 		}
+		if ( _manager.ActiveChunkGameObjectCount != _manager.DesiredChunkCount )
+		{
+			FailRun( $"streaming traversal chunk object count {_manager.ActiveChunkGameObjectCount} did not match desired count {_manager.DesiredChunkCount}" );
+			return;
+		}
 		MoveStreamingPlayer( _streamingStartPosition, BenchmarkPhase.WaitStreamingBacktrack );
 	}
 
@@ -391,6 +396,11 @@ public sealed class VoxelTerrainBenchmark : Component
 		if ( diagnostics.ActiveVisualChunks != _manager.DesiredChunkCount )
 		{
 			FailRun( $"streaming backtrack active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
+			return;
+		}
+		if ( _manager.ActiveChunkGameObjectCount != _manager.DesiredChunkCount )
+		{
+			FailRun( $"streaming backtrack chunk object count {_manager.ActiveChunkGameObjectCount} did not match desired count {_manager.DesiredChunkCount}" );
 			return;
 		}
 		CompleteScenarioAndWarmup( BenchmarkPhase.StartSeamEdit );

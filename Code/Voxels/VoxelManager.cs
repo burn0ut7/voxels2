@@ -13,6 +13,7 @@ public sealed class VoxelManager : Component
 	private const int MaximumConcurrentCollisionBuilds = 8;
 
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
+	private readonly Dictionary<Vector3Int, GameObject> _chunkGameObjects = new();
 	private readonly HashSet<Vector3Int> _desiredChunkCoordinates = new();
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
@@ -133,12 +134,13 @@ public sealed class VoxelManager : Component
 	public IReadOnlyDictionary<Vector3Int, VoxelChunk> Chunks => _chunks;
 	public int LoadedChunkCount => _chunks.Count;
 	public int DesiredChunkCount => _desiredChunkCoordinates.Count;
+	public int ActiveChunkGameObjectCount => _chunkGameObjects.Count;
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
 	public bool IsPlayerSafetyActive => _playerSafetyActive;
 	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
-		(Application.IsDedicatedServer || _cpuChunkStates.Count == DesiredChunkCount) &&
+		(Application.IsDedicatedServer || (_cpuChunkStates.Count == DesiredChunkCount && ActiveChunkGameObjectCount == DesiredChunkCount)) &&
 		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
 		!_worldGenerationPending && !_cpuBatchSummaryPending;
 	public bool HasPartialVisualEditPublication
@@ -231,11 +233,15 @@ public sealed class VoxelManager : Component
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
 		DisposeCpuVisualWorld();
+		ClearChunkColliders();
+		ClearChunkGameObjects();
 	}
 
 	protected override void OnDestroy()
 	{
 		DisposeCpuVisualWorld();
+		ClearChunkColliders();
+		ClearChunkGameObjects();
 	}
 
 
@@ -258,6 +264,7 @@ public sealed class VoxelManager : Component
 
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
+		ClearChunkGameObjects();
 		lock ( _sdfLock )
 		{
 			_chunks.Clear();
@@ -941,17 +948,38 @@ public sealed class VoxelManager : Component
 			return existing;
 		}
 
-		var collisionObject = new GameObject( true, $"Voxel Collision {coordinate}" );
-		collisionObject.Parent = GameObject;
-		collisionObject.Tags.Add( ChunkTag );
-		var chunkOrigin = GetChunkVoxelOrigin( coordinate );
-		collisionObject.LocalPosition = new Vector3( chunkOrigin.x, chunkOrigin.y, chunkOrigin.z ) * VoxelSize;
-		var collider = collisionObject.AddComponent<ModelCollider>();
+		var chunkObject = GetOrCreateChunkGameObject( coordinate );
+		var collider = chunkObject.Components.Get<ModelCollider>() ?? chunkObject.AddComponent<ModelCollider>();
 		collider.Static = true;
 		collider.Enabled = false;
-		var state = new ChunkCollisionState( coordinate, collisionObject, collider );
+		var state = new ChunkCollisionState( coordinate, chunkObject, collider );
 		_chunkColliders.Add( coordinate, state );
 		return state;
+	}
+
+	private GameObject GetOrCreateChunkGameObject( Vector3Int coordinate )
+	{
+		if ( _chunkGameObjects.TryGetValue( coordinate, out var existing ) ) return existing;
+
+		var chunkObject = new GameObject( true, $"Voxel Chunk {coordinate}" );
+		chunkObject.Parent = GameObject;
+		chunkObject.Tags.Add( ChunkTag );
+		var chunkOrigin = GetChunkVoxelOrigin( coordinate );
+		chunkObject.LocalPosition = new Vector3( chunkOrigin.x, chunkOrigin.y, chunkOrigin.z ) * VoxelSize;
+		_chunkGameObjects.Add( coordinate, chunkObject );
+		return chunkObject;
+	}
+
+	private void DestroyChunkGameObject( Vector3Int coordinate )
+	{
+		if ( !_chunkGameObjects.Remove( coordinate, out var chunkObject ) ) return;
+		chunkObject.Destroy();
+	}
+
+	private void ClearChunkGameObjects()
+	{
+		foreach ( var chunkObject in _chunkGameObjects.Values ) chunkObject.Destroy();
+		_chunkGameObjects.Clear();
 	}
 
 	private void UploadChunkCollider( ChunkCollisionState state, CollisionBuildResult result )
@@ -1149,7 +1177,7 @@ public sealed class VoxelManager : Component
 	{
 		foreach ( var state in _chunkColliders.Values )
 		{
-			state.GameObject.Destroy();
+			state.Collider.Enabled = false;
 		}
 
 		_chunkColliders.Clear();
@@ -1198,7 +1226,6 @@ public sealed class VoxelManager : Component
 			if ( _desiredChunkCoordinates.Contains( coordinate ) ) continue;
 			var state = _cpuChunkStates[coordinate];
 			if ( state.Task?.IsFaulted == true ) _ = state.Task.Exception;
-			state.GameObject?.Destroy();
 			_cpuChunkStates.Remove( coordinate );
 		}
 
@@ -1208,9 +1235,14 @@ public sealed class VoxelManager : Component
 			if ( _desiredChunkCoordinates.Contains( coordinate ) ) continue;
 			var state = _chunkColliders[coordinate];
 			if ( state.Task?.IsFaulted == true ) _ = state.Task.Exception;
-			state.GameObject.Destroy();
 			_chunkColliders.Remove( coordinate );
 			_collisionDesiredChunks.Remove( coordinate );
+		}
+
+		var chunkObjectCoordinates = new List<Vector3Int>( _chunkGameObjects.Keys );
+		foreach ( var coordinate in chunkObjectCoordinates )
+		{
+			if ( !_desiredChunkCoordinates.Contains( coordinate ) ) DestroyChunkGameObject( coordinate );
 		}
 
 		for ( var index = _coherentVisualEditBatches.Count - 1; index >= 0; index-- )
@@ -1781,12 +1813,8 @@ public sealed class VoxelManager : Component
 
 		if ( state.GameObject is null )
 		{
-			state.GameObject = new GameObject( true, $"Voxel CPU Visual {state.Coordinate}" );
-			state.GameObject.Parent = GameObject;
-			state.GameObject.Tags.Add( ChunkTag );
-			var origin = GetChunkVoxelOrigin( state.Coordinate );
-			state.GameObject.LocalPosition = new Vector3( origin.x, origin.y, origin.z ) * VoxelSize;
-			state.Renderer = state.GameObject.AddComponent<ModelRenderer>();
+			state.GameObject = GetOrCreateChunkGameObject( state.Coordinate );
+			state.Renderer = state.GameObject.Components.Get<ModelRenderer>() ?? state.GameObject.AddComponent<ModelRenderer>();
 		}
 
 		if ( result.Mesh.Indices.Count == 0 )
@@ -1917,7 +1945,6 @@ public sealed class VoxelManager : Component
 		foreach ( var state in _cpuChunkStates.Values )
 		{
 			if ( state.Task?.IsFaulted == true ) _ = state.Task.Exception;
-			state.GameObject?.Destroy();
 		}
 		_cpuChunkStates.Clear();
 		_cpuChunkBuildQueue.Clear();
