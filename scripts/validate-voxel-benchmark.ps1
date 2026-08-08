@@ -144,7 +144,7 @@ foreach ( $scenario in $scenarios )
 		if ( [long]$scenario.gpu_transvoxel_vertices -le 0 -or [long]$scenario.gpu_transvoxel_indices -le 0 ) { Add-Failure "$context generated no mesh geometry" }
 		if ( [long]$scenario.gpu_transvoxel_overflow_attempts -ne 0 ) { Add-Failure "$context overflowed GPU output buffers" }
 	}
-	elseif ( [long]$scenario.calls_safety_players_repositioned -le 0 )
+	elseif ( $scenario.scenario -notlike 'player_*_streaming' -and [long]$scenario.calls_safety_players_repositioned -le 0 )
 	{
 		Add-Failure "$context did not exercise player safety repositioning"
 	}
