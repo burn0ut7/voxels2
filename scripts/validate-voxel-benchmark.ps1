@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 $requiredScenarios = @(
 	'cold_generation',
+	'gpu_transvoxel_regular_proof',
 	'live_chunk_radius_reconfiguration',
 	'player_infinity_streaming',
 	'player_line_streaming',
@@ -26,6 +27,10 @@ $requiredMetrics = @(
 	'draw_calls_avg', 'triangles_rendered_avg', 'authoritative_sdf_bytes', 'visual_triangles', 'collision_triangles', 'player_safety_active',
 	'visual_coherence_violation_frames',
 	'worker_mesh_ms', 'upload_ms',
+	'gpu_transvoxel_available', 'gpu_transvoxel_passed', 'gpu_transvoxel_failure',
+	'gpu_transvoxel_vertices', 'gpu_transvoxel_indices', 'gpu_transvoxel_active_cells',
+	'gpu_transvoxel_overflow_attempts', 'gpu_transvoxel_buffer_bytes', 'gpu_transvoxel_submission_ms',
+	'gpu_transvoxel_completion_ms', 'gpu_transvoxel_readback_ms',
 	'stream_chunks_completed', 'stream_chunks_fresh', 'stream_chunks_cached', 'stream_batches_completed',
 	'stream_sdf_generation_avg_ms', 'stream_sdf_generation_p95_ms', 'stream_sdf_generation_max_ms',
 	'stream_mesh_queue_avg_ms', 'stream_mesh_queue_p95_ms', 'stream_mesh_queue_max_ms',
@@ -89,7 +94,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 7 ) { Add-Failure "Expected suite version 7, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 8 ) { Add-Failure "Expected suite version 8, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id', 'traversal_distance', 'traversal_speed', 'traversal_loops') )
 {
@@ -131,6 +136,13 @@ foreach ( $scenario in $scenarios )
 	{
 		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
 		if ( [long]$scenario.stream_chunks_completed -le 0 ) { Add-Failure "$context recorded no completed chunk streaming lifecycles" }
+	}
+	if ( $scenario.scenario -eq 'gpu_transvoxel_regular_proof' )
+	{
+		if ( $scenario.gpu_transvoxel_available -ne $true ) { Add-Failure "$context has no GPU proof result" }
+		if ( $scenario.gpu_transvoxel_passed -ne $true ) { Add-Failure "$context GPU proof failed: $($scenario.gpu_transvoxel_failure)" }
+		if ( [long]$scenario.gpu_transvoxel_vertices -le 0 -or [long]$scenario.gpu_transvoxel_indices -le 0 ) { Add-Failure "$context generated no mesh geometry" }
+		if ( [long]$scenario.gpu_transvoxel_overflow_attempts -ne 0 ) { Add-Failure "$context overflowed GPU output buffers" }
 	}
 	elseif ( [long]$scenario.calls_safety_players_repositioned -le 0 )
 	{

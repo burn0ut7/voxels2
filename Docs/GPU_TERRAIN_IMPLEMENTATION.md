@@ -8,6 +8,30 @@
 - CPU baseline: frozen separately and compared by revision-tagged benchmark runs
 - Runtime authority on the GPU branch: one GPU visual backend; CPU remains authoritative for world state, gameplay queries, edits, and local collision
 
+## Implementation status (2026-08-08)
+
+Phase 1 regular-cell meshing is implemented as an opt-in proof and registered as the second required scenario in authoritative benchmark suite v8. The proof generates a flat LOD0 density field on the GPU, runs the existing regular-cell Transvoxel tables through six phase-specific compute shaders, keeps generated vertices and indices in GPU buffers, and performs bounded diagnostic conformance readback.
+
+Measured proof result on a 32Â³-cell block:
+
+| Result | Value |
+|---|---:|
+| Conformance | PASS |
+| GPU vertices | 1,089 |
+| GPU indices | 6,144 |
+| Active regular cells | 1,024 |
+| Overflow attempts | 0 |
+| Proof buffer allocation | 7.77 MiB |
+| CPU submission | 0.964 ms |
+| Dispatch-to-validation completion | 30.031 ms |
+| Diagnostic geometry readback | 11.128 ms |
+
+The generated positions, normals, winding, and triangle topology match the CPU Transvoxel reference. These timings are proof instrumentation, not adoption evidence: completion includes a frame fence and synchronous diagnostic readback, and no timestamp-query GPU phase timings exist yet.
+
+Phase 1 is therefore **partially passed**. GPU density generation and regular-cell Transvoxel conformance pass. GPU-authored indexed-indirect arguments do not yet pass in the current s&box route: binding the argument buffer as a compute UAV invalidated the compute pipeline. The proof currently performs a small diagnostic statistics readback and writes the draw count from C# before visualization. This is explicitly disallowed for the production path and keeps the Phase 1 direct-publication gate open.
+
+The next target is not LOD. First replace the serial allocation scan with a parallel batched scan, move output into a bounded shared pool, and solve GPU-authored publication/indirect arguments without readback. Then measure fixed-LOD batches before beginning transition cells and production LOD.
+
 ## Executive decision
 
 The experiment is technically feasible in the installed s&box build. The engine exposes compute shaders, structured GPU buffers, indirect draw arguments, command lists, and indexed indirect drawing. The archived prototype also proves that the basic API path works.

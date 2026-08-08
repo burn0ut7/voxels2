@@ -36,6 +36,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<ChunkStreamTimingEvent> _chunkTimingHistory = new( MaximumChunkTimingHistory );
 	private readonly List<BatchTimingEvent> _batchTimingHistory = new( MaximumBatchTimingHistory );
 	private readonly Dictionary<Vector3Int, double> _initialSdfGenerationMilliseconds = new();
+	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
+	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
+	private bool _hasGpuTransvoxelProofResult;
 	private long _nextChunkTimingSequence;
 	private long _nextBatchTimingSequence;
 	private long _cpuBatchStartTimestamp;
@@ -142,6 +145,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Diagnostics" )]
 	public bool CaptureCallCounts { get; set; }
 
+	[Property, Group( "Diagnostics" )]
+	public bool RequestGpuTransvoxelProof { get; set; }
+
 	[Property, Group( "Diagnostics" ), Range( 0, MaximumDetailedChunkLogs )]
 	public int DetailedChunkLogLimit { get; set; } = 64;
 
@@ -153,6 +159,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
 	public bool IsPlayerSafetyActive => _playerSafetyActive;
+	internal bool IsGpuTransvoxelProofRunning => _gpuTransvoxelProof?.IsRunning == true;
+	internal bool HasGpuTransvoxelProofResult => _hasGpuTransvoxelProofResult;
+	internal VoxelGpuTransvoxelProofResult LastGpuTransvoxelProofResult => _lastGpuTransvoxelProofResult;
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
 	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
@@ -226,6 +235,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	protected override void OnUpdate()
 	{
 		CountCall( ref _callManagerUpdates );
+		UpdateGpuTransvoxelProof();
+		if ( RequestGpuTransvoxelProof )
+		{
+			RequestGpuTransvoxelProof = false;
+			RunGpuTransvoxelProof();
+		}
 		if ( CaptureWorldConfiguration() != _generationConfiguration )
 		{
 			_worldRegenerationRequested = true;
@@ -256,6 +271,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_playerSafetyActive = false;
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
+		DisposeGpuTransvoxelProof();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
@@ -264,6 +280,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	protected override void OnDestroy()
 	{
+		DisposeGpuTransvoxelProof();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
@@ -468,6 +485,93 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		DisposeCpuVisualWorld();
 		StartCpuChunkWorld();
+	}
+
+	[Button]
+	public void RunGpuTransvoxelProof()
+	{
+		DisposeGpuTransvoxelProof();
+		_hasGpuTransvoxelProofResult = false;
+		_lastGpuTransvoxelProofResult = default;
+		if ( Application.IsDedicatedServer )
+		{
+			Log.Error( "Voxel GPU Transvoxel proof requires a rendering client." );
+			return;
+		}
+		if ( Scene.Camera is null )
+		{
+			Log.Error( "Voxel GPU Transvoxel proof requires an active scene camera." );
+			return;
+		}
+
+		var coordinate = Vector3Int.Zero;
+		VoxelChunk chunk;
+		float[] halo;
+		lock ( _sdfLock )
+		{
+			if ( !_chunks.TryGetValue( coordinate, out chunk ) )
+			{
+				Log.Error( "Voxel GPU Transvoxel proof requires the origin chunk to be loaded." );
+				return;
+			}
+			halo = CreateSdfHalo( chunk );
+		}
+
+		var cpuReference = VoxelTransvoxelMesher.Build( halo, ChunkSize, VoxelSize );
+		var sampleOrigin = GetChunkVoxelOrigin( coordinate );
+		var drawOrigin = new Vector3( sampleOrigin.x, sampleOrigin.y, sampleOrigin.z ) * VoxelSize +
+			Vector3.Up * ChunkSize * VoxelSize * 2.0f;
+		try
+		{
+			_gpuTransvoxelProof = new VoxelGpuTransvoxelProof(
+				Scene.SceneWorld,
+				Scene.Camera,
+				cpuReference,
+				sampleOrigin,
+				drawOrigin,
+				ChunkSize,
+				VoxelSize,
+				SdfClampDistance
+			);
+			_gpuTransvoxelProof.Run();
+			Log.Info(
+				$"Voxel GPU regular-cell Transvoxel proof scheduled: chunk={coordinate}, cells={ChunkSize}^{3}, " +
+				$"cpuReferenceVertices={cpuReference.Vertices.Count:N0}, cpuReferenceTriangles={cpuReference.Indices.Count / 3:N0}, " +
+				"density=GPU-procedural, geometry=GPU-resident, validationReadback=opt-in-proof-only."
+			);
+		}
+		catch ( System.Exception exception )
+		{
+			DisposeGpuTransvoxelProof();
+			_lastGpuTransvoxelProofResult = new VoxelGpuTransvoxelProofResult( false, exception.Message, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0 );
+			_hasGpuTransvoxelProofResult = true;
+			Log.Error( $"Voxel GPU regular-cell Transvoxel proof failed to start: {exception.Message}" );
+		}
+	}
+
+	public void ClearGpuTransvoxelProof()
+	{
+		DisposeGpuTransvoxelProof();
+	}
+
+	private void UpdateGpuTransvoxelProof()
+	{
+		if ( _gpuTransvoxelProof is null || !_gpuTransvoxelProof.TryTakeResult( out var result ) ) return;
+		_lastGpuTransvoxelProofResult = result;
+		_hasGpuTransvoxelProofResult = true;
+		Log.Info(
+			$"Voxel GPU regular-cell Transvoxel proof: result={(result.Passed ? "PASS" : "FAIL")}, " +
+			$"vertices={result.VertexCount:N0}, indices={result.IndexCount:N0}, activeCells={result.ActiveCells:N0}, " +
+			$"overflow={result.OverflowAttempts:N0}, gpuBuffers={FormatBytes( result.GpuBufferBytes )}, " +
+			$"cpuSubmission={result.SubmissionMilliseconds:F3}ms, completion={result.CompletionMilliseconds:F3}ms, " +
+			$"diagnosticGeometryReadback={result.GeometryReadbackMilliseconds:F3}ms, validation={result.Failure}."
+		);
+	}
+
+	private void DisposeGpuTransvoxelProof()
+	{
+		_gpuTransvoxelProof?.Dispose();
+		_gpuTransvoxelProof = null;
 	}
 
 	public VoxelChunk GenerateChunk( Vector3Int coordinate )
