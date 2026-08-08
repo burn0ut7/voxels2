@@ -13,6 +13,9 @@ public sealed class VoxelManager : Component
 	private const int MaximumConcurrentCollisionBuilds = 8;
 
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
+	private readonly HashSet<Vector3Int> _desiredChunkCoordinates = new();
+	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
+	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly object _sdfLock = new();
 	private readonly Dictionary<Vector3Int, ChunkCollisionState> _chunkColliders = new();
 	private readonly Queue<Vector3Int> _collisionBuildQueue = new();
@@ -29,6 +32,7 @@ public sealed class VoxelManager : Component
 	private long _cpuBatchStartTimestamp;
 	private bool _cpuBatchSummaryPending;
 	private long _lastCollisionInterestTimestamp;
+	private long _lastChunkStreamingInterestTimestamp;
 	private long _worldGenerationStartTimestamp;
 	private bool _worldGenerationPending;
 	private double _lastWorldGenerationElapsedMilliseconds;
@@ -128,12 +132,13 @@ public sealed class VoxelManager : Component
 
 	public IReadOnlyDictionary<Vector3Int, VoxelChunk> Chunks => _chunks;
 	public int LoadedChunkCount => _chunks.Count;
+	public int DesiredChunkCount => _desiredChunkCoordinates.Count;
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
 	public bool IsPlayerSafetyActive => _playerSafetyActive;
-	public bool IsTerrainSettled => LoadedChunkCount == ConfiguredChunkCount &&
-		(Application.IsDedicatedServer || _cpuChunkStates.Count == LoadedChunkCount) &&
+	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
+		(Application.IsDedicatedServer || _cpuChunkStates.Count == DesiredChunkCount) &&
 		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
 		!_worldGenerationPending && !_cpuBatchSummaryPending;
 	public bool HasPartialVisualEditPublication
@@ -209,6 +214,7 @@ public sealed class VoxelManager : Component
 		{
 			return;
 		}
+		UpdateChunkStreaming();
 		UpdateCpuChunkWorld();
 		UpdateCpuCollisionWorld();
 		UpdatePlayerSafety();
@@ -256,14 +262,14 @@ public sealed class VoxelManager : Component
 		{
 			_chunks.Clear();
 		}
+		_chunkStreamingGenerationQueue.Clear();
+		_chunkStreamingQueuedCoordinates.Clear();
+		_lastChunkStreamingInterestTimestamp = 0;
 
-		var coordinates = new List<Vector3Int>( ConfiguredChunkCount );
-		for ( var y = -ChunkRadius; y < ChunkRadius; y++ )
-		for ( var x = -ChunkRadius; x < ChunkRadius; x++ )
-		{
-			coordinates.Add( new Vector3Int( x, y, 0 ) );
-		}
-		coordinates.Sort( (left, right) => GetChunkBuildPriority( left ).CompareTo( GetChunkBuildPriority( right ) ) );
+		var observers = GetStreamingObserverChunks();
+		PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
+		var coordinates = new List<Vector3Int>( _desiredChunkCoordinates );
+		coordinates.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
 
 		var workerCount = System.Math.Min( CpuChunkBuildConcurrency, coordinates.Count );
 		var chunkSize = ChunkSize;
@@ -467,6 +473,18 @@ public sealed class VoxelManager : Component
 		{
 			return _chunks.TryGetValue( coordinate, out chunk );
 		}
+	}
+
+	private bool AreDesiredChunksLoaded()
+	{
+		lock ( _sdfLock )
+		{
+			foreach ( var coordinate in _desiredChunkCoordinates )
+			{
+				if ( !_chunks.ContainsKey( coordinate ) ) return false;
+			}
+		}
+		return true;
 	}
 
 	public VoxelTerrainDiagnostics CaptureTerrainDiagnostics()
@@ -1147,6 +1165,159 @@ public sealed class VoxelManager : Component
 		return (long)coordinate.x * coordinate.x + (long)coordinate.y * coordinate.y + (long)coordinate.z * coordinate.z;
 	}
 
+	private void UpdateChunkStreaming()
+	{
+		if ( _lastChunkStreamingInterestTimestamp == 0 ||
+			System.Diagnostics.Stopwatch.GetElapsedTime( _lastChunkStreamingInterestTimestamp ).TotalSeconds >= 0.1 )
+		{
+			RefreshChunkStreamingInterests();
+		}
+
+		PumpChunkStreamingGenerationQueue();
+	}
+
+	private void RefreshChunkStreamingInterests()
+	{
+		_lastChunkStreamingInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		var observers = GetStreamingObserverChunks();
+		var desired = new HashSet<Vector3Int>();
+		PopulateDesiredChunkCoordinates( observers, desired );
+		if ( _desiredChunkCoordinates.SetEquals( desired ) ) return;
+		var previousDesiredCount = _desiredChunkCoordinates.Count;
+		var leavingVisualCount = 0;
+		foreach ( var coordinate in _cpuChunkStates.Keys ) leavingVisualCount += desired.Contains( coordinate ) ? 0 : 1;
+		var enteringCount = 0;
+		foreach ( var coordinate in desired ) enteringCount += _desiredChunkCoordinates.Contains( coordinate ) ? 0 : 1;
+
+		_desiredChunkCoordinates.Clear();
+		_desiredChunkCoordinates.UnionWith( desired );
+
+		var visualCoordinates = new List<Vector3Int>( _cpuChunkStates.Keys );
+		foreach ( var coordinate in visualCoordinates )
+		{
+			if ( _desiredChunkCoordinates.Contains( coordinate ) ) continue;
+			var state = _cpuChunkStates[coordinate];
+			if ( state.Task?.IsFaulted == true ) _ = state.Task.Exception;
+			state.GameObject?.Destroy();
+			_cpuChunkStates.Remove( coordinate );
+		}
+
+		var collisionCoordinates = new List<Vector3Int>( _chunkColliders.Keys );
+		foreach ( var coordinate in collisionCoordinates )
+		{
+			if ( _desiredChunkCoordinates.Contains( coordinate ) ) continue;
+			var state = _chunkColliders[coordinate];
+			if ( state.Task?.IsFaulted == true ) _ = state.Task.Exception;
+			state.GameObject.Destroy();
+			_chunkColliders.Remove( coordinate );
+			_collisionDesiredChunks.Remove( coordinate );
+		}
+
+		for ( var index = _coherentVisualEditBatches.Count - 1; index >= 0; index-- )
+		{
+			_coherentVisualEditBatches[index].IntersectWith( _desiredChunkCoordinates );
+			if ( _coherentVisualEditBatches[index].Count == 0 ) _coherentVisualEditBatches.RemoveAt( index );
+		}
+
+		_cpuChunkBuildQueue.Clear();
+		_cpuQueuedChunks.Clear();
+		_chunkStreamingGenerationQueue.Clear();
+		_chunkStreamingQueuedCoordinates.Clear();
+
+		var ordered = new List<Vector3Int>( _desiredChunkCoordinates );
+		ordered.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
+		foreach ( var coordinate in ordered )
+		{
+			if ( _chunks.ContainsKey( coordinate ) )
+			{
+				EnsureCpuVisualState( coordinate );
+				continue;
+			}
+			_chunkStreamingGenerationQueue.Enqueue( coordinate );
+			_chunkStreamingQueuedCoordinates.Add( coordinate );
+		}
+
+		foreach ( var state in _cpuChunkStates.Values ) QueueCpuChunkBuild( state );
+		RefreshCollisionInterests();
+		Log.Info(
+			$"Voxel mesh streaming updated: observers={observers.Count:N0}, desired={desired.Count:N0}, previous={previousDesiredCount:N0}, " +
+			$"entering={enteringCount:N0}, deconstructed={leavingVisualCount:N0}, cachedSdf={_chunks.Count:N0}."
+		);
+	}
+
+	private List<Vector3Int> GetStreamingObserverChunks()
+	{
+		var observers = new List<Vector3Int>();
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			var coordinate = GetCollisionObserverChunk( controller.WorldPosition );
+			if ( !observers.Contains( coordinate ) ) observers.Add( coordinate );
+		}
+
+		if ( observers.Count == 0 && Scene.Camera is not null )
+		{
+			observers.Add( GetCollisionObserverChunk( Scene.Camera.WorldPosition ) );
+		}
+		if ( observers.Count == 0 ) observers.Add( Vector3Int.Zero );
+		return observers;
+	}
+
+	private void PopulateDesiredChunkCoordinates( List<Vector3Int> observers, HashSet<Vector3Int> destination )
+	{
+		destination.Clear();
+		foreach ( var observer in observers )
+		{
+			for ( var y = -ChunkRadius; y < ChunkRadius; y++ )
+			for ( var x = -ChunkRadius; x < ChunkRadius; x++ )
+			{
+				destination.Add( new Vector3Int( observer.x + x, observer.y + y, 0 ) );
+			}
+		}
+	}
+
+	private static long GetStreamingPriority( Vector3Int coordinate, List<Vector3Int> observers )
+	{
+		var best = long.MaxValue;
+		foreach ( var observer in observers )
+		{
+			var x = (long)coordinate.x - observer.x;
+			var y = (long)coordinate.y - observer.y;
+			best = System.Math.Min( best, x * x + y * y );
+		}
+		return best == long.MaxValue ? GetChunkBuildPriority( coordinate ) : best;
+	}
+
+	private void PumpChunkStreamingGenerationQueue()
+	{
+		var start = System.Diagnostics.Stopwatch.GetTimestamp();
+		var generated = 0;
+		while ( _chunkStreamingGenerationQueue.TryDequeue( out var coordinate ) )
+		{
+			_chunkStreamingQueuedCoordinates.Remove( coordinate );
+			if ( !_desiredChunkCoordinates.Contains( coordinate ) || _chunks.ContainsKey( coordinate ) ) continue;
+
+			GenerateChunk( coordinate );
+			EnsureCpuVisualState( coordinate );
+			generated++;
+			if ( generated > 0 && System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
+		}
+	}
+
+	private void EnsureCpuVisualState( Vector3Int coordinate )
+	{
+		if ( Application.IsDedicatedServer || _cpuChunkStates.ContainsKey( coordinate ) ) return;
+		if ( !_cpuBatchSummaryPending )
+		{
+			_cpuBatchStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+			_cpuBatchSummaryPending = true;
+			_cpuBatchFrameMilliseconds.Clear();
+			ResetCpuBatchMeasurements();
+		}
+		var state = new CpuChunkRuntime( coordinate ) { DesiredGeneration = 1 };
+		_cpuChunkStates.Add( coordinate, state );
+		QueueCpuChunkBuild( state );
+	}
+
 
 	private void UpdateCpuCollisionWorld()
 	{
@@ -1395,12 +1566,14 @@ public sealed class VoxelManager : Component
 		_cpuBatchSummaryPending = true;
 		_cpuBatchFrameMilliseconds.Clear();
 		ResetCpuBatchMeasurements();
-		var orderedChunks = new List<KeyValuePair<Vector3Int, VoxelChunk>>( _chunks );
-		orderedChunks.Sort( (left, right) => GetChunkBuildPriority( left.Key ).CompareTo( GetChunkBuildPriority( right.Key ) ) );
-		foreach ( var pair in orderedChunks )
+		var observers = GetStreamingObserverChunks();
+		var orderedCoordinates = new List<Vector3Int>( _desiredChunkCoordinates );
+		orderedCoordinates.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
+		foreach ( var coordinate in orderedCoordinates )
 		{
-			var state = new CpuChunkRuntime( pair.Key ) { DesiredGeneration = 1 };
-			_cpuChunkStates.Add( pair.Key, state );
+			if ( !_chunks.ContainsKey( coordinate ) ) continue;
+			var state = new CpuChunkRuntime( coordinate ) { DesiredGeneration = 1 };
+			_cpuChunkStates.Add( coordinate, state );
 			QueueCpuChunkBuild( state );
 		}
 
@@ -1826,11 +1999,9 @@ public sealed class VoxelManager : Component
 
 	private void ValidateChunkCoordinate( Vector3Int coordinate )
 	{
-		if ( coordinate.x < -ChunkRadius || coordinate.x >= ChunkRadius ||
-			coordinate.y < -ChunkRadius || coordinate.y >= ChunkRadius ||
-			coordinate.z != 0 )
+		if ( coordinate.z != 0 )
 		{
-			throw new System.ArgumentOutOfRangeException( nameof( coordinate ), $"Chunk coordinate {coordinate} is outside the configured XY radius of {ChunkRadius} or is not on terrain layer Z=0." );
+			throw new System.ArgumentOutOfRangeException( nameof( coordinate ), $"Chunk coordinate {coordinate} is not on terrain layer Z=0." );
 		}
 	}
 

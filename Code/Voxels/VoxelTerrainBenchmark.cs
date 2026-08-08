@@ -6,10 +6,11 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 3;
+	private const int SuiteVersion = 4;
 	private static string[] RequiredScenarios => new[]
 	{
 		"cold_generation",
+		"streaming_traversal",
 		"chunk_seam_edit_coherence",
 		"varied_edits",
 		"bulk_edit",
@@ -51,6 +52,9 @@ public sealed class VoxelTerrainBenchmark : Component
 	private string _reproductionOfRunId;
 	private Dictionary<string, PreviousScenarioMeasurement> _reproductionBaselines;
 	private Dictionary<string, HashSet<string>> _reproductionTargets;
+	private PlayerController _streamingPlayer;
+	private Vector3 _streamingStartPosition;
+	private int _streamingInitialCachedChunkCount;
 
 	[Property, Group( "Run" )]
 	public bool RunOnStart { get; set; } = true;
@@ -163,10 +167,19 @@ public sealed class VoxelTerrainBenchmark : Component
 		switch ( _phase )
 		{
 			case BenchmarkPhase.WaitInitialGeneration:
-				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartSeamEdit );
+				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartStreamingTraversal );
 				break;
 			case BenchmarkPhase.Warmup:
 				if ( --_warmupFramesRemaining <= 0 ) AdvanceAfterWarmup();
+				break;
+			case BenchmarkPhase.StartStreamingTraversal:
+				BeginStreamingTraversalScenario();
+				break;
+			case BenchmarkPhase.WaitStreamingOutward:
+				if ( _manager.IsTerrainSettled ) CompleteStreamingOutwardLeg();
+				break;
+			case BenchmarkPhase.WaitStreamingBacktrack:
+				if ( _manager.IsTerrainSettled ) CompleteStreamingBacktrack();
 				break;
 			case BenchmarkPhase.StartSeamEdit:
 				BeginSeamEditScenario();
@@ -336,6 +349,62 @@ public sealed class VoxelTerrainBenchmark : Component
 		var seam = _manager.ChunkSize * _manager.VoxelSize;
 		ApplyLocalEdit( new Vector3( seam, seam, 0.0f ), _manager.VoxelSize * 3.0f, _manager.VoxelSize * 1.5f );
 		_phase = BenchmarkPhase.WaitSeamEdit;
+	}
+
+	private void BeginStreamingTraversalScenario()
+	{
+		BeginScenario( "streaming_traversal", "Player crosses the configured mesh radius and backtracks while chunks construct and deconstruct" );
+		_streamingPlayer = Scene.GetAllComponents<PlayerController>().FirstOrDefault();
+		if ( _streamingPlayer is null )
+		{
+			FailRun( "streaming traversal requires a PlayerController" );
+			return;
+		}
+
+		_streamingStartPosition = _streamingPlayer.WorldPosition;
+		_streamingInitialCachedChunkCount = _manager.LoadedChunkCount;
+		var localStart = _manager.GameObject.WorldTransform.PointToLocal( _streamingStartPosition );
+		var travelDistance = (_manager.ChunkRadius + 2) * _manager.ChunkSize * _manager.VoxelSize;
+		var target = _manager.GameObject.WorldTransform.PointToWorld( localStart + Vector3.Right * travelDistance );
+		MoveStreamingPlayer( target, BenchmarkPhase.WaitStreamingOutward );
+	}
+
+	private void CompleteStreamingOutwardLeg()
+	{
+		var diagnostics = _manager.CaptureTerrainDiagnostics();
+		if ( _manager.LoadedChunkCount <= _streamingInitialCachedChunkCount )
+		{
+			FailRun( "streaming traversal did not construct newly entered chunks" );
+			return;
+		}
+		if ( diagnostics.ActiveVisualChunks != _manager.DesiredChunkCount )
+		{
+			FailRun( $"streaming traversal active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
+			return;
+		}
+		MoveStreamingPlayer( _streamingStartPosition, BenchmarkPhase.WaitStreamingBacktrack );
+	}
+
+	private void CompleteStreamingBacktrack()
+	{
+		var diagnostics = _manager.CaptureTerrainDiagnostics();
+		if ( diagnostics.ActiveVisualChunks != _manager.DesiredChunkCount )
+		{
+			FailRun( $"streaming backtrack active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
+			return;
+		}
+		CompleteScenarioAndWarmup( BenchmarkPhase.StartSeamEdit );
+	}
+
+	private void MoveStreamingPlayer( Vector3 position, BenchmarkPhase nextPhase )
+	{
+		_streamingPlayer.WorldPosition = position;
+		if ( _streamingPlayer.Body is not null )
+		{
+			_streamingPlayer.Body.Velocity = Vector3.Zero;
+			_streamingPlayer.Body.AngularVelocity = Vector3.Zero;
+		}
+		_phase = nextPhase;
 	}
 
 	private void RunVariedEdits()
@@ -717,7 +786,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"  \"resolution\":\"{Screen.Width:F0}x{Screen.Height:F0}\",\n" +
 			$"  \"vsync\":{vsync},\n" +
 			$"  \"frame_cap\":{frameCap},\n" +
-			"  \"coverage\":{\"activation\":\"optional\",\"active_run_instrumentation\":\"mandatory\",\"terrain_streaming\":\"not_implemented\",\"terrain_persistence\":\"not_implemented\",\"terrain_replication\":\"not_implemented\",\"engine_network_observation\":\"measured\",\"memory_and_render_cache\":\"measured\",\"call_frequency\":\"measured\"},\n" +
+			"  \"coverage\":{\"activation\":\"optional\",\"active_run_instrumentation\":\"mandatory\",\"terrain_streaming\":\"measured\",\"terrain_persistence\":\"not_implemented\",\"terrain_replication\":\"not_implemented\",\"engine_network_observation\":\"measured\",\"memory_and_render_cache\":\"measured\",\"call_frequency\":\"measured\"},\n" +
 			$"  \"failure\":{(failure is null ? "null" : "\"" + Json( failure ) + "\"")},\n" +
 			$"  \"scenarios\":[\n{scenarios}\n  ]\n" +
 			"}\n";
@@ -830,7 +899,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine( "|---|---|" );
 		builder.AppendLine( "| Terrain generation, visuals, collision, editing, frame pacing, latency, memory, render cache | Measured |" );
 		builder.AppendLine( "| Engine networking CPU, traffic, ping, messages, connections | Measured when a network session is active |" );
-		builder.AppendLine( "| Terrain streaming/player traversal | Not implemented; reserved for the streaming slice |" );
+		builder.AppendLine( "| Terrain streaming/player traversal | Measured with an outward radius crossing and backtrack |" );
 		builder.AppendLine( "| Terrain persistence and disk/cache I/O | Not implemented; no synthetic substitute reported |" );
 		builder.AppendLine( "| Terrain replication bandwidth and convergence | Not implemented; requires the multiplayer terrain slice |" );
 		builder.AppendLine();
@@ -838,7 +907,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine();
 		builder.AppendLine( $"Open `{FileSystem.Data.GetFullPath( DashboardPath )}` for interactive historical charts. Raw history is retained in `history.csv` and `history.jsonl`; every row includes its revision and run ID." );
 		builder.AppendLine();
-		builder.AppendLine( "Player-driven streaming, terrain persistence/cache I/O, and terrain replication are intentionally marked unavailable until their authoritative systems exist. The scenario-based history can add those journeys without breaking prior JSONL data." );
+		builder.AppendLine( "Terrain persistence/cache I/O and terrain replication remain unavailable until their authoritative systems exist. Streaming traversal is measured without changing older JSONL rows." );
 		return builder.ToString();
 	}
 
@@ -930,6 +999,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		Idle,
 		WaitInitialGeneration,
 		Warmup,
+		StartStreamingTraversal,
+		WaitStreamingOutward,
+		WaitStreamingBacktrack,
 		StartSeamEdit,
 		WaitSeamEdit,
 		StartVariedEdits,
