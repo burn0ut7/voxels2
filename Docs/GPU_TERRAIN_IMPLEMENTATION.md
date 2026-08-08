@@ -25,7 +25,7 @@ The supplied direction is accepted with these corrections:
 1. **Separate branches are the rollback mechanism.** Preserve the CPU visual implementation on the frozen CPU branch. On the GPU experiment branch, compile and run one authoritative visual path. Do not add an automatic CPU visual fallback, dual visual generation, or a cascading backend selector.
 2. **Keep CPU Transvoxel for collision only on the GPU branch.** It may also produce frozen reference fixtures outside normal runtime. It must not silently become a second visual backend.
 3. **There is no existing clipbox/LOD implementation to connect.** The current manager streams a square, single-LOD set by `ChunkRadius`. A terrain-request contract and LOD planner are new work.
-4. **Use Marching Cubes only as a plumbing proof.** Marching Cubes cannot be treated as topology parity with the current CPU Transvoxel regular-cell mesher. It proves density-to-pool-to-indirect-render flow; GPU Transvoxel has a later, separate correctness gate.
+4. **Use the current Transvoxel algorithm from the first GPU proof.** Port the existing regular-cell lookup tables, corner numbering, interpolation, vertex reuse, triangle winding, normals, and material behavior directly. Do not introduce Marching Cubes or MC33 as an intermediate mesher.
 5. **Replace the Godot-specific `ArrayMesh` prohibition.** For s&box, the requirement is: normal GPU regeneration must not read generated vertices or indices back to C# and must not rebuild CPU-authored `Mesh`/`Model` objects per block.
 6. **Define one procedural specification.** CPU authority and GPU visual evaluation must implement the same versioned SDF/material rules. Cross-implementation fixtures and tolerances prevent the two implementations from drifting.
 7. **Make lifetime safety part of the design.** Every request, edit state, pool allocation, draw descriptor, and deferred release carries a generation/version. Stale jobs must never publish or overwrite live geometry.
@@ -89,12 +89,12 @@ The archived GPU prototype is negative evidence worth preserving. On a 324-block
 
 - versioned visual block requests;
 - direct LOD-specific procedural SDF/material evaluation on the GPU;
-- initial one-block Marching Cubes proof;
+- GPU regular-cell Transvoxel matching the current CPU implementation;
 - batched block classification, allocation/scan, and mesh emission;
 - shared vertex/index storage with hard VRAM limits;
 - block residency, replacement, eviction, and deferred reclamation;
 - GPU culling and indexed indirect drawing;
-- regular-cell and transition-cell Transvoxel after the resident path passes;
+- Transvoxel transition cells after the regular-cell resident path passes;
 - sparse authoritative edits, compact GPU edit data, dirty propagation, and coalescing;
 - CPU collision within a configurable local interest region;
 - one- and multi-observer request planning;
@@ -106,7 +106,8 @@ The archived GPU prototype is negative evidence worth preserving. On a 324-block
 - persistence/file format implementation;
 - GPU collision or GPU-to-CPU geometry readback;
 - a persistent dense full-resolution SDF for untouched terrain;
-- production Transvoxel before Marching Cubes proves the pipeline;
+- any Marching Cubes or MC33 intermediate visual mesher;
+- Transvoxel transition cells and production LOD in the first single-block proof;
 - final terrain art, biome, or material complexity;
 - supporting both CPU and GPU visual backends in one runtime build.
 
@@ -450,12 +451,12 @@ Fail:
 - a second visual path is introduced;
 - backend-specific assumptions leak into world authority contracts.
 
-### Phase 1 — Single-block GPU-resident proof
+### Phase 1 — Single-block GPU Transvoxel proof
 
 Deliverables:
 
 - procedural GPU density/material generation for one 32³ LOD0 block;
-- GPU Marching Cubes classification and emission;
+- GPU regular-cell Transvoxel classification and emission using the current CPU tables and topology rules;
 - direct indexed drawing from generated GPU buffers;
 - opt-in bounded diagnostic readback for conformance only;
 - CPU/GPU phase timing and byte counters.
@@ -463,7 +464,9 @@ Deliverables:
 Tests:
 
 - empty, solid, flat plane, single corner, sphere, border-crossing surface, and deterministic edited fixture;
+- exhaustive coverage of all 256 regular-cell case codes;
 - density sign/material conformance against CPU samples;
+- CPU/GPU comparison of regular-cell class, vertex count, index count, edge ownership, positions, winding, normals, and materials;
 - invalid index, NaN/Inf vertex, degenerate triangle, winding, and bounds validation;
 - repeated rebuild and resource-retirement loop.
 
@@ -472,6 +475,7 @@ Pass:
 - the block renders correctly from GPU-generated buffers;
 - normal-operation geometry readback count is zero;
 - all non-boundary density signs/materials match and SDF deltas are within tolerance;
+- GPU regular-cell topology matches the current CPU Transvoxel output within the declared numeric tolerance;
 - no invalid indices, non-finite vertices, allocator overruns, or leaked resources occur;
 - repeated generations publish only the newest generation.
 
@@ -554,11 +558,11 @@ Fail:
 - motion causes unbounded queue growth or never-settling holes;
 - the benchmark omits required scenarios because a stage is incomplete.
 
-### Phase 4 — GPU Transvoxel and LOD
+### Phase 4 — LOD and Transvoxel transitions
 
 Deliverables:
 
-- GPU regular-cell Transvoxel using the official tables;
+- production hardening of the Phase 1–3 GPU regular-cell Transvoxel path;
 - LOD planner/clipbox request producer;
 - direct LOD-specific sampling;
 - GPU transition-cell generation and unique transition ownership;
@@ -567,7 +571,7 @@ Deliverables:
 
 Tests:
 
-- exhaustive regular-cell case coverage;
+- regression coverage for all 256 regular-cell case codes;
 - exhaustive supported transition-cell case coverage;
 - CPU fixture comparison for counts, indices/topology class, positions within tolerance, normals, and materials;
 - same-LOD border fixtures in all axes;
@@ -734,14 +738,14 @@ The experiment is complete only when:
 - the decision is recorded as full adoption, targeted adoption, or rejection with evidence;
 - the resulting player experience is evaluated separately from subsystem timings.
 
-“A block rendered from compute” is Phase 1 completion, not experiment completion.
+“A block rendered with GPU regular-cell Transvoxel” is Phase 1 completion, not experiment completion.
 
 ## Immediate implementation target
 
 Start with Phase 0, then Phase 1. The first code milestone should be:
 
-> One fixed-LOD0 32³ block whose procedural density is generated on the GPU, whose Marching Cubes surface is emitted into GPU buffers, and whose indexed geometry is drawn directly without normal vertex/index readback.
+> One fixed-LOD0 32³ block whose procedural density is generated on the GPU, whose surface is produced by a direct GPU port of the current regular-cell Transvoxel implementation, and whose indexed geometry is drawn directly without normal vertex/index readback.
 
 Before expanding to many blocks, prove the request generation, resource lifetime, direct draw, diagnostics, and conformance contracts. Before implementing full LOD, prove batched shared-pool generation, residency, eviction, and indirect drawing under the current fixed-LOD radius workload.
 
-That sequence gives the experiment the highest information value: it tests whether the GPU architecture fixes the actual scaling problem before investing in production Transvoxel and LOD complexity.
+That sequence gives the experiment the highest information value: it tests whether the GPU architecture fixes the actual scaling problem with the intended Transvoxel topology before investing in transition-cell and LOD complexity.
