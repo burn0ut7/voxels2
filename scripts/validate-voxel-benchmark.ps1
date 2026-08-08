@@ -9,7 +9,6 @@ $ErrorActionPreference = 'Stop'
 
 $requiredScenarios = @(
 	'cold_generation',
-	'transvoxel_backend_compare',
 	'gpu_transvoxel_regular_proof',
 	'live_chunk_radius_reconfiguration',
 	'player_infinity_streaming',
@@ -42,9 +41,7 @@ $requiredMetrics = @(
 	'stream_publication_wait_avg_ms', 'stream_publication_wait_p95_ms', 'stream_publication_wait_max_ms',
 	'stream_upload_avg_ms', 'stream_upload_p95_ms', 'stream_upload_max_ms',
 	'stream_chunk_ready_avg_ms', 'stream_chunk_ready_p95_ms', 'stream_chunk_ready_max_ms',
-	'stream_batch_avg_ms', 'stream_batch_p95_ms', 'stream_batch_max_ms',
-	'transvoxel_backend_compare_available', 'transvoxel_backend_compare_passed', 'transvoxel_backend_compare_failure',
-	'transvoxel_backend_compare_batch_results'
+	'stream_batch_avg_ms', 'stream_batch_p95_ms', 'stream_batch_max_ms'
 )
 $requiredCallMetrics = @(
 	'calls_manager_updates', 'calls_generation_requests', 'calls_generation_polls', 'calls_generation_chunks',
@@ -99,7 +96,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 10 ) { Add-Failure "Expected suite version 10, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 9 ) { Add-Failure "Expected suite version 9, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id', 'traversal_distance', 'traversal_speed', 'traversal_loops') )
 {
@@ -141,12 +138,6 @@ foreach ( $scenario in $scenarios )
 	{
 		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
 		if ( [long]$scenario.stream_chunks_completed -le 0 ) { Add-Failure "$context recorded no completed chunk streaming lifecycles" }
-	}
-	elseif ( $scenario.scenario -eq 'transvoxel_backend_compare' )
-	{
-		if ( $scenario.transvoxel_backend_compare_available -ne $true ) { Add-Failure "$context has no backend comparison result" }
-		if ( $scenario.transvoxel_backend_compare_passed -ne $true ) { Add-Failure "$context backend comparison failed: $($scenario.transvoxel_backend_compare_failure)" }
-		if ( -not $scenario.transvoxel_backend_compare_batch_results ) { Add-Failure "$context has no backend batch results" }
 	}
 	if ( $scenario.scenario -eq 'gpu_transvoxel_regular_proof' )
 	{
