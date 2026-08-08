@@ -1,4 +1,4 @@
-public sealed class VoxelManager : Component
+public sealed class VoxelManager : Component, Component.ExecuteInEditor
 {
 	public const string ChunkTag = "voxel_chunk";
 
@@ -89,6 +89,8 @@ public sealed class VoxelManager : Component
 	private bool _benchmarkPlayerProtectionEnabled;
 	private bool _playerSafetyActive;
 	private bool _protectAllPlayers;
+	private bool _worldRegenerationRequested;
+	private WorldConfiguration _generationConfiguration;
 
 	[Property, Group( "World" ), Range( MinimumChunkSize, MaximumChunkSize )]
 	public int ChunkSize { get; set; } = 32;
@@ -203,17 +205,25 @@ public sealed class VoxelManager : Component
 		DetailedChunkLogLimit = System.Math.Clamp( DetailedChunkLogLimit, 0, MaximumDetailedChunkLogs );
 	}
 
-	protected override void OnStart()
+	protected override void OnEnabled()
 	{
-		GenerateWorld();
+		_worldRegenerationRequested = true;
 	}
 
 	protected override void OnUpdate()
 	{
 		CountCall( ref _callManagerUpdates );
+		if ( CaptureWorldConfiguration() != _generationConfiguration )
+		{
+			_worldRegenerationRequested = true;
+		}
+		if ( _worldRegenerationRequested && !_worldGenerationPending )
+		{
+			GenerateWorld();
+		}
 		UpdateWorldGeneration();
 		UpdatePlayerSafety();
-		if ( _worldGenerationPending )
+		if ( _worldGenerationPending || _worldRegenerationRequested )
 		{
 			return;
 		}
@@ -236,6 +246,7 @@ public sealed class VoxelManager : Component
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
+		ResetWorldGeneration();
 	}
 
 	protected override void OnDestroy()
@@ -243,6 +254,7 @@ public sealed class VoxelManager : Component
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
+		ResetWorldGeneration();
 	}
 
 
@@ -261,6 +273,8 @@ public sealed class VoxelManager : Component
 			Log.Warning( "Voxel world generation is already running." );
 			return;
 		}
+		_generationConfiguration = CaptureWorldConfiguration();
+		_worldRegenerationRequested = false;
 		ActivatePlayerSafety();
 
 		DisposeCpuVisualWorld();
@@ -280,8 +294,8 @@ public sealed class VoxelManager : Component
 		coordinates.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
 
 		var workerCount = System.Math.Min( CpuChunkBuildConcurrency, coordinates.Count );
-		var chunkSize = ChunkSize;
-		var sdfClampDistance = SdfClampDistance;
+		var chunkSize = _generationConfiguration.ChunkSize;
+		var sdfClampDistance = _generationConfiguration.SdfClampDistance;
 		var captureTopology = LogGeneration;
 		_worldGenerationTasks.Clear();
 		_worldGenerationFrameMilliseconds.Clear();
@@ -349,6 +363,15 @@ public sealed class VoxelManager : Component
 				_worldGenerationTasks.Clear();
 				return;
 			}
+		}
+
+		if ( _worldRegenerationRequested || CaptureWorldConfiguration() != _generationConfiguration )
+		{
+			_worldGenerationPending = false;
+			_worldGenerationTasks.Clear();
+			_worldRegenerationRequested = true;
+			GenerateWorld();
+			return;
 		}
 
 		var generated = new List<GeneratedChunkResult>( ConfiguredChunkCount );
@@ -969,6 +992,7 @@ public sealed class VoxelManager : Component
 		if ( _chunkGameObjects.TryGetValue( coordinate, out var existing ) ) return existing;
 
 		var chunkObject = new GameObject( true, $"Voxel Chunk {coordinate}" );
+		chunkObject.Flags |= GameObjectFlags.NotSaved;
 		chunkObject.Parent = GameObject;
 		chunkObject.Tags.Add( ChunkTag );
 		var chunkOrigin = GetChunkVoxelOrigin( coordinate );
@@ -1961,6 +1985,20 @@ public sealed class VoxelManager : Component
 		_cpuBatchSummaryPending = false;
 	}
 
+	private WorldConfiguration CaptureWorldConfiguration()
+	{
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, TerrainMaterial );
+	}
+
+	private void ResetWorldGeneration()
+	{
+		_worldGenerationTasks.Clear();
+		_worldGenerationFrameMilliseconds.Clear();
+		_worldGenerationPending = false;
+		_worldRegenerationRequested = false;
+		_generationConfiguration = default;
+	}
+
 
 	private sealed class CpuChunkRuntime
 	{
@@ -1991,6 +2029,7 @@ public sealed class VoxelManager : Component
 	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
 	private readonly record struct CollisionBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial );
 
 	private sealed class WorldGenerationWorkerResult
 	{

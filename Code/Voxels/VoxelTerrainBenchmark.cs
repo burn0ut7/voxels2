@@ -6,11 +6,12 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 5;
+	private const int SuiteVersion = 6;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] RequiredScenarios => new[]
 	{
 		"cold_generation",
+		"live_chunk_radius_reconfiguration",
 		"player_infinity_streaming",
 		"player_line_streaming",
 		"player_diagonal_streaming",
@@ -64,6 +65,8 @@ public sealed class VoxelTerrainBenchmark : Component
 	private float _traversalLoopLength;
 	private float _traversalDistanceTravelled;
 	private int _traversalInitialCachedChunkCount;
+	private int _originalChunkRadius;
+	private int _liveConfigurationChunkRadius;
 
 	[Property, Group( "Run" )]
 	public bool RunOnStart { get; set; } = true;
@@ -188,10 +191,24 @@ public sealed class VoxelTerrainBenchmark : Component
 			switch ( _phase )
 		{
 			case BenchmarkPhase.WaitInitialGeneration:
-				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartInfinityTraversal );
+				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartLiveConfiguration );
 				break;
 			case BenchmarkPhase.Warmup:
 				if ( --_warmupFramesRemaining <= 0 ) AdvanceAfterWarmup();
+				break;
+			case BenchmarkPhase.StartLiveConfiguration:
+				BeginLiveConfigurationScenario();
+				break;
+			case BenchmarkPhase.WaitLiveConfiguration:
+				if ( _manager.IsTerrainSettled && _manager.DesiredChunkCount == _manager.ConfiguredChunkCount )
+				{
+					CompleteScenario();
+					_manager.ChunkRadius = _originalChunkRadius;
+					_manager.GenerateWorld();
+					_phaseAfterReset = BenchmarkPhase.StartInfinityTraversal;
+					_phase = BenchmarkPhase.WaitReset;
+					_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+				}
 				break;
 			case BenchmarkPhase.StartInfinityTraversal:
 				BeginPlayerTraversal( TraversalPath.Infinity, "player_infinity_streaming", "Actual player flies one or more constant-speed infinity loops while terrain streams" );
@@ -302,6 +319,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		}
 		_manager.CaptureCallCounts = true;
 		_manager.SetBenchmarkPlayerProtection( true );
+		_originalChunkRadius = _manager.ChunkRadius;
 		_results.Clear();
 		_comparisons.Clear();
 		_runId = System.DateTime.UtcNow.ToString( "yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture );
@@ -388,6 +406,14 @@ public sealed class VoxelTerrainBenchmark : Component
 		var seam = _manager.ChunkSize * _manager.VoxelSize;
 		ApplyLocalEdit( new Vector3( seam, seam, 0.0f ), _manager.VoxelSize * 3.0f, _manager.VoxelSize * 1.5f );
 		_phase = BenchmarkPhase.WaitSeamEdit;
+	}
+
+	private void BeginLiveConfigurationScenario()
+	{
+		BeginScenario( "live_chunk_radius_reconfiguration", "Inspector-style chunk radius change regenerates the authoritative world without restarting play" );
+		_liveConfigurationChunkRadius = _originalChunkRadius > 1 ? _originalChunkRadius - 1 : 2;
+		_manager.ChunkRadius = _liveConfigurationChunkRadius;
+		_phase = BenchmarkPhase.WaitLiveConfiguration;
 	}
 
 	private void BeginPlayerTraversal( TraversalPath path, string scenarioName, string description )
@@ -1108,6 +1134,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		Idle,
 		WaitInitialGeneration,
 		Warmup,
+		StartLiveConfiguration,
+		WaitLiveConfiguration,
 		StartInfinityTraversal,
 		RunInfinityTraversal,
 		WaitInfinityTraversal,
