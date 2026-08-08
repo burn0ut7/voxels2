@@ -13,6 +13,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumConcurrentCollisionBuilds = 8;
 	private const int MaximumChunkTimingHistory = 65536;
 	private const int MaximumBatchTimingHistory = 4096;
+	private const int MaximumBackendCompareGpuBatchSize = 128;
+	private static readonly int[] BackendCompareBatchSizes = { 1, 8, 32, 128, 256, 512, 1024 };
 
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
 	private readonly Dictionary<Vector3Int, GameObject> _chunkGameObjects = new();
@@ -39,6 +41,29 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
+	private VoxelTransvoxelBackendCompareResult _lastTransvoxelBackendCompareResult;
+	private bool _hasTransvoxelBackendCompareResult;
+	private bool _awaitingTransvoxelBackendCompareResult;
+	private VoxelTransvoxelBackendCompareBatchResult[] _backendCompareCurrentCpuBatchResults;
+	private int _backendCompareRequestedBatchSizeIndex;
+	private int _backendCompareLogicalBatchSize;
+	private int _backendCompareLogicalBatchPassStartIndex;
+	private int _backendCompareLogicalBatchPassesRemaining;
+	private int _backendCompareLogicalBatchTotalPasses;
+	private int _backendCompareLogicalBatchPassSize;
+	private double _backendCompareCurrentGpuDensityMilliseconds;
+	private double _backendCompareCurrentGpuSubmissionMilliseconds;
+	private double _backendCompareCurrentGpuCompletionMilliseconds;
+	private double _backendCompareCurrentGpuPublicationMilliseconds;
+	private uint _backendCompareCurrentGpuVertexCount;
+	private uint _backendCompareCurrentGpuIndexCount;
+	private int _backendCompareCurrentGpuDispatchCount;
+	private bool _backendCompareCurrentGpuPassed = true;
+	private string _backendCompareCurrentGpuFailure;
+	private System.Threading.Tasks.Task<VoxelTransvoxelBackendCompareBatchResult[]> _backendCompareCpuTask;
+	private double _backendComparePassStartTimestamp;
+	private readonly int[] _backendCompareBatchSizes = BackendCompareBatchSizes;
+	private readonly System.Collections.Generic.List<VoxelTransvoxelBackendCompareBatchResult> _backendCompareLogicalBatchResults = new();
 	private long _nextChunkTimingSequence;
 	private long _nextBatchTimingSequence;
 	private long _cpuBatchStartTimestamp;
@@ -162,6 +187,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal bool IsGpuTransvoxelProofRunning => _gpuTransvoxelProof?.IsRunning == true;
 	internal bool HasGpuTransvoxelProofResult => _hasGpuTransvoxelProofResult;
 	internal VoxelGpuTransvoxelProofResult LastGpuTransvoxelProofResult => _lastGpuTransvoxelProofResult;
+	internal bool HasTransvoxelBackendCompareResult => _hasTransvoxelBackendCompareResult;
+	internal VoxelTransvoxelBackendCompareResult LastTransvoxelBackendCompareResult => _lastTransvoxelBackendCompareResult;
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
 	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
@@ -236,6 +263,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
+		UpdateTransvoxelBackendCompare();
 		if ( RequestGpuTransvoxelProof )
 		{
 			RequestGpuTransvoxelProof = false;
@@ -271,6 +299,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_playerSafetyActive = false;
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
+		ClearTransvoxelBackendCompare();
 		DisposeGpuTransvoxelProof();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -280,6 +309,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	protected override void OnDestroy()
 	{
+		ClearTransvoxelBackendCompare();
 		DisposeGpuTransvoxelProof();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -549,6 +579,70 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 	}
 
+	[Button]
+	public void RunTransvoxelBackendCompare()
+	{
+		ClearTransvoxelBackendCompare();
+		if ( Application.IsDedicatedServer )
+		{
+			Log.Error( "Voxel transvoxel backend compare requires a rendering client." );
+			return;
+		}
+		if ( Scene.Camera is null )
+		{
+			Log.Error( "Voxel transvoxel backend compare requires an active scene camera." );
+			return;
+		}
+
+		if ( _backendCompareBatchSizes.Length == 0 || _backendCompareBatchSizes.All( size => size <= 0 ) )
+		{
+			Log.Error( "Voxel transvoxel backend compare requires at least one positive batch size." );
+			return;
+		}
+
+		_hasTransvoxelBackendCompareResult = false;
+		_awaitingTransvoxelBackendCompareResult = true;
+		_backendCompareRequestedBatchSizeIndex = 0;
+		_backendCompareLogicalBatchResults.Clear();
+		_backendCompareLogicalBatchSize = 0;
+		_backendCompareCurrentCpuBatchResults = null;
+		_backendCompareCpuTask = GameTask.RunInThreadAsync( ComputeTransvoxelBackendCompareCpuResults );
+		StartBackendCompareLogicalBatch();
+	}
+
+	public void ClearTransvoxelBackendCompare()
+	{
+		DisposeTransvoxelBackendCompareGpuProof();
+		_hasTransvoxelBackendCompareResult = false;
+		_awaitingTransvoxelBackendCompareResult = false;
+		_backendCompareRequestedBatchSizeIndex = 0;
+		_backendCompareLogicalBatchResults.Clear();
+		_backendCompareCurrentCpuBatchResults = null;
+		_backendCompareCpuTask = null;
+		_backendCompareLogicalBatchSize = 0;
+		_backendCompareLogicalBatchPassStartIndex = 0;
+		_backendCompareLogicalBatchPassesRemaining = 0;
+		_backendCompareLogicalBatchTotalPasses = 0;
+		_backendCompareLogicalBatchPassSize = 0;
+		_backendCompareCurrentGpuDensityMilliseconds = 0.0;
+		_backendCompareCurrentGpuSubmissionMilliseconds = 0.0;
+		_backendCompareCurrentGpuCompletionMilliseconds = 0.0;
+		_backendCompareCurrentGpuPublicationMilliseconds = 0.0;
+		_backendCompareCurrentGpuVertexCount = 0;
+		_backendCompareCurrentGpuIndexCount = 0;
+		_backendCompareCurrentGpuDispatchCount = 0;
+		_backendCompareCurrentGpuPassed = true;
+		_backendCompareCurrentGpuFailure = null;
+		_backendComparePassStartTimestamp = 0;
+	}
+
+	public VoxelTransvoxelBackendCompareResult? TakeTransvoxelBackendCompareResult()
+	{
+		if ( !_hasTransvoxelBackendCompareResult ) return null;
+		_hasTransvoxelBackendCompareResult = false;
+		return _lastTransvoxelBackendCompareResult;
+	}
+
 	public void ClearGpuTransvoxelProof()
 	{
 		DisposeGpuTransvoxelProof();
@@ -574,6 +668,463 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		_gpuTransvoxelProof?.Dispose();
 		_gpuTransvoxelProof = null;
+	}
+
+	private void UpdateTransvoxelBackendCompare()
+	{
+		if ( !_awaitingTransvoxelBackendCompareResult )
+		{
+			return;
+		}
+
+		if ( _backendCompareCpuTask is not null && _backendCompareCurrentCpuBatchResults is null )
+		{
+			if ( !_backendCompareCpuTask.IsCompleted ) return;
+			try
+			{
+				_backendCompareCurrentCpuBatchResults = _backendCompareCpuTask.Result;
+			}
+			catch ( System.Exception exception )
+			{
+				_backendCompareCurrentCpuBatchResults = null;
+				_backendCompareCpuTask = null;
+				_lastTransvoxelBackendCompareResult = new VoxelTransvoxelBackendCompareResult(
+					false, $"CPU comparison failed to start: {exception.Message}", System.Array.Empty<VoxelTransvoxelBackendCompareBatchResult>()
+				);
+				_hasTransvoxelBackendCompareResult = true;
+				_awaitingTransvoxelBackendCompareResult = false;
+				Log.Error( $"Voxel transvoxel backend compare failed to start CPU workload: {exception.Message}" );
+				DisposeTransvoxelBackendCompareGpuProof();
+				return;
+			}
+		}
+
+		if ( _backendCompareLogicalBatchSize == 0 )
+		{
+			if ( _backendCompareRequestedBatchSizeIndex >= _backendCompareBatchSizes.Length )
+			{
+				CompleteTransvoxelBackendCompare();
+				return;
+			}
+			StartBackendCompareLogicalBatch();
+			return;
+		}
+
+		if ( _gpuTransvoxelProof is null )
+		{
+			FinishTransvoxelBackendCompareWithFailure( "GPU backend compare lost a running pass handle." );
+			return;
+		}
+
+		if ( !_gpuTransvoxelProof.TryTakeBatchResults( out var batchResults, out var result ) ) return;
+		UpdateBackendComparePassResult( result, batchResults );
+		if ( !result.Passed )
+		{
+			FinishTransvoxelBackendCompareWithFailure( string.IsNullOrWhiteSpace( result.Failure ) ? "GPU backend compare pass failed." : result.Failure );
+			return;
+		}
+
+		_backendCompareLogicalBatchPassStartIndex += _backendCompareLogicalBatchPassSize;
+		_backendCompareLogicalBatchPassesRemaining--;
+		if ( _backendCompareLogicalBatchPassesRemaining > 0 )
+		{
+			StartBackendComparePass();
+			return;
+		}
+
+		FinalizeBackendCompareLogicalBatch();
+	}
+
+	private void StartBackendCompareLogicalBatch()
+	{
+		if ( _backendCompareRequestedBatchSizeIndex >= _backendCompareBatchSizes.Length )
+		{
+			CompleteTransvoxelBackendCompare();
+			return;
+		}
+
+		_backendCompareLogicalBatchSize = _backendCompareBatchSizes[_backendCompareRequestedBatchSizeIndex];
+		if ( _backendCompareLogicalBatchSize <= 0 )
+		{
+			FinalizeBackendCompareLogicalBatch();
+			return;
+		}
+
+		_backendCompareLogicalBatchPassStartIndex = 0;
+		_backendCompareLogicalBatchPassesRemaining = GetRequiredSliceCount( _backendCompareLogicalBatchSize );
+		_backendCompareLogicalBatchTotalPasses = _backendCompareLogicalBatchPassesRemaining;
+		_backendCompareCurrentGpuDensityMilliseconds = 0.0;
+		_backendCompareCurrentGpuSubmissionMilliseconds = 0.0;
+		_backendCompareCurrentGpuCompletionMilliseconds = 0.0;
+		_backendCompareCurrentGpuPublicationMilliseconds = 0.0;
+		_backendCompareCurrentGpuVertexCount = 0;
+		_backendCompareCurrentGpuIndexCount = 0;
+		_backendCompareCurrentGpuDispatchCount = 0;
+		_backendCompareCurrentGpuPassed = true;
+		_backendCompareCurrentGpuFailure = null;
+		_backendComparePassStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		StartBackendComparePass();
+	}
+
+	private void StartBackendComparePass()
+	{
+		if ( _backendCompareLogicalBatchPassesRemaining <= 0 || _backendCompareLogicalBatchPassStartIndex >= _backendCompareLogicalBatchSize )
+		{
+			return;
+		}
+		_backendCompareLogicalBatchPassSize = System.Math.Min( MaximumBackendCompareGpuBatchSize, _backendCompareLogicalBatchSize - _backendCompareLogicalBatchPassStartIndex );
+		if ( _backendCompareLogicalBatchPassSize <= 0 ) return;
+
+		var coordinate = Vector3Int.Zero;
+		VoxelChunk chunk;
+		float[] halo;
+		lock ( _sdfLock )
+		{
+			if ( !_chunks.TryGetValue( coordinate, out chunk ) )
+			{
+				Log.Error( "Voxel transvoxel backend compare requires the origin chunk to be loaded." );
+				FinishTransvoxelBackendCompareWithFailure( "origin chunk missing for reference generation" );
+				return;
+			}
+			halo = CreateSdfHalo( chunk );
+		}
+
+		var cpuReference = VoxelTransvoxelMesher.Build( halo, ChunkSize, VoxelSize );
+		var sampleOrigin = GetChunkVoxelOrigin( coordinate );
+		var drawOrigin = new Vector3( sampleOrigin.x, sampleOrigin.y, sampleOrigin.z ) * VoxelSize +
+			Vector3.Up * ChunkSize * VoxelSize * 2.0f;
+		var passStart = _backendCompareLogicalBatchPassStartIndex;
+		try
+		{
+			DisposeTransvoxelBackendCompareGpuProof();
+			_gpuTransvoxelProof = new VoxelGpuTransvoxelProof(
+				Scene.SceneWorld,
+				Scene.Camera,
+				cpuReference,
+				sampleOrigin,
+				drawOrigin,
+				ChunkSize,
+				VoxelSize,
+				SdfClampDistance,
+				new[] { _backendCompareLogicalBatchPassSize },
+				passStart
+			);
+			_gpuTransvoxelProof.Run();
+		}
+		catch ( System.Exception exception )
+		{
+			FinishTransvoxelBackendCompareWithFailure( $"GPU pass start failed: {exception.Message}" );
+		}
+	}
+
+	private void UpdateBackendComparePassResult( VoxelGpuTransvoxelProofResult result, VoxelGpuTransvoxelBatchResult[] batchResults )
+	{
+		_backendCompareCurrentGpuDensityMilliseconds += result.DensityGenerationMilliseconds;
+		_backendCompareCurrentGpuSubmissionMilliseconds += result.SubmissionMilliseconds;
+		_backendCompareCurrentGpuCompletionMilliseconds += result.CompletionMilliseconds;
+		_backendCompareCurrentGpuPublicationMilliseconds += result.CpuCountPublicationMilliseconds + result.GpuCountPublicationMilliseconds + result.GeometryReadbackMilliseconds;
+		_backendCompareCurrentGpuVertexCount += result.VertexCount;
+		_backendCompareCurrentGpuIndexCount += result.IndexCount;
+		_backendCompareCurrentGpuDispatchCount += result.DispatchCount;
+		_backendCompareCurrentGpuPassed &= result.Passed;
+		if ( !result.Passed && string.IsNullOrWhiteSpace( _backendCompareCurrentGpuFailure ) )
+		{
+			_backendCompareCurrentGpuFailure = result.Failure;
+		}
+		if ( batchResults is null ) return;
+		foreach ( var batchResult in batchResults )
+		{
+			_backendCompareCurrentGpuDensityMilliseconds += batchResult.DensityGenerationMilliseconds;
+			_backendCompareCurrentGpuSubmissionMilliseconds += batchResult.SubmissionMilliseconds;
+			_backendCompareCurrentGpuCompletionMilliseconds += batchResult.CompletionMilliseconds;
+			_backendCompareCurrentGpuPublicationMilliseconds += batchResult.PublicationMilliseconds + batchResult.GeometryReadbackMilliseconds;
+			_backendCompareCurrentGpuDispatchCount += batchResult.DispatchCount;
+		}
+	}
+
+	private void FinalizeBackendCompareLogicalBatch()
+	{
+		var cpuBatch = _backendCompareCurrentCpuBatchResults is null ? null : FindCpuBatchResult( _backendCompareLogicalBatchSize );
+		var gpuWallMilliseconds = ComputeBackendCompareGpuWallMilliseconds();
+		var gpuSurfaceBlockCount = CountBackendCompareSurfaceBlocks( _backendCompareLogicalBatchSize );
+		if ( cpuBatch is null )
+		{
+			_backendCompareLogicalBatchResults.Add( new VoxelTransvoxelBackendCompareBatchResult(
+				_backendCompareLogicalBatchSize,
+				0.0,
+				0.0,
+				0.0,
+				0.0,
+				0.0,
+				0.0,
+				false,
+				"missing CPU batch metrics",
+				0,
+				0,
+				0,
+				_backendCompareCurrentGpuDensityMilliseconds,
+				_backendCompareCurrentGpuSubmissionMilliseconds,
+				_backendCompareCurrentGpuCompletionMilliseconds,
+				_backendCompareCurrentGpuPublicationMilliseconds,
+				gpuWallMilliseconds,
+				ComputeBackendCompareGpuChunksPerSecond( gpuWallMilliseconds ),
+				_backendCompareCurrentGpuPassed,
+				_backendCompareCurrentGpuFailure ?? string.Empty,
+				_backendCompareCurrentGpuVertexCount,
+				_backendCompareCurrentGpuIndexCount,
+				gpuSurfaceBlockCount,
+				_backendCompareCurrentGpuDispatchCount
+			) );
+		}
+		else
+		{
+			_backendCompareLogicalBatchResults.Add( new VoxelTransvoxelBackendCompareBatchResult(
+				cpuBatch.BatchSize,
+				cpuBatch.CpuDensityGenerationMilliseconds,
+				cpuBatch.CpuSnapshotPreparationMilliseconds,
+				cpuBatch.CpuMeshMilliseconds,
+				cpuBatch.CpuPublicationMilliseconds,
+				cpuBatch.CpuTotalWallMilliseconds,
+				cpuBatch.CpuChunksPerSecond,
+				cpuBatch.CpuPassed,
+				cpuBatch.CpuFailure,
+				cpuBatch.CpuVertexCount,
+				cpuBatch.CpuIndexCount,
+				cpuBatch.CpuSurfaceBlockCount,
+				_backendCompareCurrentGpuDensityMilliseconds,
+				_backendCompareCurrentGpuSubmissionMilliseconds,
+				_backendCompareCurrentGpuCompletionMilliseconds,
+				_backendCompareCurrentGpuPublicationMilliseconds,
+				gpuWallMilliseconds,
+				ComputeBackendCompareGpuChunksPerSecond( gpuWallMilliseconds ),
+				_backendCompareCurrentGpuPassed,
+				_backendCompareCurrentGpuFailure ?? string.Empty,
+				_backendCompareCurrentGpuVertexCount,
+				_backendCompareCurrentGpuIndexCount,
+				gpuSurfaceBlockCount,
+				_backendCompareCurrentGpuDispatchCount
+			) );
+		}
+
+		_backendCompareRequestedBatchSizeIndex++;
+		_backendCompareLogicalBatchSize = 0;
+		_backendCompareLogicalBatchPassSize = 0;
+		_backendCompareLogicalBatchPassStartIndex = 0;
+		_backendCompareLogicalBatchPassesRemaining = 0;
+		_backendCompareLogicalBatchTotalPasses = 0;
+		_backendCompareCurrentGpuDensityMilliseconds = 0.0;
+		_backendCompareCurrentGpuSubmissionMilliseconds = 0.0;
+		_backendCompareCurrentGpuCompletionMilliseconds = 0.0;
+		_backendCompareCurrentGpuPublicationMilliseconds = 0.0;
+		_backendCompareCurrentGpuVertexCount = 0;
+		_backendCompareCurrentGpuIndexCount = 0;
+		_backendCompareCurrentGpuDispatchCount = 0;
+		_backendCompareCurrentGpuPassed = true;
+		_backendCompareCurrentGpuFailure = null;
+
+		DisposeTransvoxelBackendCompareGpuProof();
+		if ( _backendCompareRequestedBatchSizeIndex < _backendCompareBatchSizes.Length )
+		{
+			StartBackendCompareLogicalBatch();
+		}
+		else
+		{
+			CompleteTransvoxelBackendCompare();
+		}
+	}
+
+	private void CompleteTransvoxelBackendCompare()
+	{
+		if ( _backendCompareCpuTask is not null && !_backendCompareCpuTask.IsCompleted )
+		{
+			return;
+		}
+		if ( _backendCompareCurrentCpuBatchResults is null )
+		{
+			var message = "CPU comparison missing results.";
+			_lastTransvoxelBackendCompareResult = new VoxelTransvoxelBackendCompareResult( false, message, System.Array.Empty<VoxelTransvoxelBackendCompareBatchResult>() );
+			_hasTransvoxelBackendCompareResult = true;
+			_awaitingTransvoxelBackendCompareResult = false;
+			DisposeTransvoxelBackendCompareGpuProof();
+			Log.Error( $"Voxel transvoxel backend compare failed: {message}" );
+			return;
+		}
+
+		_lastTransvoxelBackendCompareResult = new VoxelTransvoxelBackendCompareResult(
+			backendComparePassed: _backendCompareLogicalBatchResults.TrueForAll( r => r.CpuPassed && r.GpuPassed ),
+			failure: string.Empty,
+			batchResults: _backendCompareLogicalBatchResults.ToArray()
+		);
+		_hasTransvoxelBackendCompareResult = true;
+		_awaitingTransvoxelBackendCompareResult = false;
+		DisposeTransvoxelBackendCompareGpuProof();
+		Log.Info( $"Voxel transvoxel backend compare complete: result={(_lastTransvoxelBackendCompareResult.Passed ? "PASS" : "FAIL")}." );
+	}
+
+	private void FinishTransvoxelBackendCompareWithFailure( string failure )
+	{
+		_lastTransvoxelBackendCompareResult = new VoxelTransvoxelBackendCompareResult( false, failure, System.Array.Empty<VoxelTransvoxelBackendCompareBatchResult>() );
+		_hasTransvoxelBackendCompareResult = true;
+		_awaitingTransvoxelBackendCompareResult = false;
+		DisposeTransvoxelBackendCompareGpuProof();
+		Log.Error( $"Voxel transvoxel backend compare failed: {failure}" );
+	}
+
+	private int GetRequiredSliceCount( int batchSize ) => (batchSize + MaximumBackendCompareGpuBatchSize - 1) / MaximumBackendCompareGpuBatchSize;
+
+	private double ComputeBackendCompareGpuWallMilliseconds() =>
+		_backendComparePassStartTimestamp == 0 ? 0.0 : System.Diagnostics.Stopwatch.GetElapsedTime( (long)_backendComparePassStartTimestamp ).TotalMilliseconds;
+
+	private double ComputeBackendCompareGpuChunksPerSecond( double wallMilliseconds ) => wallMilliseconds > 0.0 && _backendCompareLogicalBatchSize > 0
+		? _backendCompareLogicalBatchSize * 1000.0 / wallMilliseconds
+		: 0.0;
+
+	private int CountBackendCompareSurfaceBlocks( int batchSize )
+	{
+		var count = 0;
+		for ( var block = 0; block < batchSize; block++ )
+		{
+			if ( block == 0 || block % 4 is 0 or 3 ) count++;
+		}
+		return count;
+	}
+
+	private VoxelTransvoxelBackendCompareBatchResult FindCpuBatchResult( int batchSize )
+	{
+		if ( _backendCompareCurrentCpuBatchResults is null ) return default;
+		foreach ( var result in _backendCompareCurrentCpuBatchResults )
+		{
+			if ( result.BatchSize == batchSize ) return result;
+		}
+		return default;
+	}
+
+	private void DisposeTransvoxelBackendCompareGpuProof()
+	{
+		_gpuTransvoxelProof?.Dispose();
+		_gpuTransvoxelProof = null;
+	}
+private VoxelTransvoxelBackendCompareBatchResult[] ComputeTransvoxelBackendCompareCpuResults()
+	{
+		var results = new VoxelTransvoxelBackendCompareBatchResult[_backendCompareBatchSizes.Length];
+		for ( var index = 0; index < _backendCompareBatchSizes.Length; index++ )
+		{
+			var batchSize = _backendCompareBatchSizes[index];
+			results[index] = ComputeTransvoxelBackendCompareCpuBatch( batchSize );
+		}
+		return results;
+	}
+
+	private VoxelTransvoxelBackendCompareBatchResult ComputeTransvoxelBackendCompareCpuBatch( int batchSize )
+	{
+		var densityStart = System.Diagnostics.Stopwatch.GetTimestamp();
+		var densityGenerationMilliseconds = 0.0;
+		var snapshotPreparationMilliseconds = 0.0;
+		var meshMilliseconds = 0.0;
+		var publicationMilliseconds = 0.0;
+		long vertexCount = 0;
+		long indexCount = 0;
+		var passed = true;
+		string failure = string.Empty;
+		var sampleOrigins = GetBackendCompareBlockSamples( batchSize );
+		for ( var blockIndex = 0; blockIndex < batchSize; blockIndex++ )
+		{
+			var sampleOrigin = sampleOrigins[blockIndex];
+			var densityCompletion = System.Diagnostics.Stopwatch.GetTimestamp();
+			var chunk = new VoxelChunk( new Vector3Int( 0, 0, 0 ), ChunkSize, SdfClampDistance );
+			FillChunkFromSdfFunction( chunk, sampleOrigin, VoxelSize, SdfClampDistance );
+			densityGenerationMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime( densityCompletion ).TotalMilliseconds;
+			var snapshotStart = System.Diagnostics.Stopwatch.GetTimestamp();
+			var halo = CreateBackendCompareSdfHalo( chunk, sampleOrigin );
+			snapshotPreparationMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime( snapshotStart ).TotalMilliseconds;
+			var meshStart = System.Diagnostics.Stopwatch.GetTimestamp();
+			var mesh = VoxelTransvoxelMesher.Build( halo, ChunkSize, VoxelSize );
+			meshMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime( meshStart ).TotalMilliseconds;
+			var publishStart = System.Diagnostics.Stopwatch.GetTimestamp();
+			vertexCount += mesh.Vertices.Count;
+			indexCount += mesh.Indices.Count;
+			publicationMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime( publishStart ).TotalMilliseconds;
+		}
+		var totalMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( densityStart ).TotalMilliseconds;
+		return new VoxelTransvoxelBackendCompareBatchResult(
+			batchSize,
+			densityGenerationMilliseconds,
+			snapshotPreparationMilliseconds,
+			meshMilliseconds,
+			publicationMilliseconds,
+			totalMilliseconds,
+			batchSize > 0 && totalMilliseconds > 0.0 ? (batchSize * 1000.0 / totalMilliseconds) : 0.0,
+			true,
+			string.Empty,
+			(uint)vertexCount,
+			(uint)indexCount,
+			(uint)CountBackendCompareSurfaceBlocks( batchSize ),
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			true,
+			string.Empty,
+			0,
+			0,
+			0,
+			0
+		);
+	}
+
+	private Vector3[] GetBackendCompareBlockSamples( int batchSize )
+	{
+		var samples = new Vector3[batchSize];
+		for ( var block = 0; block < batchSize; block++ )
+		{
+			var absoluteBlock = block;
+			var gridX = absoluteBlock % 16;
+			var gridY = absoluteBlock / 16;
+			var topologyOffset = absoluteBlock > 0 && absoluteBlock % 4 == 1 ? 10_000.0f : absoluteBlock > 0 && absoluteBlock % 4 == 2 ? -10_000.0f : 0.0f;
+			var sampleOrigin = new Vector3(
+				gridX * ChunkSize * VoxelSize,
+				gridY * ChunkSize * VoxelSize,
+				-ChunkSize * VoxelSize + topologyOffset
+			);
+			samples[block] = sampleOrigin;
+		}
+		return samples;
+	}
+
+	private void FillChunkFromSdfFunction( VoxelChunk chunk, Vector3 sampleOrigin, float voxelSize, float sdfClampDistance )
+	{
+		var sampleSize = chunk.SampleSize;
+		for ( var z = 0; z < sampleSize; z++ )
+		{
+			for ( var y = 0; y < sampleSize; y++ )
+			{
+				for ( var x = 0; x < sampleSize; x++ )
+				{
+					var worldZ = sampleOrigin.z + z * voxelSize;
+					chunk.SetVoxelByIndex( x + sampleSize * (y + sampleSize * z ), new Voxel( System.Math.Clamp( worldZ, -sdfClampDistance, sdfClampDistance ) ) );
+				}
+			}
+		}
+	}
+
+	private float[] CreateBackendCompareSdfHalo( VoxelChunk chunk, Vector3 sampleOrigin )
+	{
+		var sampleSize = chunk.Size + 3;
+		var halo = new float[sampleSize * sampleSize * sampleSize];
+		for ( var z = -1; z <= chunk.Size + 1; z++ )
+		{
+			for ( var y = -1; y <= chunk.Size + 1; y++ )
+			{
+				for ( var x = -1; x <= chunk.Size + 1; x++ )
+				{
+					var rowStart = sampleSize * ((y + 1) + sampleSize * (z + 1));
+					var localWorldZ = sampleOrigin.z + z;
+					halo[rowStart + x + 1] = System.Math.Clamp( localWorldZ, -SdfClampDistance, SdfClampDistance );
+				}
+			}
+		}
+		return halo;
 	}
 
 	public VoxelChunk GenerateChunk( Vector3Int coordinate )
