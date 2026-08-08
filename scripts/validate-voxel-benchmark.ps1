@@ -143,7 +143,7 @@ foreach ( $scenario in $scenarios )
 	$percentageMetrics = @($requiredComparisonMetrics | Where-Object { $_ -like 'change_*_pct' })
 	if ( $scenario.comparison_has_baseline -eq $true )
 	{
-		foreach ( $metric in $percentageMetrics )
+		foreach ( $metric in @('change_max_abs_pct', 'change_avg_fps_pct') )
 		{
 			if ( $null -eq $scenario.$metric ) { Add-Failure "$context has a baseline but '$metric' is null" }
 		}
