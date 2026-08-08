@@ -6,7 +6,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 6;
+	private const int SuiteVersion = 7;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] RequiredScenarios => new[]
 	{
@@ -33,7 +33,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		new( "allocated_bytes", true ),
 		new( "visual_batch_ms", true ),
 		new( "worker_mesh_ms", true ),
-		new( "upload_ms", true )
+		new( "upload_ms", true ),
+		new( "stream_chunk_ready_p95_ms", true ),
+		new( "stream_batch_p95_ms", true )
 	};
 
 	private readonly List<ScenarioResult> _results = new();
@@ -334,14 +336,15 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void BeginScenario( string name, string description )
 	{
-		_sampler = new FrameSampler( name, description, _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot() );
+		_sampler = new FrameSampler( name, description, _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), _manager.LatestChunkTimingSequence, _manager.LatestBatchTimingSequence );
 		_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	private void CompleteScenario()
 	{
 		if ( _sampler is null ) return;
-		var result = _sampler.Complete( _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalMilliseconds );
+		var streaming = _manager.CaptureChunkStreamingDiagnostics( _sampler.StartingChunkTimingSequence, _sampler.StartingBatchTimingSequence );
+		var result = _sampler.Complete( _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), streaming, System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalMilliseconds );
 		_results.Add( result );
 		var hottest = result.CallCounts.Enumerate().OrderByDescending( entry => entry.Count ).First();
 		Log.Info( $"Voxel terrain benchmark scenario {result.Name}: result={(result.Passed ? "PASS" : "FAIL")}, elapsed={result.ElapsedMilliseconds:F2}ms, FPS(avg/1%-low/0.1%-low)={result.AverageFramesPerSecond:F1}/{result.OnePercentLowFramesPerSecond:F1}/{result.PointOnePercentLowFramesPerSecond:F1}, frameMs(p95/max)={result.FrameP95Milliseconds:F2}/{result.FrameMaximumMilliseconds:F2}, stutters={result.StutterEvents:N0}, editLatency(p95/settle)={result.EditCallP95Milliseconds:F3}/{result.PostEditSettleMilliseconds:F2}ms, GPU-p95={result.GpuP95Milliseconds:F2}ms, hottest={hottest.Name}:{hottest.Count:N0}, allocated={FormatBytes( result.AllocatedBytes )}." );
@@ -776,6 +779,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		"visual_batch_ms" => result.Diagnostics.VisualBatchElapsedMilliseconds,
 		"worker_mesh_ms" => result.Diagnostics.WorkerMeshMilliseconds,
 		"upload_ms" => result.Diagnostics.MainThreadUploadMilliseconds,
+		"stream_chunk_ready_p95_ms" => result.Streaming.RequestToRender.P95Milliseconds,
+		"stream_batch_p95_ms" => result.Streaming.BatchCompletion.P95Milliseconds,
 		_ => 0.0
 	};
 
@@ -858,7 +863,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private void AppendHistoryCsv()
 	{
 		var comparisonHeader = string.Join( ",", ComparisonMetrics.Select( metric => $"change_{metric.Name}_pct" ) );
-		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,visual_coherence_violation_frames,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms,configuration_id,comparison_baseline_run_id,comparison_has_baseline,change_max_abs_pct,outlier_detected,outlier_metrics,reproduction_of_run_id,reproduction_status," + comparisonHeader + "," +
+		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,visual_coherence_violation_frames,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms,stream_chunks_completed,stream_chunks_fresh,stream_chunks_cached,stream_batches_completed,stream_sdf_generation_avg_ms,stream_sdf_generation_p95_ms,stream_sdf_generation_max_ms,stream_mesh_queue_avg_ms,stream_mesh_queue_p95_ms,stream_mesh_queue_max_ms,stream_snapshot_avg_ms,stream_snapshot_p95_ms,stream_snapshot_max_ms,stream_worker_mesh_avg_ms,stream_worker_mesh_p95_ms,stream_worker_mesh_max_ms,stream_publication_wait_avg_ms,stream_publication_wait_p95_ms,stream_publication_wait_max_ms,stream_upload_avg_ms,stream_upload_p95_ms,stream_upload_max_ms,stream_chunk_ready_avg_ms,stream_chunk_ready_p95_ms,stream_chunk_ready_max_ms,stream_batch_avg_ms,stream_batch_p95_ms,stream_batch_max_ms,configuration_id,comparison_baseline_run_id,comparison_has_baseline,change_max_abs_pct,outlier_detected,outlier_metrics,reproduction_of_run_id,reproduction_status," + comparisonHeader + "," +
 			string.Join( ",", default(VoxelCallCountSnapshot).Enumerate().Select( entry => CallCountKey( entry.Name ) ) );
 		var builder = new System.Text.StringBuilder();
 		if ( FileSystem.Data.FileExists( HistoryCsvPath ) )
@@ -980,6 +985,18 @@ public sealed class VoxelTerrainBenchmark : Component
 			builder.AppendLine( $"| {result.Name} | {diagnostics.GenerationElapsedMilliseconds:F2} ms | {diagnostics.VisualBatchElapsedMilliseconds:F2} ms | {diagnostics.SnapshotWaitMilliseconds:F2} ms | {diagnostics.SnapshotCopyMilliseconds:F2} ms | {diagnostics.WorkerMeshMilliseconds:F2} ms | {diagnostics.MainThreadUploadMilliseconds:F2} ms | {diagnostics.CollisionTriangles:N0} | {(!diagnostics.PlayerSafetyActive ? "yes" : "no")} |" );
 		}
 		builder.AppendLine();
+		builder.AppendLine( "## Chunk streaming latency" );
+		builder.AppendLine();
+		builder.AppendLine( "Each value is average / p95 / maximum. Chunk-ready time runs from streaming interest to visual publication; batch time runs until all queued terrain is published." );
+		builder.AppendLine();
+		builder.AppendLine( "| Scenario | Chunks fresh / cached | SDF generation | Mesh queue | SDF snapshot | Worker mesh | Publication wait | Main upload | Request to render | Batch completion |" );
+		builder.AppendLine( "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|" );
+		foreach ( var result in _results )
+		{
+			var s = result.Streaming;
+			builder.AppendLine( $"| {result.Name} | {s.FreshGeneratedChunks:N0} / {s.CachedChunks:N0} | {Timing( s.SdfGeneration )} | {Timing( s.MeshQueue )} | {Timing( s.SdfSnapshot )} | {Timing( s.WorkerMesh )} | {Timing( s.PublicationWait )} | {Timing( s.MainThreadUpload )} | {Timing( s.RequestToRender )} | {Timing( s.BatchCompletion )} |" );
+		}
+		builder.AppendLine();
 		builder.AppendLine( "## Percentage change and outliers" );
 		builder.AppendLine();
 		builder.AppendLine( "Changes are signed relative to the latest compatible prior run on the same CPU, GPU, suite, and configuration. Positive means the raw metric increased; use metric semantics to decide whether that is better or worse." );
@@ -1066,6 +1083,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"\"texture_pool_peak_bytes\":{result.PeakTexturePoolUsedBytes},\"texture_pool_non_evictable_peak_bytes\":{result.PeakTexturePoolNonEvictableBytes},\"pending_streaming_requests_max\":{result.MaximumPendingStreamingRequests},\"draw_calls_avg\":{Number( result.DrawCallsAverage )},\"triangles_rendered_avg\":{Number( result.TrianglesRenderedAverage )},\"objects_rendered_avg\":{Number( result.ObjectsRenderedAverage )},\"material_changes_avg\":{Number( result.MaterialChangesAverage )}," +
 			$"\"loaded_chunks\":{d.LoadedChunks},\"authoritative_sdf_bytes\":{d.AuthoritativeSdfStorageBytes},\"uniform_sdf_chunks\":{d.UniformSdfChunks},\"visual_chunks\":{d.ActiveVisualChunks},\"failed_visual_chunks\":{d.FailedVisualChunks},\"visual_batch_built_chunks\":{d.VisualBatchBuiltChunks},\"visual_vertices\":{d.VisualVertices},\"visual_triangles\":{d.VisualTriangles},\"colliders\":{d.ActiveColliders},\"collision_triangles\":{d.CollisionTriangles},\"player_safety_active\":{d.PlayerSafetyActive.ToString().ToLowerInvariant()}," +
 			$"\"generation_ms\":{Number( d.GenerationElapsedMilliseconds )},\"visual_batch_ms\":{Number( d.VisualBatchElapsedMilliseconds )},\"snapshot_wait_ms\":{Number( d.SnapshotWaitMilliseconds )},\"snapshot_copy_ms\":{Number( d.SnapshotCopyMilliseconds )},\"worker_mesh_ms\":{Number( d.WorkerMeshMilliseconds )},\"upload_ms\":{Number( d.MainThreadUploadMilliseconds )}," +
+			SerializeStreamingJson( result.Streaming ) + "," +
 			$"\"configuration_id\":\"{Json( ConfigurationId )}\",\"comparison_baseline_run_id\":{(comparison.HasBaseline ? "\"" + Json( comparison.BaselineRunId ) + "\"" : "null")},\"comparison_has_baseline\":{comparison.HasBaseline.ToString().ToLowerInvariant()},\"change_max_abs_pct\":{Number( comparison.MaximumAbsolutePercent )},\"outlier_detected\":{comparison.MajorOutlier.ToString().ToLowerInvariant()},\"outlier_metrics\":\"{Json( comparison.OutlierMetrics )}\",\"reproduction_of_run_id\":{(_reproductionOfRunId is null ? "null" : "\"" + Json( _reproductionOfRunId ) + "\"")},\"reproduction_status\":\"{Json( comparison.ReproductionStatus )}\"," +
 			SerializePercentChangesJson( comparison ) + "," +
 			SerializeCallCountsJson( result.CallCounts ) +
@@ -1082,6 +1100,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			Number( result.GpuAverageMilliseconds ), Number( result.GpuP95Milliseconds ), Number( result.GpuMaximumMilliseconds ), Number( result.EditCallAverageMilliseconds ), Number( result.EditCallP95Milliseconds ), Number( result.EditCallMaximumMilliseconds ), Number( result.PostEditSettleMilliseconds ), Number( result.EditThroughputPerSecond ), Number( result.UpdateAverageMilliseconds ), Number( result.UpdateMaximumMilliseconds ), Number( result.RenderAverageMilliseconds ), Number( result.RenderMaximumMilliseconds ), Number( result.PhysicsAverageMilliseconds ), Number( result.PhysicsMaximumMilliseconds ), Number( result.NetworkAverageMilliseconds ), Number( result.NetworkMaximumMilliseconds ), Number( result.NetworkOutBytesPerSecondAverage ), Number( result.NetworkInBytesPerSecondAverage ), Number( result.NetworkPingMillisecondsAverage ), result.MaximumConnections, result.MessagesSent, result.MessagesReceived,
 			result.AllocatedBytes, Number( result.GcPauseMilliseconds ), result.Gen0Collections, result.Gen1Collections, result.Gen2Collections, result.Exceptions, result.PeakMemoryBytes, result.PeakTexturePoolUsedBytes, result.PeakTexturePoolNonEvictableBytes, result.MaximumPendingStreamingRequests, Number( result.DrawCallsAverage ), Number( result.TrianglesRenderedAverage ), Number( result.ObjectsRenderedAverage ), Number( result.MaterialChangesAverage ),
 			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, d.PlayerSafetyActive, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds ),
+			StreamingCsv( result.Streaming ),
 			Csv( ConfigurationId ), Csv( comparison.BaselineRunId ), comparison.HasBaseline, Number( comparison.MaximumAbsolutePercent ), comparison.MajorOutlier, Csv( comparison.OutlierMetrics ), Csv( _reproductionOfRunId ), Csv( comparison.ReproductionStatus )
 		);
 		var changes = string.Join( ",", ComparisonMetrics.Select( metric => Number( comparison.PercentChanges.GetValueOrDefault( metric.Name ) ) ) );
@@ -1096,6 +1115,28 @@ public sealed class VoxelTerrainBenchmark : Component
 		string.Join( ",", counts.Enumerate().Select( entry => $"\"{CallCountKey( entry.Name )}\":{entry.Count}" ) );
 
 	private static string CallCountKey( string name ) => "calls_" + name.Replace( '.', '_' );
+
+	private static string SerializeStreamingJson( VoxelChunkStreamingDiagnostics streaming ) =>
+		$"\"stream_chunks_completed\":{streaming.CompletedChunks},\"stream_chunks_fresh\":{streaming.FreshGeneratedChunks},\"stream_chunks_cached\":{streaming.CachedChunks},\"stream_batches_completed\":{streaming.CompletedBatches}," +
+		SerializeTimingJson( "stream_sdf_generation", streaming.SdfGeneration ) + "," + SerializeTimingJson( "stream_mesh_queue", streaming.MeshQueue ) + "," +
+		SerializeTimingJson( "stream_snapshot", streaming.SdfSnapshot ) + "," + SerializeTimingJson( "stream_worker_mesh", streaming.WorkerMesh ) + "," +
+		SerializeTimingJson( "stream_publication_wait", streaming.PublicationWait ) + "," + SerializeTimingJson( "stream_upload", streaming.MainThreadUpload ) + "," +
+		SerializeTimingJson( "stream_chunk_ready", streaming.RequestToRender ) + "," + SerializeTimingJson( "stream_batch", streaming.BatchCompletion );
+
+	private static string SerializeTimingJson( string name, VoxelTimingDistribution timing ) =>
+		$"\"{name}_avg_ms\":{Number( timing.AverageMilliseconds )},\"{name}_p95_ms\":{Number( timing.P95Milliseconds )},\"{name}_max_ms\":{Number( timing.MaximumMilliseconds )}";
+
+	private static string StreamingCsv( VoxelChunkStreamingDiagnostics streaming ) => string.Join( ",",
+		streaming.CompletedChunks, streaming.FreshGeneratedChunks, streaming.CachedChunks, streaming.CompletedBatches,
+		TimingCsv( streaming.SdfGeneration ), TimingCsv( streaming.MeshQueue ), TimingCsv( streaming.SdfSnapshot ), TimingCsv( streaming.WorkerMesh ),
+		TimingCsv( streaming.PublicationWait ), TimingCsv( streaming.MainThreadUpload ), TimingCsv( streaming.RequestToRender ), TimingCsv( streaming.BatchCompletion ) );
+
+	private static string TimingCsv( VoxelTimingDistribution timing ) =>
+		$"{Number( timing.AverageMilliseconds )},{Number( timing.P95Milliseconds )},{Number( timing.MaximumMilliseconds )}";
+
+	private static string Timing( VoxelTimingDistribution timing ) => timing.Count == 0
+		? "n/a"
+		: $"{timing.AverageMilliseconds:F2} / {timing.P95Milliseconds:F2} / {timing.MaximumMilliseconds:F2} ms";
 
 	private static string Number( double value ) => value.ToString( "0.###", System.Globalization.CultureInfo.InvariantCulture );
 	private static string Csv( string value ) => "\"" + (value ?? string.Empty).Replace( "\"", "\"\"" ) + "\"";
@@ -1213,10 +1254,12 @@ public sealed class VoxelTerrainBenchmark : Component
 
 		public string Name { get; }
 		public string Description { get; }
+		public long StartingChunkTimingSequence { get; }
+		public long StartingBatchTimingSequence { get; }
 		public int EditCount { get; private set; }
 		public int ChangedChunkEvents { get; private set; }
 
-		public FrameSampler( string name, string description, VoxelTerrainDiagnostics startingDiagnostics, VoxelCallCountSnapshot startingCallCounts )
+		public FrameSampler( string name, string description, VoxelTerrainDiagnostics startingDiagnostics, VoxelCallCountSnapshot startingCallCounts, long startingChunkTimingSequence, long startingBatchTimingSequence )
 		{
 			Name = name;
 			Description = description;
@@ -1224,6 +1267,8 @@ public sealed class VoxelTerrainBenchmark : Component
 			_startingCallCounts = startingCallCounts;
 			_startingMessagesSent = SumMessagesSent();
 			_startingMessagesReceived = SumMessagesReceived();
+			StartingChunkTimingSequence = startingChunkTimingSequence;
+			StartingBatchTimingSequence = startingBatchTimingSequence;
 		}
 
 		public void RecordEdit( int changedChunks, double callMilliseconds )
@@ -1303,7 +1348,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			}
 		}
 
-		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, double elapsedMilliseconds )
+		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, VoxelChunkStreamingDiagnostics streaming, double elapsedMilliseconds )
 		{
 			_frameTimes.Sort();
 			_gpuTimes.Sort();
@@ -1392,6 +1437,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				PeakTexturePoolNonEvictableBytes = _peakTexturePoolNonEvictableBytes,
 				MaximumPendingStreamingRequests = _maximumPendingStreamingRequests,
 				Diagnostics = scenarioDiagnostics,
+				Streaming = streaming,
 				CallCounts = callCounts.Subtract( _startingCallCounts )
 			};
 		}
@@ -1500,6 +1546,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		public ulong PeakTexturePoolNonEvictableBytes { get; init; }
 		public int MaximumPendingStreamingRequests { get; init; }
 		public VoxelTerrainDiagnostics Diagnostics { get; init; }
+		public VoxelChunkStreamingDiagnostics Streaming { get; init; }
 		public VoxelCallCountSnapshot CallCounts { get; init; }
 	}
 }

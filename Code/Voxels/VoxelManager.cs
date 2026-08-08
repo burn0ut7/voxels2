@@ -11,12 +11,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumCollisionChunkRadius = 16;
 	private const int MaximumCollisionBuildsPerFrame = 16;
 	private const int MaximumConcurrentCollisionBuilds = 8;
+	private const int MaximumChunkTimingHistory = 65536;
+	private const int MaximumBatchTimingHistory = 4096;
 
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
 	private readonly Dictionary<Vector3Int, GameObject> _chunkGameObjects = new();
 	private readonly HashSet<Vector3Int> _desiredChunkCoordinates = new();
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
+	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
 	private readonly object _sdfLock = new();
 	private readonly Dictionary<Vector3Int, ChunkCollisionState> _chunkColliders = new();
 	private readonly Queue<Vector3Int> _collisionBuildQueue = new();
@@ -30,7 +33,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<double> _cpuBatchFrameMilliseconds = new( 4096 );
 	private readonly List<System.Threading.Tasks.Task<WorldGenerationWorkerResult>> _worldGenerationTasks = new();
 	private readonly List<double> _worldGenerationFrameMilliseconds = new( 512 );
+	private readonly List<ChunkStreamTimingEvent> _chunkTimingHistory = new( MaximumChunkTimingHistory );
+	private readonly List<BatchTimingEvent> _batchTimingHistory = new( MaximumBatchTimingHistory );
+	private readonly Dictionary<Vector3Int, double> _initialSdfGenerationMilliseconds = new();
+	private long _nextChunkTimingSequence;
+	private long _nextBatchTimingSequence;
 	private long _cpuBatchStartTimestamp;
+	private long _cpuBatchStartChunkTimingSequence;
+	private long _cpuBatchStartBatchTimingSequence;
 	private bool _cpuBatchSummaryPending;
 	private long _lastCollisionInterestTimestamp;
 	private long _lastChunkStreamingInterestTimestamp;
@@ -45,6 +55,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private double _lastVisualBatchP95FrameMilliseconds;
 	private double _lastVisualBatchMaximumFrameMilliseconds;
 	private int _cpuBatchCompletedBuilds;
+	private int _cpuBatchCompletedStreamBuilds;
 	private double _cpuBatchSnapshotWaitMilliseconds;
 	private double _cpuBatchSnapshotCopyMilliseconds;
 	private double _cpuBatchWorkerMeshMilliseconds;
@@ -142,6 +153,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
 	public bool IsPlayerSafetyActive => _playerSafetyActive;
+	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
+	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
 	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
 		(Application.IsDedicatedServer || (_cpuChunkStates.Count == DesiredChunkCount && ActiveChunkGameObjectCount == DesiredChunkCount)) &&
 		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
@@ -284,8 +297,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			_chunks.Clear();
 		}
+		_initialSdfGenerationMilliseconds.Clear();
 		_chunkStreamingGenerationQueue.Clear();
 		_chunkStreamingQueuedCoordinates.Clear();
+		_chunkStreamingRequestTimestamps.Clear();
 		_lastChunkStreamingInterestTimestamp = 0;
 
 		var observers = GetStreamingObserverChunks();
@@ -391,6 +406,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			foreach ( var result in generated )
 			{
 				_chunks.Add( result.Chunk.Coordinate, result.Chunk );
+				_initialSdfGenerationMilliseconds[result.Chunk.Coordinate] = result.BuildTime.TotalMilliseconds;
 			}
 		}
 
@@ -617,6 +633,69 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			System.Threading.Interlocked.Read( ref _callPlayersRepositioned ),
 			System.Threading.Interlocked.Read( ref _callPlayerTraversalUpdates )
 		);
+	}
+
+	public VoxelChunkStreamingDiagnostics CaptureChunkStreamingDiagnostics( long afterChunkSequence, long afterBatchSequence )
+	{
+		var chunkEvents = new List<ChunkStreamTimingEvent>();
+		foreach ( var timing in _chunkTimingHistory )
+		{
+			if ( timing.Sequence > afterChunkSequence ) chunkEvents.Add( timing );
+		}
+
+		var batchMilliseconds = new List<double>();
+		foreach ( var timing in _batchTimingHistory )
+		{
+			if ( timing.Sequence > afterBatchSequence ) batchMilliseconds.Add( timing.ElapsedMilliseconds );
+		}
+
+		var sdfGeneration = new List<double>( chunkEvents.Count );
+		var meshQueue = new List<double>( chunkEvents.Count );
+		var sdfSnapshot = new List<double>( chunkEvents.Count );
+		var workerMesh = new List<double>( chunkEvents.Count );
+		var publicationWait = new List<double>( chunkEvents.Count );
+		var upload = new List<double>( chunkEvents.Count );
+		var requestToRender = new List<double>( chunkEvents.Count );
+		var fresh = 0;
+		foreach ( var timing in chunkEvents )
+		{
+			if ( timing.SdfGenerationMilliseconds > 0.0 )
+			{
+				fresh++;
+				sdfGeneration.Add( timing.SdfGenerationMilliseconds );
+			}
+			meshQueue.Add( timing.MeshQueueMilliseconds );
+			sdfSnapshot.Add( timing.SdfSnapshotMilliseconds );
+			workerMesh.Add( timing.WorkerMeshMilliseconds );
+			publicationWait.Add( timing.PublicationWaitMilliseconds );
+			upload.Add( timing.UploadMilliseconds );
+			requestToRender.Add( timing.RequestToRenderMilliseconds );
+		}
+
+		return new VoxelChunkStreamingDiagnostics(
+			chunkEvents.Count,
+			fresh,
+			chunkEvents.Count - fresh,
+			batchMilliseconds.Count,
+			SummarizeTiming( sdfGeneration ),
+			SummarizeTiming( meshQueue ),
+			SummarizeTiming( sdfSnapshot ),
+			SummarizeTiming( workerMesh ),
+			SummarizeTiming( publicationWait ),
+			SummarizeTiming( upload ),
+			SummarizeTiming( requestToRender ),
+			SummarizeTiming( batchMilliseconds )
+		);
+	}
+
+	private static VoxelTimingDistribution SummarizeTiming( List<double> values )
+	{
+		if ( values.Count == 0 ) return default;
+		values.Sort();
+		double total = 0.0;
+		foreach ( var value in values ) total += value;
+		var p95Index = (int)System.Math.Clamp( System.Math.Ceiling( values.Count * 0.95 ) - 1, 0, values.Count - 1 );
+		return new VoxelTimingDistribution( values.Count, total / values.Count, values[p95Index], values[^1] );
 	}
 
 	internal void RecordPlayerTraversalUpdate()
@@ -1286,6 +1365,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_cpuQueuedChunks.Clear();
 		_chunkStreamingGenerationQueue.Clear();
 		_chunkStreamingQueuedCoordinates.Clear();
+		_chunkStreamingRequestTimestamps.Clear();
+		var streamingRefreshTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		if ( enteringCount > 0 ) StartCpuBatchIfNeeded( streamingRefreshTimestamp );
 
 		var ordered = new List<Vector3Int>( _desiredChunkCoordinates );
 		ordered.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
@@ -1293,11 +1375,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			if ( _chunks.ContainsKey( coordinate ) )
 			{
-				EnsureCpuVisualState( coordinate );
+				EnsureCpuVisualState( coordinate, streamingRefreshTimestamp );
 				continue;
 			}
 			_chunkStreamingGenerationQueue.Enqueue( coordinate );
 			_chunkStreamingQueuedCoordinates.Add( coordinate );
+			_chunkStreamingRequestTimestamps[coordinate] = streamingRefreshTimestamp;
 		}
 
 		foreach ( var state in _cpuChunkStates.Values ) QueueCpuChunkBuild( state );
@@ -1359,24 +1442,27 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_chunkStreamingQueuedCoordinates.Remove( coordinate );
 			if ( !_desiredChunkCoordinates.Contains( coordinate ) || _chunks.ContainsKey( coordinate ) ) continue;
 
+			var generationStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 			GenerateChunk( coordinate );
-			EnsureCpuVisualState( coordinate );
+			var generationMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( generationStartTimestamp ).TotalMilliseconds;
+			var requestTimestamp = _chunkStreamingRequestTimestamps.Remove( coordinate, out var queuedTimestamp ) ? queuedTimestamp : generationStartTimestamp;
+			EnsureCpuVisualState( coordinate, requestTimestamp, generationMilliseconds );
 			generated++;
 			if ( generated > 0 && System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
 		}
 	}
 
-	private void EnsureCpuVisualState( Vector3Int coordinate )
+	private void EnsureCpuVisualState( Vector3Int coordinate, long requestTimestamp = 0, double sdfGenerationMilliseconds = 0.0 )
 	{
 		if ( Application.IsDedicatedServer || _cpuChunkStates.ContainsKey( coordinate ) ) return;
-		if ( !_cpuBatchSummaryPending )
+		StartCpuBatchIfNeeded( requestTimestamp );
+		var state = new CpuChunkRuntime( coordinate )
 		{
-			_cpuBatchStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-			_cpuBatchSummaryPending = true;
-			_cpuBatchFrameMilliseconds.Clear();
-			ResetCpuBatchMeasurements();
-		}
-		var state = new CpuChunkRuntime( coordinate ) { DesiredGeneration = 1 };
+			DesiredGeneration = 1,
+			TrackStreamingLifecycle = true,
+			StreamRequestTimestamp = requestTimestamp == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : requestTimestamp,
+			SdfGenerationMilliseconds = sdfGenerationMilliseconds
+		};
 		_cpuChunkStates.Add( coordinate, state );
 		QueueCpuChunkBuild( state );
 	}
@@ -1625,7 +1711,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			return;
 		}
 
-		_cpuBatchStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		_cpuBatchStartTimestamp = _worldGenerationStartTimestamp == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : _worldGenerationStartTimestamp;
+		_cpuBatchStartChunkTimingSequence = _nextChunkTimingSequence;
+		_cpuBatchStartBatchTimingSequence = _nextBatchTimingSequence;
 		_cpuBatchSummaryPending = true;
 		_cpuBatchFrameMilliseconds.Clear();
 		ResetCpuBatchMeasurements();
@@ -1635,7 +1723,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		foreach ( var coordinate in orderedCoordinates )
 		{
 			if ( !_chunks.ContainsKey( coordinate ) ) continue;
-			var state = new CpuChunkRuntime( coordinate ) { DesiredGeneration = 1 };
+			_initialSdfGenerationMilliseconds.Remove( coordinate, out var sdfGenerationMilliseconds );
+			var state = new CpuChunkRuntime( coordinate )
+			{
+				DesiredGeneration = 1,
+				TrackStreamingLifecycle = true,
+				StreamRequestTimestamp = _worldGenerationStartTimestamp == 0 ? _cpuBatchStartTimestamp : _worldGenerationStartTimestamp,
+				SdfGenerationMilliseconds = sdfGenerationMilliseconds
+			};
 			_cpuChunkStates.Add( coordinate, state );
 			QueueCpuChunkBuild( state );
 		}
@@ -1650,15 +1745,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void MarkCpuChunkDirty( CpuChunkRuntime state )
 	{
 		state.DesiredGeneration++;
+		state.TrackStreamingLifecycle = false;
 		state.ReadyResult = null;
 		state.Failed = false;
-		if ( !_cpuBatchSummaryPending )
-		{
-			_cpuBatchSummaryPending = true;
-			_cpuBatchStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-			_cpuBatchFrameMilliseconds.Clear();
-			ResetCpuBatchMeasurements();
-		}
+		StartCpuBatchIfNeeded( System.Diagnostics.Stopwatch.GetTimestamp() );
 		QueueCpuChunkBuild( state );
 	}
 
@@ -1684,6 +1774,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void QueueCpuChunkBuild( CpuChunkRuntime state )
 	{
 		if ( state.Task is not null || state.ReadyResult.HasValue || state.CompletedGeneration >= state.DesiredGeneration || !_cpuQueuedChunks.Add( state.Coordinate ) ) return;
+		if ( state.TrackStreamingLifecycle && state.MeshQueuedTimestamp == 0 ) state.MeshQueuedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		_cpuChunkBuildQueue.Enqueue( state.Coordinate );
 		CountCall( ref _callVisualBuildsQueued );
 	}
@@ -1708,6 +1799,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			var chunkSize = ChunkSize;
 			var voxelSize = VoxelSize;
 			state.TaskGeneration = generation;
+			var meshStartedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+			var meshQueueMilliseconds = state.TrackStreamingLifecycle && state.MeshQueuedTimestamp != 0
+				? System.Diagnostics.Stopwatch.GetElapsedTime( state.MeshQueuedTimestamp, meshStartedTimestamp ).TotalMilliseconds
+				: 0.0;
 			CountCall( ref _callVisualBuildsStarted );
 			state.Task = GameTask.RunInThreadAsync( () =>
 			{
@@ -1724,7 +1819,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				}
 				var meshStart = System.Diagnostics.Stopwatch.GetTimestamp();
 				var mesh = VoxelTransvoxelMesher.Build( halo, chunkSize, voxelSize );
-				return new CpuBuildResult( generation, mesh, snapshotWaitElapsed, snapshotCopyElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( meshStart ) );
+				var meshingTime = System.Diagnostics.Stopwatch.GetElapsedTime( meshStart );
+				return new CpuBuildResult( generation, mesh, snapshotWaitElapsed, snapshotCopyElapsed, meshingTime, meshQueueMilliseconds, System.Diagnostics.Stopwatch.GetTimestamp() );
 			} );
 			inFlight++;
 			scheduled++;
@@ -1885,6 +1981,27 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		state.SnapshotTime = result.SnapshotTime;
 		state.MeshingTime = result.MeshingTime;
 		state.UploadTime = System.Diagnostics.Stopwatch.GetElapsedTime( uploadStart );
+		if ( state.TrackStreamingLifecycle )
+		{
+			var publicationWaitMilliseconds = result.WorkerCompletedTimestamp == 0
+				? 0.0
+				: System.Diagnostics.Stopwatch.GetElapsedTime( result.WorkerCompletedTimestamp, uploadStart ).TotalMilliseconds;
+			var requestToRenderMilliseconds = state.StreamRequestTimestamp == 0
+				? 0.0
+				: System.Diagnostics.Stopwatch.GetElapsedTime( state.StreamRequestTimestamp ).TotalMilliseconds;
+			AppendChunkTiming( new ChunkStreamTimingEvent(
+				++_nextChunkTimingSequence,
+				state.SdfGenerationMilliseconds,
+				result.MeshQueueMilliseconds,
+				result.SnapshotWaitTime.TotalMilliseconds + result.SnapshotTime.TotalMilliseconds,
+				result.MeshingTime.TotalMilliseconds,
+				publicationWaitMilliseconds,
+				state.UploadTime.TotalMilliseconds,
+				requestToRenderMilliseconds
+			) );
+			state.TrackStreamingLifecycle = false;
+			_cpuBatchCompletedStreamBuilds++;
+		}
 		CountCall( ref _callVisualUploads );
 		_cpuBatchCompletedBuilds++;
 		_cpuBatchSnapshotWaitMilliseconds += result.SnapshotWaitTime.TotalMilliseconds;
@@ -1953,11 +2070,20 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_lastVisualWorkerMeshMilliseconds = _cpuBatchWorkerMeshMilliseconds;
 		_lastVisualUploadMilliseconds = _cpuBatchUploadMilliseconds;
 		_totalVisualBatchElapsedMilliseconds += elapsed.TotalMilliseconds;
+		if ( _cpuBatchCompletedStreamBuilds > 0 )
+		{
+			AppendBatchTiming( new BatchTimingEvent( ++_nextBatchTimingSequence, elapsed.TotalMilliseconds ) );
+		}
+		var streaming = CaptureChunkStreamingDiagnostics( _cpuBatchStartChunkTimingSequence, _cpuBatchStartBatchTimingSequence );
 		Log.Info(
 			$"Voxel CPU Transvoxel batch: result={(failed == 0 ? "PASS" : "FAIL")}, worldChunks={_cpuChunkStates.Count:N0}, builtChunks={_cpuBatchCompletedBuilds:N0}, failed={failed:N0}, workers={CpuChunkBuildConcurrency:N0}, " +
 			$"vertices={vertices:N0}, triangles={triangles:N0}, snapshotWaitTotal={_cpuBatchSnapshotWaitMilliseconds:F2}ms, snapshotCopyTotal={_cpuBatchSnapshotCopyMilliseconds:F2}ms, workerMeshTotal={_cpuBatchWorkerMeshMilliseconds:F2}ms, " +
 			$"mainUploadTotal={_cpuBatchUploadMilliseconds:F2}ms, batchElapsed={elapsed.TotalMilliseconds:F2}ms, " +
-			$"frames={_cpuBatchFrameMilliseconds.Count:N0}, frameMs(avg/p95/max)={averageFrameMilliseconds:F2}/{p95FrameMilliseconds:F2}/{maximumFrameMilliseconds:F2}, topology=CPU, rendering=GPU-rasterized."
+			$"frames={_cpuBatchFrameMilliseconds.Count:N0}, frameMs(avg/p95/max)={averageFrameMilliseconds:F2}/{p95FrameMilliseconds:F2}/{maximumFrameMilliseconds:F2}, " +
+			$"streamedChunks(fresh/cached)={streaming.FreshGeneratedChunks:N0}/{streaming.CachedChunks:N0}, sdfGenerationMs(avg/p95/max)={FormatTiming( streaming.SdfGeneration )}, " +
+			$"meshQueueMs(avg/p95/max)={FormatTiming( streaming.MeshQueue )}, snapshotMs(avg/p95/max)={FormatTiming( streaming.SdfSnapshot )}, workerMeshMs(avg/p95/max)={FormatTiming( streaming.WorkerMesh )}, " +
+			$"publicationWaitMs(avg/p95/max)={FormatTiming( streaming.PublicationWait )}, uploadMs(avg/p95/max)={FormatTiming( streaming.MainThreadUpload )}, " +
+			$"requestToRenderMs(avg/p95/max)={FormatTiming( streaming.RequestToRender )}, batchMs(avg/p95/max)={FormatTiming( streaming.BatchCompletion )}, topology=CPU, rendering=GPU-rasterized."
 		);
 		_cpuBatchSummaryPending = false;
 	}
@@ -1965,10 +2091,44 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void ResetCpuBatchMeasurements()
 	{
 		_cpuBatchCompletedBuilds = 0;
+		_cpuBatchCompletedStreamBuilds = 0;
 		_cpuBatchSnapshotWaitMilliseconds = 0.0;
 		_cpuBatchSnapshotCopyMilliseconds = 0.0;
 		_cpuBatchWorkerMeshMilliseconds = 0.0;
 		_cpuBatchUploadMilliseconds = 0.0;
+	}
+
+	private void StartCpuBatchIfNeeded( long startTimestamp )
+	{
+		if ( _cpuBatchSummaryPending ) return;
+		_cpuBatchSummaryPending = true;
+		_cpuBatchStartTimestamp = startTimestamp == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : startTimestamp;
+		_cpuBatchStartChunkTimingSequence = _nextChunkTimingSequence;
+		_cpuBatchStartBatchTimingSequence = _nextBatchTimingSequence;
+		_cpuBatchFrameMilliseconds.Clear();
+		ResetCpuBatchMeasurements();
+	}
+
+	private static string FormatTiming( VoxelTimingDistribution timing ) => timing.Count == 0
+		? "n/a"
+		: $"{timing.AverageMilliseconds:F2}/{timing.P95Milliseconds:F2}/{timing.MaximumMilliseconds:F2}";
+
+	private void AppendChunkTiming( ChunkStreamTimingEvent timing )
+	{
+		if ( _chunkTimingHistory.Count >= MaximumChunkTimingHistory )
+		{
+			_chunkTimingHistory.RemoveRange( 0, MaximumChunkTimingHistory / 4 );
+		}
+		_chunkTimingHistory.Add( timing );
+	}
+
+	private void AppendBatchTiming( BatchTimingEvent timing )
+	{
+		if ( _batchTimingHistory.Count >= MaximumBatchTimingHistory )
+		{
+			_batchTimingHistory.RemoveRange( 0, MaximumBatchTimingHistory / 4 );
+		}
+		_batchTimingHistory.Add( timing );
 	}
 
 	private void DisposeCpuVisualWorld()
@@ -2019,6 +2179,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		public System.TimeSpan SnapshotTime { get; set; }
 		public System.TimeSpan MeshingTime { get; set; }
 		public System.TimeSpan UploadTime { get; set; }
+		public bool TrackStreamingLifecycle { get; set; }
+		public long StreamRequestTimestamp { get; set; }
+		public long MeshQueuedTimestamp { get; set; }
+		public double SdfGenerationMilliseconds { get; set; }
 
 		public CpuChunkRuntime( Vector3Int coordinate )
 		{
@@ -2026,8 +2190,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 	}
 
-	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
+	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime, double MeshQueueMilliseconds, long WorkerCompletedTimestamp );
 	private readonly record struct CollisionBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
+	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
+	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
 	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial );
 
