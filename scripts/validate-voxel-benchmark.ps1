@@ -9,6 +9,9 @@ $ErrorActionPreference = 'Stop'
 
 $requiredScenarios = @(
 	'cold_generation',
+	'player_infinity_streaming',
+	'player_line_streaming',
+	'player_diagonal_streaming',
 	'chunk_seam_edit_coherence',
 	'varied_edits',
 	'bulk_edit',
@@ -30,7 +33,8 @@ $requiredCallMetrics = @(
 	'calls_visual_halo_snapshots', 'calls_visual_halo_samples_copied', 'calls_visual_builds_completed', 'calls_visual_uploads',
 	'calls_collision_interest_refreshes', 'calls_collision_queue_pumps', 'calls_collision_builds_queued',
 	'calls_collision_builds_started', 'calls_collision_snapshot_samples_copied', 'calls_collision_builds_completed',
-	'calls_collision_uploads', 'calls_safety_activations', 'calls_safety_update_calls', 'calls_safety_players_repositioned'
+	'calls_collision_uploads', 'calls_safety_activations', 'calls_safety_update_calls', 'calls_safety_players_repositioned',
+	'calls_player_traversal_updates'
 )
 $requiredComparisonMetrics = @(
 	'configuration_id', 'comparison_baseline_run_id', 'comparison_has_baseline', 'change_max_abs_pct',
@@ -75,9 +79,9 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 3 ) { Add-Failure "Expected suite version 3, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 5 ) { Add-Failure "Expected suite version 5, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
-foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id') )
+foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id', 'traversal_distance', 'traversal_speed', 'traversal_loops') )
 {
 	Test-RequiredProperty $report $property 'Latest report'
 }
@@ -113,7 +117,14 @@ foreach ( $scenario in $scenarios )
 	if ( [int]$scenario.frames -le 0 ) { Add-Failure "$context recorded no frames" }
 	if ( [int]$scenario.visual_coherence_violation_frames -ne 0 ) { Add-Failure "$context published a partial visual edit" }
 	if ( $scenario.player_safety_active -ne $false ) { Add-Failure "$context completed while player safety was still active" }
-	if ( [long]$scenario.calls_safety_players_repositioned -le 0 ) { Add-Failure "$context did not exercise player repositioning" }
+	if ( $scenario.scenario -like 'player_*_streaming' )
+	{
+		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
+	}
+	elseif ( [long]$scenario.calls_safety_players_repositioned -le 0 )
+	{
+		Add-Failure "$context did not exercise player safety repositioning"
+	}
 	foreach ( $metric in $requiredMetrics + $requiredCallMetrics + $requiredComparisonMetrics )
 	{
 		Test-RequiredProperty $scenario $metric $context

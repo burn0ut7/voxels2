@@ -26,7 +26,8 @@ public readonly record struct VoxelCallCountSnapshot(
 	long CollisionUploads,
 	long PlayerSafetyActivations,
 	long PlayerSafetyUpdates,
-	long PlayersRepositioned
+	long PlayersRepositioned,
+	long PlayerTraversalUpdates
 )
 {
 	public VoxelCallCountSnapshot Subtract( VoxelCallCountSnapshot baseline )
@@ -57,7 +58,8 @@ public readonly record struct VoxelCallCountSnapshot(
 			System.Math.Max( 0, CollisionUploads - baseline.CollisionUploads ),
 			System.Math.Max( 0, PlayerSafetyActivations - baseline.PlayerSafetyActivations ),
 			System.Math.Max( 0, PlayerSafetyUpdates - baseline.PlayerSafetyUpdates ),
-			System.Math.Max( 0, PlayersRepositioned - baseline.PlayersRepositioned )
+			System.Math.Max( 0, PlayersRepositioned - baseline.PlayersRepositioned ),
+			System.Math.Max( 0, PlayerTraversalUpdates - baseline.PlayerTraversalUpdates )
 		);
 	}
 
@@ -89,5 +91,6 @@ public readonly record struct VoxelCallCountSnapshot(
 		yield return new( "safety.activations", PlayerSafetyActivations );
 		yield return new( "safety.update_calls", PlayerSafetyUpdates );
 		yield return new( "safety.players_repositioned", PlayersRepositioned );
+		yield return new( "player.traversal_updates", PlayerTraversalUpdates );
 	}
 }

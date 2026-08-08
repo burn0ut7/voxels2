@@ -85,6 +85,7 @@ public sealed class VoxelManager : Component
 	private long _callPlayerSafetyActivations;
 	private long _callPlayerSafetyUpdates;
 	private long _callPlayersRepositioned;
+	private long _callPlayerTraversalUpdates;
 	private bool _benchmarkPlayerProtectionEnabled;
 	private bool _playerSafetyActive;
 	private bool _protectAllPlayers;
@@ -590,8 +591,14 @@ public sealed class VoxelManager : Component
 			System.Threading.Interlocked.Read( ref _callCollisionUploads ),
 			System.Threading.Interlocked.Read( ref _callPlayerSafetyActivations ),
 			System.Threading.Interlocked.Read( ref _callPlayerSafetyUpdates ),
-			System.Threading.Interlocked.Read( ref _callPlayersRepositioned )
+			System.Threading.Interlocked.Read( ref _callPlayersRepositioned ),
+			System.Threading.Interlocked.Read( ref _callPlayerTraversalUpdates )
 		);
+	}
+
+	internal void RecordPlayerTraversalUpdate()
+	{
+		CountCall( ref _callPlayerTraversalUpdates );
 	}
 
 	private void CountCall( ref long counter, long amount = 1 )

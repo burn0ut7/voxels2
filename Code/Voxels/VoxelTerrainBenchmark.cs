@@ -6,11 +6,14 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 4;
+	private const int SuiteVersion = 5;
+	private const int InfinityPathSampleCount = 1024;
 	private static string[] RequiredScenarios => new[]
 	{
 		"cold_generation",
-		"streaming_traversal",
+		"player_infinity_streaming",
+		"player_line_streaming",
+		"player_diagonal_streaming",
 		"chunk_seam_edit_coherence",
 		"varied_edits",
 		"bulk_edit",
@@ -52,9 +55,15 @@ public sealed class VoxelTerrainBenchmark : Component
 	private string _reproductionOfRunId;
 	private Dictionary<string, PreviousScenarioMeasurement> _reproductionBaselines;
 	private Dictionary<string, HashSet<string>> _reproductionTargets;
-	private PlayerController _streamingPlayer;
-	private Vector3 _streamingStartPosition;
-	private int _streamingInitialCachedChunkCount;
+	private readonly Vector3[] _infinityPathPositions = new Vector3[InfinityPathSampleCount + 1];
+	private readonly float[] _infinityPathDistances = new float[InfinityPathSampleCount + 1];
+	private PlayerController _traversalPlayer;
+	private Vector3 _traversalStartWorldPosition;
+	private Vector3 _traversalStartLocalPosition;
+	private TraversalPath _traversalPath;
+	private float _traversalLoopLength;
+	private float _traversalDistanceTravelled;
+	private int _traversalInitialCachedChunkCount;
 
 	[Property, Group( "Run" )]
 	public bool RunOnStart { get; set; } = true;
@@ -77,6 +86,15 @@ public sealed class VoxelTerrainBenchmark : Component
 	[Property, Group( "Sustained Editing" ), Range( 0.01f, 0.25f )]
 	public float SustainedEditIntervalSeconds { get; set; } = 0.05f;
 
+	[Property, Group( "Player Traversal" ), Range( 128.0f, 100000.0f )]
+	public float TraversalDistance { get; set; } = 10000.0f;
+
+	[Property, Group( "Player Traversal" ), Range( 1.0f, 10000.0f )]
+	public float TraversalSpeed { get; set; } = 1000.0f;
+
+	[Property, Group( "Player Traversal" ), Range( 1, 10 )]
+	public int TraversalLoopCount { get; set; } = 1;
+
 	public string LastReportPath { get; private set; }
 	public bool IsRunning => _phase is not BenchmarkPhase.Idle and not BenchmarkPhase.Complete and not BenchmarkPhase.Failed;
 
@@ -87,6 +105,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		MajorOutlierThresholdPercent = System.Math.Clamp( MajorOutlierThresholdPercent, 5.0f, 100.0f );
 		SustainedEditCount = System.Math.Clamp( SustainedEditCount, 10, 500 );
 		SustainedEditIntervalSeconds = System.Math.Clamp( SustainedEditIntervalSeconds, 0.01f, 0.25f );
+		TraversalDistance = System.Math.Clamp( TraversalDistance, 128.0f, 100000.0f );
+		TraversalSpeed = System.Math.Clamp( TraversalSpeed, 1.0f, 10000.0f );
+		TraversalLoopCount = System.Math.Clamp( TraversalLoopCount, 1, 10 );
 	}
 
 	protected override void OnStart()
@@ -164,22 +185,40 @@ public sealed class VoxelTerrainBenchmark : Component
 			return;
 		}
 
-		switch ( _phase )
+			switch ( _phase )
 		{
 			case BenchmarkPhase.WaitInitialGeneration:
-				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartStreamingTraversal );
+				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartInfinityTraversal );
 				break;
 			case BenchmarkPhase.Warmup:
 				if ( --_warmupFramesRemaining <= 0 ) AdvanceAfterWarmup();
 				break;
-			case BenchmarkPhase.StartStreamingTraversal:
-				BeginStreamingTraversalScenario();
+			case BenchmarkPhase.StartInfinityTraversal:
+				BeginPlayerTraversal( TraversalPath.Infinity, "player_infinity_streaming", "Actual player flies one or more constant-speed infinity loops while terrain streams" );
 				break;
-			case BenchmarkPhase.WaitStreamingOutward:
-				if ( _manager.IsTerrainSettled ) CompleteStreamingOutwardLeg();
+			case BenchmarkPhase.RunInfinityTraversal:
+				RunPlayerTraversal( BenchmarkPhase.WaitInfinityTraversal );
 				break;
-			case BenchmarkPhase.WaitStreamingBacktrack:
-				if ( _manager.IsTerrainSettled ) CompleteStreamingBacktrack();
+			case BenchmarkPhase.WaitInfinityTraversal:
+				if ( _manager.IsTerrainSettled ) CompletePlayerTraversalAndReset( BenchmarkPhase.StartLineTraversal );
+				break;
+			case BenchmarkPhase.StartLineTraversal:
+				BeginPlayerTraversal( TraversalPath.Line, "player_line_streaming", "Actual player flies straight out and back at constant speed while terrain streams" );
+				break;
+			case BenchmarkPhase.RunLineTraversal:
+				RunPlayerTraversal( BenchmarkPhase.WaitLineTraversal );
+				break;
+			case BenchmarkPhase.WaitLineTraversal:
+				if ( _manager.IsTerrainSettled ) CompletePlayerTraversalAndReset( BenchmarkPhase.StartDiagonalTraversal );
+				break;
+			case BenchmarkPhase.StartDiagonalTraversal:
+				BeginPlayerTraversal( TraversalPath.Diagonal, "player_diagonal_streaming", "Actual player flies diagonally through simultaneous X/Y chunk boundaries and back" );
+				break;
+			case BenchmarkPhase.RunDiagonalTraversal:
+				RunPlayerTraversal( BenchmarkPhase.WaitDiagonalTraversal );
+				break;
+			case BenchmarkPhase.WaitDiagonalTraversal:
+				if ( _manager.IsTerrainSettled ) CompletePlayerTraversalAndReset( BenchmarkPhase.StartSeamEdit );
 				break;
 			case BenchmarkPhase.StartSeamEdit:
 				BeginSeamEditScenario();
@@ -351,70 +390,126 @@ public sealed class VoxelTerrainBenchmark : Component
 		_phase = BenchmarkPhase.WaitSeamEdit;
 	}
 
-	private void BeginStreamingTraversalScenario()
+	private void BeginPlayerTraversal( TraversalPath path, string scenarioName, string description )
 	{
-		BeginScenario( "streaming_traversal", "Player crosses the configured mesh radius and backtracks while chunks construct and deconstruct" );
-		_streamingPlayer = Scene.GetAllComponents<PlayerController>().FirstOrDefault();
-		if ( _streamingPlayer is null )
+		BeginScenario( scenarioName, description );
+		_traversalPlayer = Scene.GetAllComponents<PlayerController>().FirstOrDefault();
+		if ( _traversalPlayer is null )
 		{
-			FailRun( "streaming traversal requires a PlayerController" );
+			FailRun( $"{scenarioName} requires a PlayerController" );
 			return;
 		}
 
-		_streamingStartPosition = _streamingPlayer.WorldPosition;
-		_streamingInitialCachedChunkCount = _manager.LoadedChunkCount;
-		var localStart = _manager.GameObject.WorldTransform.PointToLocal( _streamingStartPosition );
-		var travelDistance = (_manager.ChunkRadius + 2) * _manager.ChunkSize * _manager.VoxelSize;
-		var target = _manager.GameObject.WorldTransform.PointToWorld( localStart + Vector3.Right * travelDistance );
-		MoveStreamingPlayer( target, BenchmarkPhase.WaitStreamingOutward );
+		_traversalPath = path;
+		_traversalStartWorldPosition = _traversalPlayer.WorldPosition;
+		_traversalStartLocalPosition = _manager.GameObject.WorldTransform.PointToLocal( _traversalStartWorldPosition );
+		_traversalInitialCachedChunkCount = _manager.LoadedChunkCount;
+		_traversalDistanceTravelled = 0.0f;
+		_traversalLoopLength = path == TraversalPath.Infinity ? BuildInfinityPath() : TraversalDistance * 2.0f;
+		_phase = path switch
+		{
+			TraversalPath.Infinity => BenchmarkPhase.RunInfinityTraversal,
+			TraversalPath.Line => BenchmarkPhase.RunLineTraversal,
+			_ => BenchmarkPhase.RunDiagonalTraversal
+		};
 	}
 
-	private void CompleteStreamingOutwardLeg()
+	private void RunPlayerTraversal( BenchmarkPhase waitPhase )
 	{
-		var diagnostics = _manager.CaptureTerrainDiagnostics();
-		if ( _manager.LoadedChunkCount <= _streamingInitialCachedChunkCount )
+		var totalDistance = _traversalLoopLength * TraversalLoopCount;
+		_traversalDistanceTravelled = System.MathF.Min( totalDistance, _traversalDistanceTravelled + TraversalSpeed * Time.Delta );
+		if ( _traversalDistanceTravelled >= totalDistance )
 		{
-			FailRun( "streaming traversal did not construct newly entered chunks" );
+			MoveTraversalPlayer( _traversalStartWorldPosition );
+			_phase = waitPhase;
+			return;
+		}
+
+		var loopDistance = _traversalDistanceTravelled % _traversalLoopLength;
+		var offset = _traversalPath switch
+		{
+			TraversalPath.Infinity => SampleInfinityPath( loopDistance ),
+			TraversalPath.Line => SampleOutAndBackPath( loopDistance, false ),
+			_ => SampleOutAndBackPath( loopDistance, true )
+		};
+		MoveTraversalPlayer( _manager.GameObject.WorldTransform.PointToWorld( _traversalStartLocalPosition + offset ) );
+	}
+
+	private float BuildInfinityPath()
+	{
+		var halfDistance = TraversalDistance * 0.5f;
+		_infinityPathPositions[0] = Vector3.Zero;
+		_infinityPathDistances[0] = 0.0f;
+		for ( var index = 1; index <= InfinityPathSampleCount; index++ )
+		{
+			var angle = index * (System.MathF.PI * 2.0f / InfinityPathSampleCount);
+			var sine = System.MathF.Sin( angle );
+			var position = new Vector3( sine * halfDistance, sine * System.MathF.Cos( angle ) * halfDistance, 0.0f );
+			_infinityPathPositions[index] = position;
+			var segment = position - _infinityPathPositions[index - 1];
+			_infinityPathDistances[index] = _infinityPathDistances[index - 1] + System.MathF.Sqrt( segment.LengthSquared );
+		}
+		return _infinityPathDistances[^1];
+	}
+
+	private Vector3 SampleInfinityPath( float distance )
+	{
+		var lower = 0;
+		var upper = InfinityPathSampleCount;
+		while ( lower + 1 < upper )
+		{
+			var middle = (lower + upper) / 2;
+			if ( _infinityPathDistances[middle] <= distance ) lower = middle;
+			else upper = middle;
+		}
+
+		var segmentLength = _infinityPathDistances[upper] - _infinityPathDistances[lower];
+		var fraction = segmentLength > 0.0f ? (distance - _infinityPathDistances[lower]) / segmentLength : 0.0f;
+		return _infinityPathPositions[lower] + (_infinityPathPositions[upper] - _infinityPathPositions[lower]) * fraction;
+	}
+
+	private Vector3 SampleOutAndBackPath( float distance, bool diagonal )
+	{
+		var halfDistance = TraversalDistance * 0.5f;
+		float signedDistance;
+		if ( distance < halfDistance ) signedDistance = distance;
+		else if ( distance < halfDistance + TraversalDistance ) signedDistance = halfDistance - (distance - halfDistance);
+		else signedDistance = -halfDistance + (distance - halfDistance - TraversalDistance);
+
+		if ( !diagonal ) return new Vector3( signedDistance, 0.0f, 0.0f );
+		const float inverseSquareRootOfTwo = 0.70710678118f;
+		return new Vector3( signedDistance * inverseSquareRootOfTwo, signedDistance * inverseSquareRootOfTwo, 0.0f );
+	}
+
+	private void MoveTraversalPlayer( Vector3 worldPosition )
+	{
+		_traversalPlayer.WorldPosition = worldPosition;
+		_manager.RecordPlayerTraversalUpdate();
+		if ( _traversalPlayer.Body is null ) return;
+		_traversalPlayer.Body.Velocity = Vector3.Zero;
+		_traversalPlayer.Body.AngularVelocity = Vector3.Zero;
+	}
+
+	private void CompletePlayerTraversalAndReset( BenchmarkPhase nextPhase )
+	{
+		var scenarioName = _sampler?.Name ?? _traversalPath.ToString();
+		var diagnostics = _manager.CaptureTerrainDiagnostics();
+		if ( _manager.LoadedChunkCount <= _traversalInitialCachedChunkCount )
+		{
+			FailRun( $"{scenarioName} did not generate chunks beyond the starting radius" );
 			return;
 		}
 		if ( diagnostics.ActiveVisualChunks != _manager.DesiredChunkCount )
 		{
-			FailRun( $"streaming traversal active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
+			FailRun( $"{scenarioName} active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
 			return;
 		}
 		if ( _manager.ActiveChunkGameObjectCount != _manager.DesiredChunkCount )
 		{
-			FailRun( $"streaming traversal chunk object count {_manager.ActiveChunkGameObjectCount} did not match desired count {_manager.DesiredChunkCount}" );
+			FailRun( $"{scenarioName} chunk object count {_manager.ActiveChunkGameObjectCount} did not match desired count {_manager.DesiredChunkCount}" );
 			return;
 		}
-		MoveStreamingPlayer( _streamingStartPosition, BenchmarkPhase.WaitStreamingBacktrack );
-	}
-
-	private void CompleteStreamingBacktrack()
-	{
-		var diagnostics = _manager.CaptureTerrainDiagnostics();
-		if ( diagnostics.ActiveVisualChunks != _manager.DesiredChunkCount )
-		{
-			FailRun( $"streaming backtrack active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
-			return;
-		}
-		if ( _manager.ActiveChunkGameObjectCount != _manager.DesiredChunkCount )
-		{
-			FailRun( $"streaming backtrack chunk object count {_manager.ActiveChunkGameObjectCount} did not match desired count {_manager.DesiredChunkCount}" );
-			return;
-		}
-		CompleteScenarioAndWarmup( BenchmarkPhase.StartSeamEdit );
-	}
-
-	private void MoveStreamingPlayer( Vector3 position, BenchmarkPhase nextPhase )
-	{
-		_streamingPlayer.WorldPosition = position;
-		if ( _streamingPlayer.Body is not null )
-		{
-			_streamingPlayer.Body.Velocity = Vector3.Zero;
-			_streamingPlayer.Body.AngularVelocity = Vector3.Zero;
-		}
-		_phase = nextPhase;
+		CompleteScenarioAndReset( nextPhase );
 	}
 
 	private void RunVariedEdits()
@@ -661,7 +756,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private ScenarioComparison GetComparison( ScenarioResult result ) =>
 		_comparisons.TryGetValue( result.Name, out var comparison ) ? comparison : new ScenarioComparison();
 
-	private string ConfigurationId => $"{_manager.ChunkRadius}:{_manager.ChunkSize}:{Number( _manager.VoxelSize )}:{_manager.CpuChunkBuildConcurrency}:exact:{SustainedEditCount}:{Number( SustainedEditIntervalSeconds )}";
+	private string ConfigurationId => $"{_manager.ChunkRadius}:{_manager.ChunkSize}:{Number( _manager.VoxelSize )}:{_manager.CpuChunkBuildConcurrency}:exact:{SustainedEditCount}:{Number( SustainedEditIntervalSeconds )}:{Number( TraversalDistance )}:{Number( TraversalSpeed )}:{TraversalLoopCount}";
 
 	private void FailRun( string reason )
 	{
@@ -785,6 +880,9 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"  \"suite_version\":{SuiteVersion},\n" +
 			$"  \"suite_complete\":{IsSuiteComplete.ToString().ToLowerInvariant()},\n" +
 			$"  \"configuration_id\":\"{Json( ConfigurationId )}\",\n" +
+			$"  \"traversal_distance\":{Number( TraversalDistance )},\n" +
+			$"  \"traversal_speed\":{Number( TraversalSpeed )},\n" +
+			$"  \"traversal_loops\":{TraversalLoopCount},\n" +
 			$"  \"major_outlier_threshold_percent\":{Number( MajorOutlierThresholdPercent )},\n" +
 			$"  \"automatic_reproduction\":{_isReproductionRun.ToString().ToLowerInvariant()},\n" +
 			$"  \"reproduction_of_run_id\":{(_reproductionOfRunId is null ? "null" : "\"" + Json( _reproductionOfRunId ) + "\"")},\n" +
@@ -822,6 +920,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine( $"- GPU: `{Sandbox.Engine.SystemInfo.Gpu}` ({FormatBytes( (long)Sandbox.Engine.SystemInfo.GpuMemory )})" );
 		builder.AppendLine( $"- Display: `{Screen.Width:F0}x{Screen.Height:F0}`, VSync `{vsync}`, frame cap `{frameCap}`" );
 		builder.AppendLine( $"- Configuration: `{_manager.ChunkRadius}` radius, `{_manager.ConfiguredChunkCount}` chunks, `{_manager.ChunkSize}^3` cells, `{_manager.CpuChunkBuildConcurrency}` visual workers, collision `exact visual mesh`" );
+		builder.AppendLine( $"- Player traversal: `{TraversalDistance:F0}` units peak-to-peak, `{TraversalSpeed:F0}` units/s, `{TraversalLoopCount}` loop(s) per route" );
 		builder.AppendLine( $"- Outlier rule: absolute change `>= {MajorOutlierThresholdPercent:F1}%` on stable comparison metrics triggers one complete-suite reproduction run" );
 		if ( _isReproductionRun ) builder.AppendLine( $"- Reproduction of run: `{_reproductionOfRunId}`" );
 		builder.AppendLine( $"- Worst frame p95/max: `{worstP95:F2} / {worstMax:F2} ms`" );
@@ -1009,9 +1108,15 @@ public sealed class VoxelTerrainBenchmark : Component
 		Idle,
 		WaitInitialGeneration,
 		Warmup,
-		StartStreamingTraversal,
-		WaitStreamingOutward,
-		WaitStreamingBacktrack,
+		StartInfinityTraversal,
+		RunInfinityTraversal,
+		WaitInfinityTraversal,
+		StartLineTraversal,
+		RunLineTraversal,
+		WaitLineTraversal,
+		StartDiagonalTraversal,
+		RunDiagonalTraversal,
+		WaitDiagonalTraversal,
 		StartSeamEdit,
 		WaitSeamEdit,
 		StartVariedEdits,
@@ -1028,6 +1133,13 @@ public sealed class VoxelTerrainBenchmark : Component
 		WaitSustainedPlace,
 		Complete,
 		Failed
+	}
+
+	private enum TraversalPath
+	{
+		Infinity,
+		Line,
+		Diagonal
 	}
 
 	private sealed class FrameSampler
