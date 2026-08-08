@@ -140,6 +140,21 @@ foreach ( $scenario in $scenarios )
 	{
 		Test-RequiredProperty $scenario $metric $context
 	}
+	$percentageMetrics = @($requiredComparisonMetrics | Where-Object { $_ -like 'change_*_pct' })
+	if ( $scenario.comparison_has_baseline -eq $true )
+	{
+		foreach ( $metric in $percentageMetrics )
+		{
+			if ( $null -eq $scenario.$metric ) { Add-Failure "$context has a baseline but '$metric' is null" }
+		}
+	}
+	else
+	{
+		foreach ( $metric in $percentageMetrics )
+		{
+			if ( $null -ne $scenario.$metric ) { Add-Failure "$context has no baseline but '$metric' contains a synthetic value" }
+		}
+	}
 	if ( [string]$scenario.reproduction_status -eq 'scheduled' ) { Add-Failure "$context is still awaiting its required reproduction run" }
 }
 
@@ -180,6 +195,8 @@ foreach ( $capability in @('What needs attention', 'Biggest movers and first occ
 }
 if ( $dashboard -notmatch "metric:'change_max_abs_pct'" ) { Add-Failure 'Largest percentage change is not the default trend metric' }
 if ( $dashboard -notmatch 'r\[state\.metric\]' ) { Add-Failure 'Dashboard does not exclude missing historical values from trend charts' }
+if ( $dashboard -notmatch 'comparison_has_baseline===true' ) { Add-Failure 'Dashboard does not exclude synthetic legacy changes without a compatible baseline' }
+if ( $dashboard -notmatch 'No compatible baseline comparisons' ) { Add-Failure 'Dashboard does not explain missing percentage-change data' }
 if ( $dashboard -notmatch 'window\.voxelBenchmarkDashboard=' ) { Add-Failure 'Dashboard does not expose its structured model for automated diagnosis' }
 if ( $dashboard -notmatch 'const allRows=\[\{' ) { Add-Failure 'Dashboard contains no embedded historical corpus rows' }
 if ( $dashboard -notmatch 'localStorage\.setItem\(omissionStorageKey' ) { Add-Failure 'Dashboard does not persist omitted-run preferences' }

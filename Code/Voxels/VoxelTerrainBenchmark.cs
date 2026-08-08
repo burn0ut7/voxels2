@@ -1084,7 +1084,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"\"loaded_chunks\":{d.LoadedChunks},\"authoritative_sdf_bytes\":{d.AuthoritativeSdfStorageBytes},\"uniform_sdf_chunks\":{d.UniformSdfChunks},\"visual_chunks\":{d.ActiveVisualChunks},\"failed_visual_chunks\":{d.FailedVisualChunks},\"visual_batch_built_chunks\":{d.VisualBatchBuiltChunks},\"visual_vertices\":{d.VisualVertices},\"visual_triangles\":{d.VisualTriangles},\"colliders\":{d.ActiveColliders},\"collision_triangles\":{d.CollisionTriangles},\"player_safety_active\":{d.PlayerSafetyActive.ToString().ToLowerInvariant()}," +
 			$"\"generation_ms\":{Number( d.GenerationElapsedMilliseconds )},\"visual_batch_ms\":{Number( d.VisualBatchElapsedMilliseconds )},\"snapshot_wait_ms\":{Number( d.SnapshotWaitMilliseconds )},\"snapshot_copy_ms\":{Number( d.SnapshotCopyMilliseconds )},\"worker_mesh_ms\":{Number( d.WorkerMeshMilliseconds )},\"upload_ms\":{Number( d.MainThreadUploadMilliseconds )}," +
 			SerializeStreamingJson( result.Streaming ) + "," +
-			$"\"configuration_id\":\"{Json( ConfigurationId )}\",\"comparison_baseline_run_id\":{(comparison.HasBaseline ? "\"" + Json( comparison.BaselineRunId ) + "\"" : "null")},\"comparison_has_baseline\":{comparison.HasBaseline.ToString().ToLowerInvariant()},\"change_max_abs_pct\":{Number( comparison.MaximumAbsolutePercent )},\"outlier_detected\":{comparison.MajorOutlier.ToString().ToLowerInvariant()},\"outlier_metrics\":\"{Json( comparison.OutlierMetrics )}\",\"reproduction_of_run_id\":{(_reproductionOfRunId is null ? "null" : "\"" + Json( _reproductionOfRunId ) + "\"")},\"reproduction_status\":\"{Json( comparison.ReproductionStatus )}\"," +
+			$"\"configuration_id\":\"{Json( ConfigurationId )}\",\"comparison_baseline_run_id\":{(comparison.HasBaseline ? "\"" + Json( comparison.BaselineRunId ) + "\"" : "null")},\"comparison_has_baseline\":{comparison.HasBaseline.ToString().ToLowerInvariant()},\"change_max_abs_pct\":{(comparison.HasBaseline ? Number( comparison.MaximumAbsolutePercent ) : "null")},\"outlier_detected\":{comparison.MajorOutlier.ToString().ToLowerInvariant()},\"outlier_metrics\":\"{Json( comparison.OutlierMetrics )}\",\"reproduction_of_run_id\":{(_reproductionOfRunId is null ? "null" : "\"" + Json( _reproductionOfRunId ) + "\"")},\"reproduction_status\":\"{Json( comparison.ReproductionStatus )}\"," +
 			SerializePercentChangesJson( comparison ) + "," +
 			SerializeCallCountsJson( result.CallCounts ) +
 			"}";
@@ -1101,15 +1101,15 @@ public sealed class VoxelTerrainBenchmark : Component
 			result.AllocatedBytes, Number( result.GcPauseMilliseconds ), result.Gen0Collections, result.Gen1Collections, result.Gen2Collections, result.Exceptions, result.PeakMemoryBytes, result.PeakTexturePoolUsedBytes, result.PeakTexturePoolNonEvictableBytes, result.MaximumPendingStreamingRequests, Number( result.DrawCallsAverage ), Number( result.TrianglesRenderedAverage ), Number( result.ObjectsRenderedAverage ), Number( result.MaterialChangesAverage ),
 			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, d.PlayerSafetyActive, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds ),
 			StreamingCsv( result.Streaming ),
-			Csv( ConfigurationId ), Csv( comparison.BaselineRunId ), comparison.HasBaseline, Number( comparison.MaximumAbsolutePercent ), comparison.MajorOutlier, Csv( comparison.OutlierMetrics ), Csv( _reproductionOfRunId ), Csv( comparison.ReproductionStatus )
+			Csv( ConfigurationId ), Csv( comparison.BaselineRunId ), comparison.HasBaseline, comparison.HasBaseline ? Number( comparison.MaximumAbsolutePercent ) : string.Empty, comparison.MajorOutlier, Csv( comparison.OutlierMetrics ), Csv( _reproductionOfRunId ), Csv( comparison.ReproductionStatus )
 		);
-		var changes = string.Join( ",", ComparisonMetrics.Select( metric => Number( comparison.PercentChanges.GetValueOrDefault( metric.Name ) ) ) );
+		var changes = string.Join( ",", ComparisonMetrics.Select( metric => comparison.PercentChanges.TryGetValue( metric.Name, out var change ) ? Number( change ) : string.Empty ) );
 		var calls = string.Join( ",", result.CallCounts.Enumerate().Select( entry => entry.Count.ToString( System.Globalization.CultureInfo.InvariantCulture ) ) );
 		return baseRow + "," + changes + "," + calls;
 	}
 
 	private static string SerializePercentChangesJson( ScenarioComparison comparison ) =>
-		string.Join( ",", ComparisonMetrics.Select( metric => $"\"change_{metric.Name}_pct\":{Number( comparison.PercentChanges.GetValueOrDefault( metric.Name ) )}" ) );
+		string.Join( ",", ComparisonMetrics.Select( metric => $"\"change_{metric.Name}_pct\":{(comparison.PercentChanges.TryGetValue( metric.Name, out var change ) ? Number( change ) : "null")}" ) );
 
 	private static string SerializeCallCountsJson( VoxelCallCountSnapshot counts ) =>
 		string.Join( ",", counts.Enumerate().Select( entry => $"\"{CallCountKey( entry.Name )}\":{entry.Count}" ) );
