@@ -478,6 +478,7 @@
           "OnComponentFixedUpdate": null,
           "OnComponentStart": null,
           "OnComponentUpdate": null,
+          "RequestGpuTransvoxelProof": false,
           "SdfClampDistance": 8,
           "TerrainMaterial": null,
           "VoxelSize": 32
@@ -515,7 +516,7 @@
           "OnComponentFixedUpdate": null,
           "OnComponentStart": null,
           "OnComponentUpdate": null,
-          "Revision": "dfc6358+working-tree",
+          "Revision": "ad54d9422cabe8f04bae3338193cbd1c8cb5a55c",
           "RunOnStart": true,
           "ScenarioTimeoutSeconds": 90,
           "SustainedEditCount": 80,

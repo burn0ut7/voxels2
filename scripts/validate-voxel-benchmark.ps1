@@ -31,6 +31,8 @@ $requiredMetrics = @(
 	'gpu_transvoxel_vertices', 'gpu_transvoxel_indices', 'gpu_transvoxel_active_cells',
 	'gpu_transvoxel_overflow_attempts', 'gpu_transvoxel_buffer_bytes', 'gpu_transvoxel_submission_ms',
 	'gpu_transvoxel_completion_ms', 'gpu_transvoxel_readback_ms',
+	'gpu_transvoxel_batch_size', 'gpu_transvoxel_surface_blocks', 'gpu_transvoxel_dispatches',
+	'gpu_transvoxel_gpu_publication_passed', 'gpu_transvoxel_gpu_publication_ms', 'gpu_transvoxel_cpu_publication_ms',
 	'stream_chunks_completed', 'stream_chunks_fresh', 'stream_chunks_cached', 'stream_batches_completed',
 	'stream_sdf_generation_avg_ms', 'stream_sdf_generation_p95_ms', 'stream_sdf_generation_max_ms',
 	'stream_mesh_queue_avg_ms', 'stream_mesh_queue_p95_ms', 'stream_mesh_queue_max_ms',
@@ -94,7 +96,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 8 ) { Add-Failure "Expected suite version 8, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 9 ) { Add-Failure "Expected suite version 9, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id', 'traversal_distance', 'traversal_speed', 'traversal_loops') )
 {
@@ -143,6 +145,9 @@ foreach ( $scenario in $scenarios )
 		if ( $scenario.gpu_transvoxel_passed -ne $true ) { Add-Failure "$context GPU proof failed: $($scenario.gpu_transvoxel_failure)" }
 		if ( [long]$scenario.gpu_transvoxel_vertices -le 0 -or [long]$scenario.gpu_transvoxel_indices -le 0 ) { Add-Failure "$context generated no mesh geometry" }
 		if ( [long]$scenario.gpu_transvoxel_overflow_attempts -ne 0 ) { Add-Failure "$context overflowed GPU output buffers" }
+		if ( [int]$scenario.gpu_transvoxel_batch_size -ne 128 ) { Add-Failure "$context did not validate the required 128-block batch" }
+		if ( $scenario.gpu_transvoxel_gpu_publication_passed -ne $true ) { Add-Failure "$context did not publish GPU-authored indirect arguments" }
+		if ( [int]$scenario.gpu_transvoxel_dispatches -ge 128 ) { Add-Failure "$context dispatch count did not demonstrate batching" }
 	}
 	elseif ( $scenario.scenario -notlike 'player_*_streaming' -and [long]$scenario.calls_safety_players_repositioned -le 0 )
 	{

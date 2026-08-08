@@ -8,7 +8,13 @@ internal readonly record struct VoxelGpuTransvoxelProofResult(
 	long GpuBufferBytes,
 	double SubmissionMilliseconds,
 	double CompletionMilliseconds,
-	double GeometryReadbackMilliseconds
+	double GeometryReadbackMilliseconds,
+	int BatchSize = 0,
+	int SurfaceBlockCount = 0,
+	int DispatchCount = 0,
+	bool GpuCountPublicationPassed = false,
+	double GpuCountPublicationMilliseconds = 0.0,
+	double CpuCountPublicationMilliseconds = 0.0
 );
 
 internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDisposable
@@ -19,14 +25,23 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		"shaders/voxel_gpu_transvoxel_density_cs.shader",
 		"shaders/voxel_gpu_transvoxel_classify_cs.shader",
 		"shaders/voxel_gpu_transvoxel_scan_cs.shader",
+		"shaders/voxel_gpu_transvoxel_scan_cs.shader",
+		"shaders/voxel_gpu_transvoxel_scan_cs.shader",
+		"shaders/voxel_gpu_transvoxel_clear_cs.shader",
 		"shaders/voxel_gpu_transvoxel_vertices_cs.shader",
-		"shaders/voxel_gpu_transvoxel_indices_cs.shader"
+		"shaders/voxel_gpu_transvoxel_indices_cs.shader",
+		"shaders/voxel_gpu_transvoxel_classify_cs.shader"
 	};
 	private const string RenderShaderName = "shaders/voxel_gpu_transvoxel.shader";
 	private const int StatisticsCount = 10;
-	private const int PhaseCount = 6;
+	private const int PhaseCount = 10;
+	private const int MaximumBatchSize = 128;
+	private const int DescriptorOffset = MaximumBatchSize * 2;
+	private const int TotalsOffset = DescriptorOffset + MaximumBatchSize * 4;
+	private static readonly int[] RequiredBatchSizes = { 1, 8, 32, 128 };
 
 	private readonly ComputeShader[] _phases = new ComputeShader[PhaseCount];
+	private readonly GpuBuffer<GpuBlockInput> _blocks;
 	private readonly GpuBuffer<float> _densitySamples;
 	private readonly GpuBuffer<uint> _regularLookup;
 	private readonly int _regularGeometryCountsOffset;
@@ -38,23 +53,44 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	private readonly GpuBuffer<SimpleVertex> _vertices;
 	private readonly GpuBuffer<uint> _indices;
 	private readonly GpuBuffer<uint> _statistics;
+	private readonly GpuBuffer<uint> _edgeGroupSums;
+	private readonly GpuBuffer<uint> _cellGroupSums;
+	private readonly GpuBuffer<uint> _blockCounts;
+	private readonly GpuBuffer<uint> _drawIndexCounter;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _indirectArguments;
 	private readonly Sandbox.Rendering.CommandList _drawCommands;
+	private readonly Sandbox.Rendering.CommandList _computeCommands;
 	private readonly CameraComponent _camera;
 	private readonly VoxelMeshData _cpuReference;
 	private readonly Vector3 _drawOrigin;
 	private readonly int _chunkSize;
+	private readonly int _sampleSize;
+	private readonly int _haloSize;
+	private readonly float _voxelSize;
+	private readonly float _sdfClampDistance;
 	private readonly int _haloSampleCount;
 	private readonly int _cellCount;
 	private readonly int _edgeSlotCount;
 	private readonly int _maximumVertexCount;
 	private readonly int _maximumIndexCount;
+	private readonly int _edgeGroupCount;
+	private readonly int _cellGroupCount;
+	private readonly int _scanGroupCount;
 	private readonly long _gpuBufferBytes;
 	private readonly object _resultLock = new();
 	private ProofState _state;
 	private long _dispatchTimestamp;
 	private long _readbackTimestamp;
 	private double _submissionMilliseconds;
+	private double _gpuCountPublicationMilliseconds;
+	private double _cpuCountPublicationMilliseconds;
+	private int _experimentIndex;
+	private int _currentBatchSize;
+	private int _currentSurfaceBlockCount;
+	private uint _expectedVertexCount;
+	private uint _expectedIndexCount;
+	private bool _gpuCountPublicationPassed = true;
+	private int _dispatchCount;
 	private uint[] _completedStatistics;
 	private SimpleVertex[] _completedVertices;
 	private VoxelGpuTransvoxelProofResult _result;
@@ -84,38 +120,66 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		_chunkSize = chunkSize;
 		var sampleSize = checked( chunkSize + 1 );
 		var haloSize = checked( chunkSize + 3 );
+		_sampleSize = sampleSize;
+		_haloSize = haloSize;
+		_voxelSize = voxelSize;
+		_sdfClampDistance = sdfClampDistance;
 		_haloSampleCount = checked( haloSize * haloSize * haloSize );
 		_cellCount = checked( chunkSize * chunkSize * chunkSize );
 		_edgeSlotCount = checked( sampleSize * sampleSize * sampleSize * 3 );
-		_maximumVertexCount = _edgeSlotCount;
-		_maximumIndexCount = checked( _cellCount * 15 );
+		_edgeGroupCount = (_edgeSlotCount + 255) / 256;
+		_cellGroupCount = (_cellCount + 255) / 256;
+		_scanGroupCount = System.Math.Max( _edgeGroupCount, _cellGroupCount );
+		_maximumVertexCount = System.Math.Max( 65_536, checked( cpuReference.Vertices.Count * MaximumBatchSize * 2 ) );
+		_maximumIndexCount = System.Math.Max( 393_216, checked( cpuReference.Indices.Count * MaximumBatchSize * 2 ) );
 
-		_densitySamples = new GpuBuffer<float>( _haloSampleCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Density" );
+		var blockInputs = new GpuBlockInput[MaximumBatchSize];
+		for ( var block = 0; block < blockInputs.Length; block++ )
+		{
+			var gridX = block % 16;
+			var gridY = block / 16;
+			var topologyOffset = block > 0 && block % 4 == 1 ? 10_000.0f : block > 0 && block % 4 == 2 ? -10_000.0f : 0.0f;
+			var blockOffset = new Vector3( gridX * chunkSize * voxelSize, gridY * chunkSize * voxelSize, topologyOffset );
+			blockInputs[block] = new GpuBlockInput(
+				new Vector4( sampleOrigin + blockOffset, 0.0f ),
+				new Vector4( drawOrigin + new Vector3( blockOffset.x, blockOffset.y, 0.0f ), 0.0f )
+			);
+		}
+		_blocks = new GpuBuffer<GpuBlockInput>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Blocks" );
+		_blocks.SetData( blockInputs );
+		_densitySamples = new GpuBuffer<float>( checked( _haloSampleCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Density" );
 		_regularGeometryCountsOffset = VoxelTransvoxelTables.RegularCellClass.Length;
 		_regularTriangleIndicesOffset = _regularGeometryCountsOffset + VoxelTransvoxelTables.RegularGeometryCounts.Length;
 		_regularVertexDataOffset = _regularTriangleIndicesOffset + VoxelTransvoxelTables.RegularTriangleIndices.Length;
 		_regularLookup = CreateRegularLookupBuffer();
-		_cells = new GpuBuffer<GpuCellData>( _cellCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Cells" );
-		_edgeFlags = new GpuBuffer<uint>( _edgeSlotCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Edge Flags" );
-		_edgeVertexIds = new GpuBuffer<uint>( _edgeSlotCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Edge Vertex IDs" );
+		_cells = new GpuBuffer<GpuCellData>( checked( _cellCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Cells" );
+		_edgeFlags = new GpuBuffer<uint>( checked( _edgeSlotCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Edge Flags" );
+		_edgeVertexIds = new GpuBuffer<uint>( checked( _edgeSlotCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Edge Vertex IDs" );
 		_vertices = new GpuBuffer<SimpleVertex>( _maximumVertexCount,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.Vertex, "Voxel GPU Proof Vertices" );
 		_indices = new GpuBuffer<uint>( _maximumIndexCount,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.Index, "Voxel GPU Proof Indices" );
-		_statistics = new GpuBuffer<uint>( StatisticsCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Statistics" );
-		_statistics.SetData( new uint[StatisticsCount] );
+		_statistics = new GpuBuffer<uint>( StatisticsCount + MaximumBatchSize * 4, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Statistics And Descriptors" );
+		_statistics.SetData( new uint[StatisticsCount + MaximumBatchSize * 4] );
+		_edgeGroupSums = new GpuBuffer<uint>( checked( _edgeGroupCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Edge Group Sums" );
+		_cellGroupSums = new GpuBuffer<uint>( checked( _cellGroupCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Cell Group Sums" );
+		_blockCounts = new GpuBuffer<uint>( TotalsOffset + 2, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Block Allocation" );
+		_drawIndexCounter = new GpuBuffer<uint>( _maximumIndexCount, GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.Append, "Voxel GPU Proof Publication Counter" );
 		_indirectArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( 1,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.IndirectDrawArguments, "Voxel GPU Proof Indirect Arguments" );
-		_indirectArguments.SetData( new GpuBuffer.IndirectDrawIndexedArguments[1] );
+		_indirectArguments.SetData( new[] { new GpuBuffer.IndirectDrawIndexedArguments { InstanceCount = 1 } } );
 
 		for ( var phase = 0; phase < PhaseCount; phase++ )
 		{
 			_phases[phase] = new ComputeShader( ComputeShaderNames[phase] );
-			BindShader( _phases[phase], phase, sampleOrigin, drawOrigin, sampleSize, haloSize, voxelSize, sdfClampDistance );
+			BindShader( _phases[phase], sampleSize, haloSize, voxelSize, sdfClampDistance );
 		}
+		_phases[0].Attributes.Set( "AllocationPass", 0 );
+		_phases[2].Attributes.Set( "PublicationPass", 0 );
 
 		var material = Material.FromShader( RenderShaderName );
 		_drawCommands = new Sandbox.Rendering.CommandList( "Voxel GPU Transvoxel Proof Draw" );
+		_computeCommands = new Sandbox.Rendering.CommandList( "Voxel GPU Transvoxel Batch Compute" );
 		_drawCommands.ResourceBarrierTransition( _vertices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
 		_drawCommands.ResourceBarrierTransition( _indices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
 		_drawCommands.ResourceBarrierTransition( _indirectArguments, Sandbox.Rendering.ResourceState.IndirectArgument );
@@ -130,14 +194,17 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		);
 
 		_gpuBufferBytes =
-			(long)_haloSampleCount * sizeof( float ) +
+			(long)MaximumBatchSize * 32 +
+			(long)_haloSampleCount * MaximumBatchSize * sizeof( float ) +
 			(long)(VoxelTransvoxelTables.RegularCellClass.Length + VoxelTransvoxelTables.RegularGeometryCounts.Length +
 				VoxelTransvoxelTables.RegularTriangleIndices.Length + VoxelTransvoxelTables.RegularVertexData.Length) * sizeof( uint ) +
-			(long)_cellCount * sizeof( uint ) * 3 +
-			(long)_edgeSlotCount * sizeof( uint ) * 2 +
+			(long)_cellCount * MaximumBatchSize * sizeof( uint ) * 3 +
+			(long)_edgeSlotCount * MaximumBatchSize * sizeof( uint ) * 2 +
 			(long)_maximumVertexCount * 44 +
 			(long)_maximumIndexCount * sizeof( uint ) +
-			StatisticsCount * sizeof( uint ) + 20;
+			(long)(_edgeGroupCount + _cellGroupCount) * MaximumBatchSize * sizeof( uint ) +
+			(long)MaximumBatchSize * (8 + 16) +
+			(long)_maximumIndexCount * sizeof( uint ) + StatisticsCount * sizeof( uint ) + 20;
 
 		// RenderSceneObject is the render-thread submission boundary. Keep the proof object
 		// globally eligible so an off-camera validation mesh cannot prevent its dispatch.
@@ -147,9 +214,11 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	public void Run()
 	{
 		if ( _disposed || _state != ProofState.Idle ) return;
-		var submissionStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		_dispatchTimestamp = submissionStart;
-		_submissionMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( submissionStart ).TotalMilliseconds;
+		_experimentIndex = 0;
+		_submissionMilliseconds = 0.0;
+		_gpuCountPublicationMilliseconds = 0.0;
+		_cpuCountPublicationMilliseconds = 0.0;
+		_dispatchCount = 0;
 		_state = ProofState.DispatchPending;
 	}
 
@@ -174,8 +243,14 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		if ( _disposed ) return;
 		try
 		{
+			if ( _state == ProofState.ComputeExecutionPending )
+			{
+				_state = ProofState.StatisticsReadbackPending;
+				return;
+			}
 			if ( _state == ProofState.StatisticsReadbackPending )
 			{
+				_camera.RemoveCommandList( _computeCommands );
 				_state = ProofState.StatisticsReadback;
 				var statistics = new uint[StatisticsCount];
 				_statistics.GetData( statistics );
@@ -183,31 +258,27 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 				return;
 			}
 			if ( _state != ProofState.DispatchPending ) return;
+			_currentBatchSize = _experimentIndex < RequiredBatchSizes.Length ? RequiredBatchSizes[_experimentIndex] : MaximumBatchSize;
+			_currentSurfaceBlockCount = CountSurfaceBlocks( _currentBatchSize );
+			_expectedVertexCount = checked( (uint)(_cpuReference.Vertices.Count * _currentSurfaceBlockCount) );
+			_expectedIndexCount = checked( (uint)(_cpuReference.Indices.Count * _currentSurfaceBlockCount) );
+			var gpuPublication = _experimentIndex < RequiredBatchSizes.Length;
+			SetBatchSize( _currentBatchSize );
 			var submissionStart = System.Diagnostics.Stopwatch.GetTimestamp();
-			Graphics.ResourceBarrierTransition( _densitySamples, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
-			Graphics.ResourceBarrierTransition( _cells, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			Graphics.ResourceBarrierTransition( _edgeFlags, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			Graphics.ResourceBarrierTransition( _edgeVertexIds, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			Graphics.ResourceBarrierTransition( _vertices, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			Graphics.ResourceBarrierTransition( _indices, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			Graphics.ResourceBarrierTransition( _statistics, Sandbox.Rendering.ResourceState.UnorderedAccess );
-			_phases[0].Dispatch( System.Math.Max( _cellCount, _edgeSlotCount ), 1, 1 );
-			Barrier( _cells, _edgeFlags, _edgeVertexIds, _statistics );
-			_phases[1].Dispatch( _haloSampleCount, 1, 1 );
-			Barrier( _densitySamples );
-			_phases[2].Dispatch( _cellCount, 1, 1 );
-			Barrier( _cells, _edgeFlags, _statistics );
-			_phases[3].Dispatch( 1, 1, 1 );
-			Barrier( _cells, _edgeVertexIds, _statistics );
-			_phases[4].Dispatch( _edgeSlotCount, 1, 1 );
-			Barrier( _vertices );
-			_phases[5].Dispatch( _cellCount, 1, 1 );
-			Barrier( _indices );
-			Graphics.ResourceBarrierTransition( _vertices, Sandbox.Rendering.ResourceState.UnorderedAccess, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
-			Graphics.ResourceBarrierTransition( _indices, Sandbox.Rendering.ResourceState.UnorderedAccess, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
+			_dispatchTimestamp = submissionStart;
+			DispatchScanPhases();
+			DispatchGeometryPhases( gpuPublication );
+			BuildComputeCommands( gpuPublication );
+			_dispatchCount += 9;
+			if ( gpuPublication )
+			{
+				var publicationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+				_gpuCountPublicationMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime( publicationStart ).TotalMilliseconds;
+				_dispatchCount++;
+			}
+			_camera.AddCommandList( _computeCommands, Sandbox.Rendering.Stage.AfterOpaque );
 			_submissionMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime( submissionStart ).TotalMilliseconds;
-			_state = ProofState.StatisticsReadbackPending;
+			_state = ProofState.ComputeExecutionPending;
 		}
 		catch ( System.Exception exception )
 		{
@@ -215,7 +286,76 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		}
 	}
 
-	private static void Barrier( params GpuBuffer[] buffers )
+	private void BuildComputeCommands( bool gpuPublication )
+	{
+		_computeCommands.Reset();
+		if ( gpuPublication )
+		{
+			_computeCommands.ResourceBarrierTransition( _indirectArguments, Sandbox.Rendering.ResourceState.CopyDestination ); _computeCommands.CopyStructureCount( _drawIndexCounter, _indirectArguments, 0 ); _computeCommands.ResourceBarrierTransition( _indirectArguments, Sandbox.Rendering.ResourceState.IndirectArgument );
+		}
+		_computeCommands.ResourceBarrierTransition( _vertices, Sandbox.Rendering.ResourceState.UnorderedAccess, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
+		_computeCommands.ResourceBarrierTransition( _indices, Sandbox.Rendering.ResourceState.UnorderedAccess, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
+	}
+
+	private void DispatchScanPhases()
+	{
+		_statistics.Clear();
+		Graphics.ResourceBarrierTransition( _densitySamples, Sandbox.Rendering.ResourceState.UnorderedAccess );
+		Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		foreach ( var buffer in new GpuBuffer[] { _cells, _edgeFlags, _edgeVertexIds, _statistics, _edgeGroupSums, _cellGroupSums, _blockCounts } ) Graphics.ResourceBarrierTransition( buffer, Sandbox.Rendering.ResourceState.UnorderedAccess );
+		_phases[0].Dispatch( System.Math.Max( _cellCount, _edgeSlotCount ) * _currentBatchSize, 1, 1 ); ImmediateBarrier( _cells, _edgeFlags, _edgeVertexIds );
+		_phases[1].Dispatch( _haloSampleCount * _currentBatchSize, 1, 1 ); ImmediateBarrier( _densitySamples );
+		_phases[2].Attributes.Set( "PublicationPass", 0 );
+		_phases[2].Dispatch( _cellCount * _currentBatchSize, 1, 1 ); ImmediateBarrier( _cells, _edgeFlags, _statistics );
+		_phases[3].Attributes.Set( "ScanPass", 0 );
+		_phases[3].Dispatch( _edgeGroupCount * 256 * _currentBatchSize, 1, 1 ); ImmediateBarrier( _edgeVertexIds, _edgeGroupSums );
+		_phases[3].Attributes.Set( "ScanPass", 1 );
+		_phases[3].Dispatch( _cellGroupCount * 256 * _currentBatchSize, 1, 1 ); ImmediateBarrier( _cells, _cellGroupSums );
+		_phases[3].Attributes.Set( "ScanPass", 2 );
+		_phases[3].Dispatch( 256 * _currentBatchSize, 1, 1 ); ImmediateBarrier( _edgeGroupSums, _cellGroupSums, _blockCounts );
+	}
+
+	private void DispatchGeometryPhases( bool gpuPublication )
+	{
+		_phases[0].Attributes.Set( "AllocationPass", 1 );
+		_phases[0].Dispatch( 64 * _currentBatchSize, 1, 1 );
+		ImmediateBarrier( _blockCounts );
+		_phases[0].Attributes.Set( "AllocationPass", 0 );
+		_phases[7].Dispatch( _edgeSlotCount * _currentBatchSize, 1, 1 );
+		ImmediateBarrier( _vertices );
+		_phases[8].Dispatch( _cellCount * _currentBatchSize, 1, 1 );
+		ImmediateBarrier( _indices );
+		if ( !gpuPublication ) return;
+		_drawIndexCounter.SetCounterValue( 0 );
+		_phases[2].Attributes.Set( "PublicationPass", 1 );
+		_phases[2].Dispatch( _cellCount * _currentBatchSize, 1, 1 );
+		ImmediateBarrier( _drawIndexCounter );
+		_phases[2].Attributes.Set( "PublicationPass", 0 );
+	}
+
+	private void BindCommandAttributes( Sandbox.Rendering.CommandList commands, int allocationPass )
+	{
+		var attributes = commands.Attributes;
+		attributes.Set( "Blocks", _blocks ); attributes.Set( "DensitySamples", _densitySamples ); attributes.Set( "RegularLookup", _regularLookup );
+		attributes.Set( "Cells", _cells ); attributes.Set( "EdgeFlags", _edgeFlags ); attributes.Set( "EdgeVertexIds", _edgeVertexIds );
+		attributes.Set( "OutputVertices", _vertices ); attributes.Set( "OutputIndices", _indices ); attributes.Set( "Statistics", _statistics );
+		attributes.Set( "EdgeGroupSums", _edgeGroupSums ); attributes.Set( "CellGroupSums", _cellGroupSums ); attributes.Set( "BlockCounts", _blockCounts );
+		attributes.Set( "DrawIndexCounter", _drawIndexCounter ); attributes.Set( "BatchSize", _currentBatchSize ); attributes.Set( "DescriptorOffset", DescriptorOffset ); attributes.Set( "TotalsOffset", TotalsOffset );
+		attributes.Set( "RegularGeometryCountsOffset", _regularGeometryCountsOffset ); attributes.Set( "RegularTriangleIndicesOffset", _regularTriangleIndicesOffset ); attributes.Set( "RegularVertexDataOffset", _regularVertexDataOffset );
+		attributes.Set( "ChunkSize", _chunkSize ); attributes.Set( "SampleSize", _sampleSize ); attributes.Set( "HaloSize", _haloSize ); attributes.Set( "HaloSampleCount", _haloSampleCount );
+		attributes.Set( "CellCount", _cellCount ); attributes.Set( "EdgeSlotCount", _edgeSlotCount ); attributes.Set( "EdgeGroupCount", _edgeGroupCount ); attributes.Set( "CellGroupCount", _cellGroupCount ); attributes.Set( "ScanGroupCount", _scanGroupCount );
+		attributes.Set( "MaxVertices", _maximumVertexCount ); attributes.Set( "MaxIndices", _maximumIndexCount ); attributes.Set( "VoxelSize", _voxelSize ); attributes.Set( "SdfClampDistance", _sdfClampDistance );
+		attributes.Set( "AllocationPass", allocationPass );
+		attributes.Set( "PublicationPass", 1 );
+		attributes.Set( "ScanPass", 0 );
+	}
+
+	private static void CommandBarrier( Sandbox.Rendering.CommandList commands, params GpuBuffer[] buffers )
+	{
+		foreach ( var buffer in buffers ) commands.UavBarrier( buffer );
+	}
+
+	private static void ImmediateBarrier( params GpuBuffer[] buffers )
 	{
 		foreach ( var buffer in buffers ) Graphics.UavBarrier( buffer );
 	}
@@ -226,6 +366,13 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		{
 			if ( _disposed || _state != ProofState.StatisticsReadback ) return;
 			_completedStatistics = statistics.ToArray();
+			var totals = new uint[2];
+			_blockCounts.GetData( totals, TotalsOffset, totals.Length );
+			var firstBlockCounts = new uint[2];
+			_blockCounts.GetData( firstBlockCounts, 0, firstBlockCounts.Length );
+			_completedStatistics[5] = totals[0];
+			_completedStatistics[6] = totals[1];
+			_completedStatistics[9] = totals[0] > _maximumVertexCount || totals[1] > _maximumIndexCount ? 1u : 0u;
 			var vertexCount = GetStatistic( 5 );
 			var indexCount = GetStatistic( 6 );
 			var overflow = GetStatistic( 9 );
@@ -234,26 +381,51 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 				CompleteFailureLocked( $"GPU output overflowed (vertices={vertexCount:N0}, indices={indexCount:N0})" );
 				return;
 			}
-			_indirectArguments.SetData( new[]
+			if ( vertexCount != _expectedVertexCount || indexCount != _expectedIndexCount )
 			{
-				new GpuBuffer.IndirectDrawIndexedArguments
+				CompleteFailureLocked( $"batch {_currentBatchSize} pooled counts differ: expected={_expectedVertexCount:N0}/{_expectedIndexCount:N0}, GPU={vertexCount:N0}/{indexCount:N0}, firstBlockScan={firstBlockCounts[0]:N0}/{firstBlockCounts[1]:N0}" );
+				return;
+			}
+
+			if ( _experimentIndex < RequiredBatchSizes.Length )
+			{
+				var published = new GpuBuffer.IndirectDrawIndexedArguments[1];
+				_indirectArguments.GetData( published );
+				_gpuCountPublicationPassed &= published[0].IndexCount == indexCount && published[0].InstanceCount == 1;
+			}
+			else
+			{
+				var cpuPublicationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+				_indirectArguments.SetData( new[]
 				{
-					IndexCount = indexCount,
-					InstanceCount = indexCount > 0 ? 1u : 0u
-				}
-			} );
+					new GpuBuffer.IndirectDrawIndexedArguments { IndexCount = indexCount, InstanceCount = 1 }
+				} );
+				_cpuCountPublicationMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( cpuPublicationStart ).TotalMilliseconds;
+			}
+
+			if ( _experimentIndex < RequiredBatchSizes.Length )
+			{
+				_experimentIndex++;
+				_state = ProofState.DispatchPending;
+				return;
+			}
+			if ( !_gpuCountPublicationPassed )
+			{
+				CompleteFailureLocked( "CopyStructureCount did not publish the generated index count and persistent instance count" );
+				return;
+			}
 			_camera.AddCommandList( _drawCommands, Sandbox.Rendering.Stage.AfterOpaque );
 
 			_readbackTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 			_state = ProofState.VertexReadback;
-			if ( vertexCount == 0 )
+			if ( _cpuReference.Vertices.Count == 0 )
 			{
 				_completedVertices = System.Array.Empty<SimpleVertex>();
 				BeginIndexReadbackLocked( indexCount );
 				return;
 			}
-			_completedVertices = new SimpleVertex[vertexCount];
-			_vertices.GetData( _completedVertices, 0, checked( (int)vertexCount ) );
+			_completedVertices = new SimpleVertex[_cpuReference.Vertices.Count];
+			_vertices.GetData( _completedVertices, 0, _completedVertices.Length );
 			BeginIndexReadbackLocked( indexCount );
 		}
 	}
@@ -261,13 +433,13 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	private void BeginIndexReadbackLocked( uint indexCount )
 	{
 		_state = ProofState.IndexReadback;
-		if ( indexCount == 0 )
+		if ( _cpuReference.Indices.Count == 0 )
 		{
 			CompleteValidationLocked( System.Array.Empty<uint>() );
 			return;
 		}
-		var indices = new uint[indexCount];
-		_indices.GetData( indices, 0, checked( (int)indexCount ) );
+		var indices = new uint[_cpuReference.Indices.Count];
+		_indices.GetData( indices, 0, indices.Length );
 		CompleteValidationLocked( indices );
 	}
 
@@ -286,7 +458,13 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 			_gpuBufferBytes,
 			_submissionMilliseconds,
 			completionMilliseconds,
-			readbackMilliseconds
+			readbackMilliseconds,
+			_currentBatchSize,
+			_currentSurfaceBlockCount,
+			_dispatchCount,
+			_gpuCountPublicationPassed,
+			_gpuCountPublicationMilliseconds,
+			_cpuCountPublicationMilliseconds
 		);
 		_state = passed ? ProofState.Complete : ProofState.Failed;
 		_hasResult = true;
@@ -320,15 +498,13 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 
 	private void BindShader(
 		ComputeShader shader,
-		int phase,
-		Vector3 sampleOrigin,
-		Vector3 drawOrigin,
 		int sampleSize,
 		int haloSize,
 		float voxelSize,
 		float sdfClampDistance )
 	{
 		var attributes = shader.Attributes;
+		attributes.Set( "Blocks", _blocks );
 		attributes.Set( "DensitySamples", _densitySamples );
 		attributes.Set( "RegularLookup", _regularLookup );
 		attributes.Set( "RegularGeometryCountsOffset", _regularGeometryCountsOffset );
@@ -340,17 +516,40 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		attributes.Set( "OutputVertices", _vertices );
 		attributes.Set( "OutputIndices", _indices );
 		attributes.Set( "Statistics", _statistics );
+		attributes.Set( "EdgeGroupSums", _edgeGroupSums );
+		attributes.Set( "CellGroupSums", _cellGroupSums );
+		attributes.Set( "BlockCounts", _blockCounts );
+		attributes.Set( "DescriptorOffset", DescriptorOffset );
+		attributes.Set( "TotalsOffset", TotalsOffset );
+		attributes.Set( "DrawIndexCounter", _drawIndexCounter );
 		attributes.Set( "ChunkSize", _chunkSize );
 		attributes.Set( "SampleSize", sampleSize );
 		attributes.Set( "HaloSize", haloSize );
 		attributes.Set( "CellCount", _cellCount );
 		attributes.Set( "EdgeSlotCount", _edgeSlotCount );
+		attributes.Set( "HaloSampleCount", _haloSampleCount );
+		attributes.Set( "EdgeGroupCount", _edgeGroupCount );
+		attributes.Set( "CellGroupCount", _cellGroupCount );
+		attributes.Set( "ScanGroupCount", _scanGroupCount );
 		attributes.Set( "MaxVertices", _maximumVertexCount );
 		attributes.Set( "MaxIndices", _maximumIndexCount );
 		attributes.Set( "VoxelSize", voxelSize );
 		attributes.Set( "SdfClampDistance", sdfClampDistance );
-		attributes.Set( "SampleOrigin", sampleOrigin );
-		attributes.Set( "DrawOrigin", drawOrigin );
+	}
+
+	private void SetBatchSize( int batchSize )
+	{
+		foreach ( var phase in _phases ) phase.Attributes.Set( "BatchSize", batchSize );
+	}
+
+	private static int CountSurfaceBlocks( int batchSize )
+	{
+		var count = 0;
+		for ( var block = 0; block < batchSize; block++ )
+		{
+			if ( block == 0 || block % 4 is 0 or 3 ) count++;
+		}
+		return count;
 	}
 
 	private static GpuBuffer<uint> CreateRegularLookupBuffer()
@@ -502,8 +701,11 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		if ( _disposed ) return;
 		_disposed = true;
 		_camera.RemoveCommandList( _drawCommands );
+		_camera.RemoveCommandList( _computeCommands );
 		_drawCommands.Reset();
+		_computeCommands.Reset();
 		_densitySamples.Dispose();
+		_blocks.Dispose();
 		_regularLookup.Dispose();
 		_cells.Dispose();
 		_edgeFlags.Dispose();
@@ -511,6 +713,10 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		_vertices.Dispose();
 		_indices.Dispose();
 		_statistics.Dispose();
+		_edgeGroupSums.Dispose();
+		_cellGroupSums.Dispose();
+		_blockCounts.Dispose();
+		_drawIndexCounter.Dispose();
 		_indirectArguments.Dispose();
 		Delete();
 	}
@@ -519,6 +725,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	{
 		Idle,
 		DispatchPending,
+		ComputeExecutionPending,
 		StatisticsReadbackPending,
 		StatisticsReadback,
 		VertexReadback,
@@ -540,4 +747,17 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 			IndexOffset = indexOffset;
 		}
 	}
+
+	private struct GpuBlockInput
+	{
+		public Vector4 SampleOrigin;
+		public Vector4 DrawOrigin;
+
+		public GpuBlockInput( Vector4 sampleOrigin, Vector4 drawOrigin )
+		{
+			SampleOrigin = sampleOrigin;
+			DrawOrigin = drawOrigin;
+		}
+	}
+
 }

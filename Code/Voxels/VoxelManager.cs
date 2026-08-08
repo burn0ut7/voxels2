@@ -537,7 +537,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			Log.Info(
 				$"Voxel GPU regular-cell Transvoxel proof scheduled: chunk={coordinate}, cells={ChunkSize}^{3}, " +
 				$"cpuReferenceVertices={cpuReference.Vertices.Count:N0}, cpuReferenceTriangles={cpuReference.Indices.Count / 3:N0}, " +
-				"density=GPU-procedural, geometry=GPU-resident, validationReadback=opt-in-proof-only."
+				"density=GPU-procedural, batches=1/8/32/128, geometry=shared-GPU-pool, validationReadback=opt-in-proof-only."
 			);
 		}
 		catch ( System.Exception exception )
@@ -564,7 +564,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			$"vertices={result.VertexCount:N0}, indices={result.IndexCount:N0}, activeCells={result.ActiveCells:N0}, " +
 			$"overflow={result.OverflowAttempts:N0}, gpuBuffers={FormatBytes( result.GpuBufferBytes )}, " +
 			$"cpuSubmission={result.SubmissionMilliseconds:F3}ms, completion={result.CompletionMilliseconds:F3}ms, " +
-			$"diagnosticGeometryReadback={result.GeometryReadbackMilliseconds:F3}ms, validation={result.Failure}."
+			$"batch={result.BatchSize:N0}, surfaceBlocks={result.SurfaceBlockCount:N0}, dispatches={result.DispatchCount:N0}, " +
+			$"gpuPublication={(result.GpuCountPublicationPassed ? "PASS" : "FAIL")} ({result.GpuCountPublicationMilliseconds:F3}ms), " +
+			$"cpuPublication={result.CpuCountPublicationMilliseconds:F3}ms, diagnosticGeometryReadback={result.GeometryReadbackMilliseconds:F3}ms, validation={result.Failure}."
 		);
 	}
 
