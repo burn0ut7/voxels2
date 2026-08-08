@@ -21,16 +21,16 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 {
 	private static readonly string[] ComputeShaderNames =
 	{
-		"shaders/voxel_gpu_transvoxel_clear_cs.shader",
+		"shaders/voxel_gpu_count_clear_cs.shader",
 		"shaders/voxel_gpu_transvoxel_density_cs.shader",
-		"shaders/voxel_gpu_transvoxel_classify_cs.shader",
-		"shaders/voxel_gpu_transvoxel_scan_cs.shader",
-		"shaders/voxel_gpu_transvoxel_scan_cs.shader",
-		"shaders/voxel_gpu_transvoxel_scan_cs.shader",
-		"shaders/voxel_gpu_transvoxel_clear_cs.shader",
+		"shaders/voxel_gpu_classify_regular_cs.shader",
+		"shaders/voxel_gpu_scan_regular_cs.shader",
+		"shaders/voxel_gpu_scan_regular_cs.shader",
+		"shaders/voxel_gpu_scan_regular_cs.shader",
+		"shaders/voxel_gpu_count_clear_cs.shader",
 		"shaders/voxel_gpu_transvoxel_vertices_cs.shader",
 		"shaders/voxel_gpu_transvoxel_indices_cs.shader",
-		"shaders/voxel_gpu_transvoxel_classify_cs.shader"
+		"shaders/voxel_gpu_classify_regular_cs.shader"
 	};
 	private const string RenderShaderName = "shaders/voxel_gpu_transvoxel.shader";
 	private const int StatisticsCount = 10;

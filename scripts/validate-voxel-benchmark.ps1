@@ -10,6 +10,14 @@ $ErrorActionPreference = 'Stop'
 $requiredScenarios = @(
 	'cold_generation',
 	'gpu_transvoxel_regular_proof',
+	'gpu_persistent_static_set',
+	'gpu_allocator_churn',
+	'gpu_replacement_failure',
+	'gpu_pool_exhaustion',
+	'gpu_return_origin_stability',
+	'gpu_async_readback_saturation',
+	'gpu_resource_recreation',
+	'gpu_dedicated_server_startup',
 	'live_chunk_radius_reconfiguration',
 	'player_infinity_streaming',
 	'player_line_streaming',
@@ -33,6 +41,19 @@ $requiredMetrics = @(
 	'gpu_transvoxel_completion_ms', 'gpu_transvoxel_readback_ms',
 	'gpu_transvoxel_batch_size', 'gpu_transvoxel_surface_blocks', 'gpu_transvoxel_dispatches',
 	'gpu_transvoxel_gpu_publication_passed', 'gpu_transvoxel_gpu_publication_ms', 'gpu_transvoxel_cpu_publication_ms',
+	'gpu_terrain_available', 'gpu_terrain_backend', 'gpu_terrain_requested_blocks', 'gpu_terrain_resident_blocks',
+	'gpu_terrain_pending_count_batches', 'gpu_terrain_pending_emit_batches', 'gpu_terrain_backpressure_events',
+	'gpu_terrain_allocation_failures', 'gpu_terrain_stale_publications_rejected', 'gpu_terrain_visible_draw_commands',
+	'gpu_terrain_scratch_bytes', 'gpu_terrain_pool_capacity_bytes', 'gpu_terrain_pool_used_bytes', 'gpu_terrain_pool_peak_bytes',
+	'gpu_terrain_geometry_readback_bytes', 'gpu_terrain_count_submission_ms', 'gpu_terrain_count_readback_avg_ms',
+	'gpu_terrain_count_readback_count', 'gpu_terrain_emit_submission_ms', 'gpu_terrain_failure',
+	'gpu_terrain_count_submission_per_block_ms', 'gpu_terrain_emit_submission_per_block_ms',
+	'gpu_terrain_request_to_visible_avg_ms', 'gpu_terrain_request_to_visible_p95_ms', 'gpu_terrain_request_to_visible_max_ms',
+	'gpu_terrain_batch_completion_avg_ms', 'gpu_terrain_batch_completion_p95_ms', 'gpu_terrain_batch_completion_max_ms',
+	'gpu_phase2b_available', 'gpu_phase2b_passed', 'gpu_phase2b_test', 'gpu_phase2b_failure',
+	'gpu_lifecycle_budget_bytes', 'gpu_lifecycle_peak_used_bytes', 'gpu_lifecycle_churn_operations',
+	'gpu_lifecycle_allocation_failures', 'gpu_lifecycle_backpressure_events',
+	'gpu_lifecycle_stale_publications_rejected', 'gpu_lifecycle_retained_delta_percent',
 	'stream_chunks_completed', 'stream_chunks_fresh', 'stream_chunks_cached', 'stream_batches_completed',
 	'stream_sdf_generation_avg_ms', 'stream_sdf_generation_p95_ms', 'stream_sdf_generation_max_ms',
 	'stream_mesh_queue_avg_ms', 'stream_mesh_queue_p95_ms', 'stream_mesh_queue_max_ms',
@@ -96,12 +117,21 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 9 ) { Add-Failure "Expected suite version 9, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 10 ) { Add-Failure "Expected suite version 10, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
-foreach ( $property in @('configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id', 'traversal_distance', 'traversal_speed', 'traversal_loops') )
+foreach ( $property in @(
+	'configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id',
+	'traversal_distance', 'traversal_speed', 'traversal_loops',
+	'gpu_phase2b_visual_backend', 'gpu_phase2b_procedural_rule_version', 'gpu_phase2b_lod_policy',
+	'gpu_phase2b_chunk_size', 'gpu_phase2b_voxel_size', 'gpu_phase2b_batch_capacity',
+	'gpu_phase2b_scratch_ring_count', 'gpu_phase2b_multi_draw_command_limit', 'gpu_phase2b_vertex_pool_capacity', 'gpu_phase2b_index_pool_capacity',
+	'gpu_phase2b_vertex_addressing', 'gpu_phase2b_retirement_mechanism'
+) )
 {
 	Test-RequiredProperty $report $property 'Latest report'
 }
+Test-RequiredProperty $report 'working_tree_dirty' 'Latest report'
+if ( $report.working_tree_dirty -ne $false ) { Add-Failure 'Latest report was captured from a dirty Git worktree' }
 $headRevision = (& git -C $ProjectRoot rev-parse HEAD).Trim()
 if ( $LASTEXITCODE -ne 0 ) { throw "Could not resolve Git HEAD for '$ProjectRoot'" }
 $workingChanges = @(& git -C $ProjectRoot status --porcelain)
@@ -148,6 +178,22 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.gpu_transvoxel_batch_size -ne 128 ) { Add-Failure "$context did not validate the required 128-block batch" }
 		if ( $scenario.gpu_transvoxel_gpu_publication_passed -ne $true ) { Add-Failure "$context did not publish GPU-authored indirect arguments" }
 		if ( [int]$scenario.gpu_transvoxel_dispatches -ge 128 ) { Add-Failure "$context dispatch count did not demonstrate batching" }
+	}
+	elseif ( $scenario.scenario -like 'gpu_*' )
+	{
+		if ( $scenario.gpu_phase2b_available -ne $true ) { Add-Failure "$context has no Phase 2B proof result" }
+		if ( $scenario.gpu_phase2b_passed -ne $true ) { Add-Failure "$context Phase 2B proof failed: $($scenario.gpu_phase2b_failure)" }
+		if ( $scenario.scenario -in @('gpu_persistent_static_set', 'gpu_async_readback_saturation', 'gpu_resource_recreation') )
+		{
+			if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no persistent GPU terrain diagnostics" }
+			if ([long]$scenario.gpu_terrain_resident_blocks -ne [long]$scenario.gpu_terrain_requested_blocks) { Add-Failure "$context did not publish every requested block" }
+			if ([long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0) { Add-Failure "$context read back production geometry" }
+			if ([long]$scenario.gpu_terrain_allocation_failures -ne 0) { Add-Failure "$context exhausted its configured production pool" }
+			if ([long]$scenario.gpu_terrain_pool_used_bytes -gt [long]$scenario.gpu_terrain_pool_capacity_bytes) { Add-Failure "$context exceeded persistent pool capacity" }
+			if ([double]$scenario.gpu_terrain_request_to_visible_p95_ms -le 0) { Add-Failure "$context recorded no request-to-visible latency" }
+			if ([double]$scenario.gpu_terrain_batch_completion_p95_ms -le 0) { Add-Failure "$context recorded no batch completion latency" }
+		}
+		if ( $scenario.scenario -eq 'gpu_async_readback_saturation' -and [int]$scenario.gpu_terrain_count_readback_count -lt 2 ) { Add-Failure "$context did not complete two compact readbacks" }
 	}
 	elseif ( $scenario.scenario -notlike 'player_*_streaming' -and [long]$scenario.calls_safety_players_repositioned -le 0 )
 	{

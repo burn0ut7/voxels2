@@ -37,6 +37,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<BatchTimingEvent> _batchTimingHistory = new( MaximumBatchTimingHistory );
 	private readonly Dictionary<Vector3Int, double> _initialSdfGenerationMilliseconds = new();
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
+	private VoxelGpuTerrainBackend _gpuTerrainBackend;
+	private bool _gpuEditUnavailableWarningLogged;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
 	private long _nextChunkTimingSequence;
@@ -121,6 +123,18 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Rendering" )]
 	public Material TerrainMaterial { get; set; }
 
+	[Property, Group( "Rendering" )]
+	public VoxelVisualBackendMode VisualBackend { get; set; } = VoxelVisualBackendMode.CpuChunks;
+
+	[Property, Group( "Rendering" ), Range( 65536, 16777216 )]
+	public int GpuVertexPoolCapacity { get; set; } = 2097152;
+
+	[Property, Group( "Rendering" ), Range( 196608, 50331648 )]
+	public int GpuIndexPoolCapacity { get; set; } = 12582912;
+
+	[Property, Group( "Rendering" ), Range( 0, 1 )]
+	public int GpuTerrainRuleVersion { get; set; }
+
 	[Property, Group( "Meshing" ), Range( 1, MaximumConcurrentCpuChunkBuilds )]
 	public int CpuChunkBuildConcurrency { get; set; } = 4;
 
@@ -148,6 +162,19 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Diagnostics" )]
 	public bool RequestGpuTransvoxelProof { get; set; }
 
+	[Property, Group( "Diagnostics" )]
+	public bool RequestGpuTerrainDiagnosticsLog { get; set; }
+
+	[Property, ReadOnly, Group( "Diagnostics" )]
+	public string GpuTerrainLiveDiagnostics
+	{
+		get
+		{
+			var diagnostics = CaptureGpuTerrainDiagnostics();
+			return $"available={diagnostics.Available}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
+		}
+	}
+
 	[Property, Group( "Diagnostics" ), Range( 0, MaximumDetailedChunkLogs )]
 	public int DetailedChunkLogLimit { get; set; } = 64;
 
@@ -165,9 +192,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
 	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
-		(Application.IsDedicatedServer || (_cpuChunkStates.Count == DesiredChunkCount && ActiveChunkGameObjectCount == DesiredChunkCount)) &&
+		(Application.IsDedicatedServer || (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod
+			? _gpuTerrainBackend?.IsSettled == true
+			: _cpuChunkStates.Count == DesiredChunkCount && ActiveChunkGameObjectCount == DesiredChunkCount)) &&
 		GetPendingVisualBuildCount() == 0 && GetPendingCollisionBuildCount() == 0 &&
 		!_worldGenerationPending && !_cpuBatchSummaryPending;
+	[Property, ReadOnly, Group( "Diagnostics" )]
+	public string TerrainSettleDiagnostics =>
+		$"desiredLoaded={AreDesiredChunksLoaded()}; generationQueue={_chunkStreamingGenerationQueue.Count}; gpuSettled={_gpuTerrainBackend?.IsSettled}; cpuStates={_cpuChunkStates.Count}/{DesiredChunkCount}; activeObjects={ActiveChunkGameObjectCount}; pendingVisual={GetPendingVisualBuildCount()}; pendingCollision={GetPendingCollisionBuildCount()}; worldPending={_worldGenerationPending}; batchSummaryPending={_cpuBatchSummaryPending}; safety={_playerSafetyActive}";
 	public bool HasPartialVisualEditPublication
 	{
 		get
@@ -221,6 +253,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		CpuChunkBuildConcurrency = System.Math.Clamp( CpuChunkBuildConcurrency, 1, MaximumConcurrentCpuChunkBuilds );
 		CpuMeshUploadsPerFrame = System.Math.Clamp( CpuMeshUploadsPerFrame, 1, MaximumCpuMeshUploadsPerFrame );
 		CpuMainThreadBudgetMilliseconds = System.Math.Clamp( CpuMainThreadBudgetMilliseconds, 0.25f, 12.0f );
+		GpuVertexPoolCapacity = System.Math.Clamp( GpuVertexPoolCapacity, 65536, 16777216 );
+		GpuIndexPoolCapacity = System.Math.Clamp( GpuIndexPoolCapacity, 196608, 50331648 );
+		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
 		CollisionBuildConcurrency = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
@@ -255,7 +290,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			return;
 		}
-		UpdateChunkStreaming();
+		if ( VisualBackend == VoxelVisualBackendMode.CpuChunks ) UpdateChunkStreaming();
 		UpdateCpuChunkWorld();
 		UpdateCpuCollisionWorld();
 		UpdatePlayerSafety();
@@ -272,6 +307,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
 		DisposeGpuTransvoxelProof();
+		DisposeGpuTerrainBackend();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
@@ -281,6 +317,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	protected override void OnDestroy()
 	{
 		DisposeGpuTransvoxelProof();
+		DisposeGpuTerrainBackend();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
@@ -308,6 +345,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		ActivatePlayerSafety();
 
 		DisposeCpuVisualWorld();
+		DisposeGpuTerrainBackend();
 		ClearChunkColliders();
 		ClearChunkGameObjects();
 		lock ( _sdfLock )
@@ -477,14 +515,79 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 		_worldGenerationPending = false;
 		_worldGenerationTasks.Clear();
-		StartCpuChunkWorld();
+		StartVisualWorld();
 	}
 
 	[Button]
 	public void RebuildVisualWorld()
 	{
 		DisposeCpuVisualWorld();
-		StartCpuChunkWorld();
+		DisposeGpuTerrainBackend();
+		StartVisualWorld();
+	}
+
+	private void StartVisualWorld()
+	{
+		if ( VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ) StartGpuTerrainWorld();
+		else StartCpuChunkWorld();
+	}
+
+	private void StartGpuTerrainWorld()
+	{
+		DisposeCpuVisualWorld();
+		DisposeGpuTerrainBackend();
+		if ( Application.IsDedicatedServer )
+		{
+			Log.Info( "Voxel dedicated-server world active: GPU visual backend is inert and owns no rendering resources." );
+			RefreshCollisionInterests();
+			PumpCollisionBuildQueue();
+			return;
+		}
+		if ( RequestGpuTerrainDiagnosticsLog )
+		{
+			RequestGpuTerrainDiagnosticsLog = false;
+			LogGpuTerrainDiagnostics();
+		}
+		if ( Scene.Camera is null )
+		{
+			Log.Error( "Voxel persistent GPU terrain requires an active scene camera." );
+			return;
+		}
+		try
+		{
+			_gpuTerrainBackend = new VoxelGpuTerrainBackend(
+				Scene.SceneWorld,
+				Scene.Camera,
+				ChunkSize,
+				VoxelSize,
+				SdfClampDistance,
+				System.Math.Max( 1, DesiredChunkCount ),
+				GpuVertexPoolCapacity,
+				GpuIndexPoolCapacity );
+			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
+			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+		}
+		catch ( System.Exception exception )
+		{
+			DisposeGpuTerrainBackend();
+			Log.Error( $"Voxel persistent GPU terrain failed to start: {exception.Message}" );
+		}
+	}
+
+	internal VoxelGpuTerrainDiagnostics CaptureGpuTerrainDiagnostics() =>
+		_gpuTerrainBackend?.CaptureDiagnostics() ?? default;
+
+	[Button]
+	public void LogGpuTerrainDiagnostics()
+	{
+		var diagnostics = CaptureGpuTerrainDiagnostics();
+		Log.Info( $"Voxel GPU terrain diagnostics: backend={diagnostics.Backend}, available={diagnostics.Available}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, staleRejected={diagnostics.StalePublicationsRejected:N0}, scratch={FormatBytes( diagnostics.ScratchBytes )}, poolUsed/peak/capacity={FormatBytes( diagnostics.PoolUsedBytes )}/{FormatBytes( diagnostics.PeakPoolUsedBytes )}/{FormatBytes( diagnostics.PoolCapacityBytes )}, countSubmit={diagnostics.CountSubmissionMilliseconds:F3}ms total/{diagnostics.CountSubmissionPerBlockMilliseconds:F4}ms per block, countReadback={diagnostics.CountReadbackCount:N0} batches at {diagnostics.CountReadbackAverageMilliseconds:F3}ms avg, emitSubmit={diagnostics.EmitSubmissionMilliseconds:F3}ms total/{diagnostics.EmitSubmissionPerBlockMilliseconds:F4}ms per block, requestToVisible(avg/p95/max)={diagnostics.RequestToVisible.AverageMilliseconds:F2}/{diagnostics.RequestToVisible.P95Milliseconds:F2}/{diagnostics.RequestToVisible.MaximumMilliseconds:F2}ms, batchComplete(avg/p95/max)={diagnostics.BatchCompletion.AverageMilliseconds:F2}/{diagnostics.BatchCompletion.P95Milliseconds:F2}/{diagnostics.BatchCompletion.MaximumMilliseconds:F2}ms, geometryReadback={diagnostics.GeometryReadbackBytes:N0}B, failure={diagnostics.Failure}." );
+	}
+
+	private void DisposeGpuTerrainBackend()
+	{
+		_gpuTerrainBackend?.Dispose();
+		_gpuTerrainBackend = null;
 	}
 
 	[Button]
@@ -967,6 +1070,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int DisplaceSdf( Vector3 worldPosition, float radius, float displacement )
 	{
 		CountCall( ref _callBrushRequests );
+		if ( VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod )
+		{
+			if ( !_gpuEditUnavailableWarningLogged )
+			{
+				_gpuEditUnavailableWarningLogged = true;
+				Log.Warning( "Terrain edits are unavailable while the Phase 2B static GPU visual backend is selected; the authoritative SDF was not changed." );
+			}
+			return 0;
+		}
 		if ( radius <= 0.0f || System.MathF.Abs( displacement ) <= 0.0001f )
 		{
 			return 0;
@@ -1691,8 +1803,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		if ( !Application.IsDedicatedServer )
 		{
-			TryUploadPublishedVisualCollider( state );
-			return;
+			if ( TryUploadPublishedVisualCollider( state ) ) return;
 		}
 		if ( state.Task is not null )
 		{
@@ -2253,7 +2364,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private WorldConfiguration CaptureWorldConfiguration()
 	{
-		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, TerrainMaterial );
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, TerrainMaterial, VisualBackend, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
 	}
 
 	private void ResetWorldGeneration()
@@ -2301,7 +2412,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
-	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
 
 	private sealed class WorldGenerationWorkerResult
 	{

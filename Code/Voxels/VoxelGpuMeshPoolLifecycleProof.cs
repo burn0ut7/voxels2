@@ -121,21 +121,22 @@ internal static class VoxelGpuMeshPoolLifecycleProof
 
 	private sealed class PoolAllocator
 	{
-		private readonly List<PoolRange> _free = new();
+		private readonly VoxelGpuRangeAllocator _ranges;
 		private readonly Dictionary<int, Resident> _residents = new();
 		private readonly List<DeferredRange> _deferred = new();
 
 		public long BudgetBytes { get; }
 		public long PeakUsedBytes { get; private set; }
-		public long UsedBytes => BudgetBytes - _free.Sum( range => range.Size );
+		public long UsedBytes => _ranges.UsedCount;
 		public int AllocationFailures { get; private set; }
 		public int BackpressureEvents { get; private set; }
 		public int StalePublicationsRejected { get; private set; }
 
 		public PoolAllocator( long budgetBytes )
 		{
+			if ( budgetBytes > int.MaxValue ) throw new System.ArgumentOutOfRangeException( nameof( budgetBytes ) );
 			BudgetBytes = budgetBytes;
-			_free.Add( new PoolRange( 0, budgetBytes ) );
+			_ranges = new VoxelGpuRangeAllocator( (int)budgetBytes );
 		}
 
 		public bool TryReplace( int block, int generation, long bytes, int epoch )
@@ -185,10 +186,9 @@ internal static class VoxelGpuMeshPoolLifecycleProof
 			{
 				var range = _deferred[index];
 				if ( range.ReleaseEpoch > epoch ) continue;
-				_free.Add( new PoolRange( range.Offset, range.Size ) );
+				_ranges.Release( new VoxelGpuPoolRange( (int)range.Offset, (int)range.Size ) );
 				_deferred.RemoveAt( index );
 			}
-			Coalesce();
 			UpdatePeak();
 		}
 
@@ -214,29 +214,9 @@ internal static class VoxelGpuMeshPoolLifecycleProof
 
 		private PoolRange Allocate( long bytes )
 		{
-			for ( var index = 0; index < _free.Count; index++ )
-			{
-				var range = _free[index];
-				if ( range.Size < bytes ) continue;
-				var allocation = new PoolRange( range.Offset, bytes );
-				if ( range.Size == bytes ) _free.RemoveAt( index );
-				else _free[index] = new PoolRange( range.Offset + bytes, range.Size - bytes );
-				return allocation;
-			}
+			if ( bytes <= int.MaxValue && _ranges.TryAllocate( (int)bytes, out var allocation ) )
+				return new PoolRange( allocation.Offset, allocation.Count );
 			return new PoolRange( -1, 0 );
-		}
-
-		private void Coalesce()
-		{
-			_free.Sort( (left, right) => left.Offset.CompareTo( right.Offset ) );
-			for ( var index = _free.Count - 1; index > 0; index-- )
-			{
-				var previous = _free[index - 1];
-				var current = _free[index];
-				if ( previous.Offset + previous.Size != current.Offset ) continue;
-				_free[index - 1] = new PoolRange( previous.Offset, previous.Size + current.Size );
-				_free.RemoveAt( index );
-			}
 		}
 
 		private void UpdatePeak() => PeakUsedBytes = System.Math.Max( PeakUsedBytes, UsedBytes );

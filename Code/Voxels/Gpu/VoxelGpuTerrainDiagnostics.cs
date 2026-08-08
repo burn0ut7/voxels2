@@ -1,0 +1,112 @@
+internal readonly record struct VoxelGpuTerrainDiagnostics(
+	string Backend,
+	bool Available,
+	int RuleVersion,
+	string LodPolicy,
+	int BatchCapacity,
+	int ScratchRingCount,
+	string VertexAddressing,
+	string RetirementMechanism,
+	bool MultiDrawIndirect,
+	bool IndirectBaseVertex,
+	bool IndirectFirstInstance,
+	int RequestedBlocks,
+	int ResidentBlocks,
+	int PendingCountBatches,
+	int PendingEmitBatches,
+	int BackpressureEvents,
+	int AllocationFailures,
+	int StalePublicationsRejected,
+	int VisibleDrawCommands,
+	long ScratchBytes,
+	long PoolCapacityBytes,
+	long PoolUsedBytes,
+	long PeakPoolUsedBytes,
+	long GeometryReadbackBytes,
+	double CountSubmissionMilliseconds,
+	double CountReadbackAverageMilliseconds,
+	int CountReadbackCount,
+	double EmitSubmissionMilliseconds,
+	double CountSubmissionPerBlockMilliseconds,
+	double EmitSubmissionPerBlockMilliseconds,
+	VoxelTimingDistribution RequestToVisible,
+	VoxelTimingDistribution BatchCompletion,
+	string Failure );
+
+internal sealed class VoxelGpuTerrainDiagnosticCounters
+{
+	private double _countReadbackTotalMilliseconds;
+	private int _countReadbackCount;
+	private readonly List<double> _requestToVisibleMilliseconds = new();
+	private readonly List<double> _batchCompletionMilliseconds = new();
+
+	public int RequestedBlocks;
+	public int RuleVersion;
+	public int PendingCountBatches;
+	public int PendingEmitBatches;
+	public int BackpressureEvents;
+	public int StalePublicationsRejected;
+	public int VisibleDrawCommands;
+	public long ScratchBytes;
+	public double CountSubmissionMilliseconds;
+	public double EmitSubmissionMilliseconds;
+	public string Failure = string.Empty;
+
+	public void RecordCountReadback( double milliseconds )
+	{
+		_countReadbackTotalMilliseconds += milliseconds;
+		_countReadbackCount++;
+	}
+
+	public void RecordRequestToVisible( double milliseconds ) => _requestToVisibleMilliseconds.Add( milliseconds );
+	public void RecordBatchCompletion( double milliseconds ) => _batchCompletionMilliseconds.Add( milliseconds );
+
+	public VoxelGpuTerrainDiagnostics Snapshot( VoxelGpuCapabilityReport capabilities, VoxelGpuResidentTable residents, VoxelGpuMeshPool pool )
+	{
+		var usedBytes = pool is null ? 0 : (long)pool.UsedVertices * 44 + (long)pool.UsedIndices * sizeof( uint );
+		var peakBytes = pool is null ? 0 : (long)pool.PeakUsedVertices * 44 + (long)pool.PeakUsedIndices * sizeof( uint );
+		return new VoxelGpuTerrainDiagnostics(
+			"gpu_persistent_fixed_lod",
+			capabilities.Available,
+			RuleVersion,
+			"fixed_lod_0",
+			VoxelGpuScratchArena.MaximumBatchSize,
+			VoxelGpuScratchArena.RingSize,
+			capabilities.VertexAddressing,
+			capabilities.RetirementMechanism,
+			capabilities.MultiDrawIndirect,
+			capabilities.IndirectBaseVertex,
+			capabilities.IndirectFirstInstance,
+			RequestedBlocks,
+			residents?.PublishedCount ?? 0,
+			PendingCountBatches,
+			PendingEmitBatches,
+			BackpressureEvents,
+			pool?.AllocationFailures ?? 0,
+			StalePublicationsRejected,
+			VisibleDrawCommands,
+			ScratchBytes,
+			pool?.CapacityBytes ?? 0,
+			usedBytes,
+			peakBytes,
+			0,
+			CountSubmissionMilliseconds,
+			_countReadbackCount == 0 ? 0.0 : _countReadbackTotalMilliseconds / _countReadbackCount,
+			_countReadbackCount,
+			EmitSubmissionMilliseconds,
+			RequestedBlocks == 0 ? 0.0 : CountSubmissionMilliseconds / RequestedBlocks,
+			RequestedBlocks == 0 ? 0.0 : EmitSubmissionMilliseconds / RequestedBlocks,
+			Summarize( _requestToVisibleMilliseconds ),
+			Summarize( _batchCompletionMilliseconds ),
+			Failure.Length > 0 ? Failure : capabilities.Failure );
+	}
+
+	private static VoxelTimingDistribution Summarize( List<double> values )
+	{
+		if ( values.Count == 0 ) return default;
+		var sorted = values.OrderBy( value => value ).ToArray();
+		var total = sorted.Sum();
+		var p95Index = System.Math.Clamp( (int)System.Math.Ceiling( sorted.Length * 0.95 ) - 1, 0, sorted.Length - 1 );
+		return new VoxelTimingDistribution( sorted.Length, total / sorted.Length, sorted[p95Index], sorted[^1] );
+	}
+}

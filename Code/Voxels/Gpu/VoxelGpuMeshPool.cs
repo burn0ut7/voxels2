@@ -1,0 +1,85 @@
+internal sealed class VoxelGpuMeshPool : System.IDisposable
+{
+	private readonly VoxelGpuRangeAllocator _vertexAllocator;
+	private readonly VoxelGpuRangeAllocator _indexAllocator;
+	private readonly List<RetiredAllocation> _retired = new();
+
+	public GpuBuffer<SimpleVertex> Vertices { get; }
+	public GpuBuffer<uint> Indices { get; }
+	public int VertexCapacity => _vertexAllocator.Capacity;
+	public int IndexCapacity => _indexAllocator.Capacity;
+	public int UsedVertices => _vertexAllocator.UsedCount;
+	public int UsedIndices => _indexAllocator.UsedCount;
+	public int PeakUsedVertices { get; private set; }
+	public int PeakUsedIndices { get; private set; }
+	public int AllocationFailures { get; private set; }
+	public int DeferredAllocationCount => _retired.Count;
+	public long CapacityBytes => (long)VertexCapacity * 44 + (long)IndexCapacity * sizeof( uint );
+
+	public VoxelGpuMeshPool( int vertexCapacity, int indexCapacity )
+	{
+		_vertexAllocator = new VoxelGpuRangeAllocator( vertexCapacity );
+		_indexAllocator = new VoxelGpuRangeAllocator( indexCapacity );
+		Vertices = new GpuBuffer<SimpleVertex>( vertexCapacity, GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.Vertex, "Voxel GPU Persistent Vertices" );
+		Indices = new GpuBuffer<uint>( indexCapacity, GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.Index, "Voxel GPU Persistent Indices" );
+	}
+
+	public bool TryAllocate( int vertexCount, int indexCount, uint generation, out VoxelGpuAllocationHandle handle )
+	{
+		if ( !_vertexAllocator.TryAllocate( vertexCount, out var vertices ) )
+		{
+			AllocationFailures++;
+			handle = default;
+			return false;
+		}
+		if ( !_indexAllocator.TryAllocate( indexCount, out var indices ) )
+		{
+			_vertexAllocator.Release( vertices );
+			AllocationFailures++;
+			handle = default;
+			return false;
+		}
+		handle = new VoxelGpuAllocationHandle( vertices, indices, generation );
+		PeakUsedVertices = System.Math.Max( PeakUsedVertices, UsedVertices );
+		PeakUsedIndices = System.Math.Max( PeakUsedIndices, UsedIndices );
+		return true;
+	}
+
+	public void Retire( VoxelGpuAllocationHandle handle, ulong releaseEpoch )
+	{
+		if ( handle.IsEmpty ) return;
+		_retired.Add( new RetiredAllocation( handle, releaseEpoch ) );
+	}
+
+	public void Reclaim( ulong completedEpoch )
+	{
+		for ( var index = _retired.Count - 1; index >= 0; index-- )
+		{
+			if ( _retired[index].ReleaseEpoch > completedEpoch ) continue;
+			var handle = _retired[index].Handle;
+			_vertexAllocator.Release( handle.Vertices );
+			_indexAllocator.Release( handle.Indices );
+			_retired.RemoveAt( index );
+		}
+	}
+
+	public void ReleaseImmediately( VoxelGpuAllocationHandle handle )
+	{
+		_vertexAllocator.Release( handle.Vertices );
+		_indexAllocator.Release( handle.Indices );
+	}
+
+	public bool Validate( out string failure )
+	{
+		if ( !_vertexAllocator.Validate( out failure ) ) return false;
+		return _indexAllocator.Validate( out failure );
+	}
+
+	public void Dispose()
+	{
+		Vertices.Dispose();
+		Indices.Dispose();
+	}
+
+	private readonly record struct RetiredAllocation( VoxelGpuAllocationHandle Handle, ulong ReleaseEpoch );
+}
