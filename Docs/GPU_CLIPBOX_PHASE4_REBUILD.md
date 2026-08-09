@@ -61,10 +61,10 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 |---|---|
 | Phase 3 fixed-LOD GPU terrain | Verified baseline |
 | 4R-0 baseline restoration and archive | Next |
-| 4R-1 mathematical clipbox planner | Implemented; standalone proof passed, live editor gate pending |
-| 4R-2 renderer-capacity proof | Implemented; standalone proof passed, live editor gate pending |
-| 4R-3 regular two-level clipbox | Implemented; static integration and live compiler gates passed, runtime benchmark gate pending |
-| 4R-4 four-level toroidal streaming | Implemented; planner/runtime integration, bounded revision diagnostics, and editor visualization added; clean runtime benchmark gate passed in suite v17 |
+| 4R-1 mathematical clipbox planner | Verified; standalone proof, live editor integration, and clean suite v20 runtime gate passed |
+| 4R-2 renderer-capacity proof | Verified; standalone proof, live editor integration, and clean suite v20 runtime gate passed |
+| 4R-3 regular two-level clipbox | Verified; static integration, live compiler, and clean suite v20 runtime gates passed |
+| 4R-4 four-level toroidal streaming | Verified; planner/runtime integration, bounded revision diagnostics, editor visualization, and clean suite v20 runtime gate passed |
 | 4R-5 transition ownership and residency | Verified; stable seam slots, fine-side ownership, generation dependency metadata, diagnostics, proof, editor visualization, and clean suite v20 runtime gate passed |
 | 4R-6 Transvoxel golden reference and GPU proof | Verified; pinned official transition tables, CPU reference, six orientations, all 512 cases, winding, scale, fixtures, gradient normals, boundary checks, live GPU case proof, and production transition runtime passed |
 | 4R-7 production GPU transition pipeline | Verified on the RTX 5090 reference machine in clean suite v20 run `20260809-101717`; bounded GPU count/emission, exact persistent allocation, shared indirect rendering, zero production geometry readback, and zero CPU transition SDF evaluations |
