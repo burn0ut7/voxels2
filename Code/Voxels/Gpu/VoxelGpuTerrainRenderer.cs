@@ -17,9 +17,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly Sandbox.Rendering.CommandList[] _opaqueCommandLists;
 	private readonly RenderAttributes _attributes = new();
 	private readonly Material _material;
-	private readonly long _cullingRefreshIntervalTicks = System.Diagnostics.Stopwatch.Frequency / 30;
-	private readonly float _cullingPositionThresholdSquared;
-	private readonly float _cullingDirectionThresholdSquared;
 	private int _attachedDepthCommandListCount;
 	private int _attachedOpaqueCommandListCount;
 	private long _cullingRebuildCount;
@@ -30,7 +27,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private Vector3 _lastCameraPosition;
 	private Vector3 _lastCameraForward;
 	private Vector3 _lastCameraUp;
-	private long _nextCullingRefreshTimestamp;
 	private bool _hasUploadedArguments;
 	private int _uploadedArgumentCount;
 	private bool _renderingEnabled = true;
@@ -52,9 +48,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_residents = residents ?? throw new System.ArgumentNullException( nameof( residents ) );
 		_diagnostics = diagnostics ?? throw new System.ArgumentNullException( nameof( diagnostics ) );
 		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
-		var cullingPositionThreshold = _cullingPaddingWorld > 0.0f ? System.MathF.Max( 16.0f, _cullingPaddingWorld * 0.25f ) : 0.0f;
-		_cullingPositionThresholdSquared = cullingPositionThreshold * cullingPositionThreshold;
-		_cullingDirectionThresholdSquared = _cullingPaddingWorld > 0.0f ? 0.02f : 0.000001f;
 		_residentSnapshot = new VoxelGpuResidentTable.ResidentEntry[residents.Capacity];
 		_descriptorData = new VoxelGpuResidentDescriptor[residents.Capacity];
 		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
@@ -110,22 +103,18 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		var cameraForward = cameraRotation.Forward;
 		var cameraUp = cameraRotation.Up;
 		var cameraChanged = !_hasCameraCullingState ||
-			(cameraPosition - _lastCameraPosition).LengthSquared > _cullingPositionThresholdSquared ||
-			(cameraForward - _lastCameraForward).LengthSquared > _cullingDirectionThresholdSquared ||
-			(cameraUp - _lastCameraUp).LengthSquared > _cullingDirectionThresholdSquared;
-		var now = System.Diagnostics.Stopwatch.GetTimestamp();
-		var cullingRefreshDue = now >= _nextCullingRefreshTimestamp;
-		var cullingChanged = cameraChanged && cullingRefreshDue;
-		if ( cullingChanged )
+			(cameraPosition - _lastCameraPosition).LengthSquared > 0.0001f ||
+			(cameraForward - _lastCameraForward).LengthSquared > 0.000001f ||
+			(cameraUp - _lastCameraUp).LengthSquared > 0.000001f;
+		if ( cameraChanged )
 		{
 			_hasCameraCullingState = true;
 			_lastCameraPosition = cameraPosition;
 			_lastCameraForward = cameraForward;
 			_lastCameraUp = cameraUp;
-			_nextCullingRefreshTimestamp = now + _cullingRefreshIntervalTicks;
 		}
 		var residentsChanged = System.Threading.Interlocked.Exchange( ref _dirty, 0 ) != 0;
-		if ( residentsChanged || cullingChanged ) Rebuild( residentsChanged );
+		if ( residentsChanged || cameraChanged ) Rebuild( residentsChanged );
 	}
 
 	private void Rebuild( bool uploadResidents )
