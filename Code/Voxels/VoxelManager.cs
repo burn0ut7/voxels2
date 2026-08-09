@@ -705,7 +705,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		try
 		{
 			var clipboxConfig = GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox ? GpuClipboxConfig : (VoxelClipboxConfig?)null;
-			var residentCapacity = checked( System.Math.Max( DesiredChunkCount, clipboxConfig?.StableRegularSlotCount ?? 0 ) + GpuStreamingStagingResidentCapacity );
+			var clipboxResidentCapacity = clipboxConfig.HasValue
+				? checked( clipboxConfig.Value.StableRegularSlotCount + clipboxConfig.Value.StableTransitionSlotCount )
+				: 0;
+			var residentCapacity = checked( System.Math.Max( DesiredChunkCount, clipboxResidentCapacity ) + GpuStreamingStagingResidentCapacity );
 			_gpuTerrainBackend = new VoxelGpuTerrainBackend(
 				Scene.SceneWorld,
 				Scene.Camera,
