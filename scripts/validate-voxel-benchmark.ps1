@@ -179,7 +179,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 19 ) { Add-Failure "Expected suite version 19, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 20 ) { Add-Failure "Expected suite version 20, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
