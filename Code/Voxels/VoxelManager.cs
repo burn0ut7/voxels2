@@ -23,7 +23,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly HashSet<Vector3Int> _gpuDesiredScratch = new();
 	private readonly List<Vector3Int> _gpuOrderedScratch = new();
 	private readonly HashSet<VoxelVisualBlockKey> _gpuDesiredKeyScratch = new();
-	private readonly List<VoxelVisualBlockKey> _gpuOrderedKeyScratch = new();
+	private readonly List<VoxelVisualBlockKey> _gpuEnteringKeyScratch = new();
+	private readonly List<VoxelVisualBlockKey> _gpuLeavingKeyScratch = new();
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
@@ -46,6 +47,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
 	private VoxelGpuTerrainBackend _gpuTerrainBackend;
 	private VoxelClipboxLodPlanner _gpuClipboxLodPlanner;
+	private readonly VoxelLodTransitionResidency _gpuTransitionResidency = new();
 	private bool _gpuEditUnavailableWarningLogged;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
@@ -1661,14 +1663,16 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		if ( GpuClipboxLodEnabled )
 		{
 			_gpuClipboxLodPlanner ??= new VoxelClipboxLodPlanner( GpuClipboxRadius, GpuClipboxLodLevels );
-			_gpuClipboxLodPlanner.Plan( _gpuStreamingObservers[0], GpuTerrainRuleVersion, _gpuDesiredKeyScratch );
-			var desiredKeyChanged = _gpuDesiredKeyScratch.Count != _gpuTerrainBackend.DesiredKeyCount ||
-				!_gpuTerrainBackend.DesiredKeysEqual( _gpuDesiredKeyScratch );
-			if ( !desiredKeyChanged ) return;
-			_gpuOrderedKeyScratch.Clear();
-			_gpuOrderedKeyScratch.AddRange( _gpuDesiredKeyScratch );
-			_gpuOrderedKeyScratch.Sort( (left, right) => GetStreamingKeyPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingKeyPriority( right, _gpuStreamingObservers ) ) );
-			_gpuTerrainBackend.UpdateDesiredKeys( _gpuOrderedKeyScratch );
+			_gpuClipboxLodPlanner.PlanDelta( _gpuStreamingObservers[0], GpuTerrainRuleVersion, _gpuDesiredKeyScratch, _gpuEnteringKeyScratch, _gpuLeavingKeyScratch );
+			_gpuTransitionResidency.Update( _gpuClipboxLodPlanner.Transitions );
+			// A seam replacement is not visible until every regular dependency has
+			// actually published into the resident table. Desired keys alone are
+			// insufficient because count/emit work is asynchronous.
+			if ( _gpuTerrainBackend.AreKeysPublished( _gpuDesiredKeyScratch ) )
+				_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch );
+			if ( _gpuEnteringKeyScratch.Count == 0 && _gpuLeavingKeyScratch.Count == 0 ) return;
+			_gpuEnteringKeyScratch.Sort( (left, right) => GetStreamingKeyPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingKeyPriority( right, _gpuStreamingObservers ) ) );
+			_gpuTerrainBackend.UpdateDesiredDelta( _gpuEnteringKeyScratch, _gpuLeavingKeyScratch );
 			_desiredChunkCoordinates.Clear();
 			foreach ( var key in _gpuDesiredKeyScratch ) _desiredChunkCoordinates.Add( key.Coordinate );
 			return;
