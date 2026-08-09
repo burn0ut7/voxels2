@@ -65,7 +65,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private int _retireUndesiredRequested;
 	private int _worstPublishedRank = -1;
 
-	public bool IsSettled => !_clipboxRevisionPending && IsStreamingWorkIdle && (DesiredCount + TransitionDesiredCount == _residents.PublishedCount || BlockedRequestCount + BlockedTransitionRequestCount >= System.Math.Max( 0, DesiredCount + TransitionDesiredCount - _residents.PublishedCount ));
+	public bool IsSettled => !_clipboxRevisionPending && IsStreamingWorkIdle && HasExactlyDesiredResidents();
 	public bool IsCapacityLimited => BlockedRequestCount > 0;
 	private int DesiredCount { get { lock ( _desiredSync ) return _desiredKeys.Count; } }
 	private int TransitionDesiredCount { get { lock ( _desiredSync ) return _desiredTransitionKeys.Count; } }
@@ -74,6 +74,16 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private int BlockedRequestCount { get { lock ( _desiredSync ) return _blockedRequests.Count; } }
 	private int BlockedTransitionRequestCount { get { lock ( _desiredSync ) return _blockedTransitionRequests.Count; } }
 	private bool IsDesired( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return key.IsTransition ? _desiredTransitionKeys.Contains( key ) : _desiredKeys.Contains( key ); }
+	private bool HasExactlyDesiredResidents()
+	{
+		lock ( _desiredSync )
+		{
+			if ( _residents.PublishedCount != _desiredKeys.Count + _desiredTransitionKeys.Count ) return false;
+			foreach ( var key in _desiredKeys ) if ( !_residents.ContainsKey( key ) ) return false;
+			foreach ( var key in _desiredTransitionKeys ) if ( !_residents.ContainsKey( key ) ) return false;
+			return true;
+		}
+	}
 	private bool IsStreamingWorkIdle => _scheduler.PendingCount == 0 && _transitionScheduler.PendingCount == 0 && PendingRequestCount == 0 && PendingTransitionRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _transitionBatch.Count == 0 && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle ) && _transitionScratch.IsIdle;
 	private BatchContext _transitionBatch;
 	public bool IsAvailable => _capabilities.Available;
