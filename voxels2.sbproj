@@ -23,6 +23,6 @@
     "PerMapRanking": false,
     "LeaderboardType": "None",
     "CsProjName": "",
-    "StartupScene": "scenes/terrain_benchmark.scene"
+    "StartupScene": "scenes/basic_example.scene"
   }
 }
