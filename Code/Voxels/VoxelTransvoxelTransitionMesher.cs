@@ -240,6 +240,17 @@ internal static class VoxelTransvoxelTransitionMesher
 		var matched = 0;
 		foreach ( var vertex in mesh.Vertices )
 		{
+			var highFaceCoordinate = face switch
+			{
+				VoxelClipboxFaceDirection.NegativeX => vertex.Position.x,
+				VoxelClipboxFaceDirection.PositiveX => vertex.Position.x - 2.0f * scale,
+				VoxelClipboxFaceDirection.NegativeY => vertex.Position.y,
+				VoxelClipboxFaceDirection.PositiveY => vertex.Position.y - 2.0f * scale,
+				VoxelClipboxFaceDirection.NegativeZ => vertex.Position.z,
+				VoxelClipboxFaceDirection.PositiveZ => vertex.Position.z - 2.0f * scale,
+				_ => 0.0f
+			};
+			if ( System.MathF.Abs( highFaceCoordinate ) > tolerance ) continue;
 			var p = vertex.Position / scale;
 			if ( p.x > tolerance && p.x < 2.0f - tolerance && p.y > tolerance && p.y < 2.0f - tolerance ) continue;
 			var found = false;
@@ -274,6 +285,7 @@ internal static class VoxelTransvoxelTransitionMesher
 
 	private static Vector3 ToFacePosition( int sample, VoxelClipboxFaceDirection face, float scale )
 	{
+		var coarseSample = sample >= 9;
 		var coordinate = sample < 9 ? SampleCoordinates[sample] : sample switch
 		{
 			9 => new Vector3Int( 0, 0, 0 ),
@@ -284,12 +296,12 @@ internal static class VoxelTransvoxelTransitionMesher
 		};
 		var position = face switch
 		{
-			VoxelClipboxFaceDirection.NegativeX => new Vector3( 0.0f, coordinate.x, coordinate.y ),
-			VoxelClipboxFaceDirection.PositiveX => new Vector3( 2.0f, coordinate.y, coordinate.x ),
-			VoxelClipboxFaceDirection.NegativeY => new Vector3( coordinate.y, 0.0f, coordinate.x ),
-			VoxelClipboxFaceDirection.PositiveY => new Vector3( coordinate.x, 2.0f, coordinate.y ),
-			VoxelClipboxFaceDirection.NegativeZ => new Vector3( coordinate.x, coordinate.y, 0.0f ),
-			VoxelClipboxFaceDirection.PositiveZ => new Vector3( coordinate.y, coordinate.x, 2.0f ),
+			VoxelClipboxFaceDirection.NegativeX => new Vector3( coarseSample ? -2.0f : 0.0f, coordinate.x, coordinate.y ),
+			VoxelClipboxFaceDirection.PositiveX => new Vector3( coarseSample ? 4.0f : 2.0f, coordinate.y, coordinate.x ),
+			VoxelClipboxFaceDirection.NegativeY => new Vector3( coordinate.y, coarseSample ? -2.0f : 0.0f, coordinate.x ),
+			VoxelClipboxFaceDirection.PositiveY => new Vector3( coordinate.x, coarseSample ? 4.0f : 2.0f, coordinate.y ),
+			VoxelClipboxFaceDirection.NegativeZ => new Vector3( coordinate.x, coordinate.y, coarseSample ? -2.0f : 0.0f ),
+			VoxelClipboxFaceDirection.PositiveZ => new Vector3( coordinate.y, coordinate.x, coarseSample ? 4.0f : 2.0f ),
 			_ => throw new System.ArgumentOutOfRangeException( nameof( face ) )
 		};
 		return position * scale;
