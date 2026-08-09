@@ -30,7 +30,8 @@ internal static class VoxelGpuPhase2BProof
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.PendingCountBatches != 0 ) failure = $"{diagnostics.PendingCountBatches} count batches remain";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.PendingEmitBatches != 0 ) failure = $"{diagnostics.PendingEmitBatches} emit batches remain";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.CountReadbackCount < minimumReadbacks ) failure = $"completed {diagnostics.CountReadbackCount} async count readbacks, expected at least {minimumReadbacks}";
-		if ( string.IsNullOrEmpty( failure ) && !diagnostics.CapacityLimited && diagnostics.RequestToVisible.Count != expectedBlocks ) failure = $"recorded {diagnostics.RequestToVisible.Count} request-to-visible samples, expected {expectedBlocks}";
+		var expectedRequestToVisibleSamples = expectedBlocks + (diagnostics.LodPolicy.StartsWith( "regular_clipbox_", System.StringComparison.Ordinal ) ? diagnostics.TransitionRenderableResidents : 0);
+		if ( string.IsNullOrEmpty( failure ) && !diagnostics.CapacityLimited && diagnostics.RequestToVisible.Count != expectedRequestToVisibleSamples ) failure = $"recorded {diagnostics.RequestToVisible.Count} request-to-visible samples, expected {expectedRequestToVisibleSamples}";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.CapacityLimited && diagnostics.RequestToVisible.Count != diagnostics.ResidentBlocks ) failure = $"recorded {diagnostics.RequestToVisible.Count} request-to-visible samples for {diagnostics.ResidentBlocks} residents";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.BatchCompletion.Count < minimumReadbacks ) failure = $"recorded {diagnostics.BatchCompletion.Count} completed batches, expected at least {minimumReadbacks}";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.GeometryReadbackBytes != 0 ) failure = $"read back {diagnostics.GeometryReadbackBytes} geometry bytes";
