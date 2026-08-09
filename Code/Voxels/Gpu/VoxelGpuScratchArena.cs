@@ -37,6 +37,10 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	private readonly int _regularVertexDataOffset;
 	private readonly float _voxelSize;
 	private readonly float _sdfClampDistance;
+	private readonly float _simplexFrequency;
+	private readonly float _simplexAmplitude;
+	private readonly float _simplexBaseHeight;
+	private readonly int _simplexSeed;
 	private VoxelGpuCountResult[] _completedCounts;
 	private readonly VoxelGpuCountResult[] _completedCountBuffer = new VoxelGpuCountResult[MaximumBatchSize];
 	private int _completedCount;
@@ -48,11 +52,15 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	public long CapacityBytes { get; }
 	public bool IsIdle { get { lock ( _stateLock ) return _state == ArenaState.Idle; } }
 
-	public VoxelGpuScratchArena( int chunkSize, float voxelSize, float sdfClampDistance )
+	public VoxelGpuScratchArena( int chunkSize, float voxelSize, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
 	{
 		_chunkSize = chunkSize;
 		_voxelSize = voxelSize;
 		_sdfClampDistance = sdfClampDistance;
+		_simplexFrequency = simplexFrequency;
+		_simplexAmplitude = simplexAmplitude;
+		_simplexBaseHeight = simplexBaseHeight;
+		_simplexSeed = simplexSeed;
 		_sampleSize = checked( chunkSize + 1 );
 		_haloSize = checked( chunkSize + 3 );
 		_haloSampleCount = checked( _haloSize * _haloSize * _haloSize );
@@ -236,6 +244,10 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			shader.Attributes.Set( "DescriptorOffset", MaximumBatchSize * 2 );
 			shader.Attributes.Set( "TotalsOffset", MaximumBatchSize * 6 );
 		}
+		_density.Attributes.Set( "SimplexFrequency", _simplexFrequency );
+		_density.Attributes.Set( "SimplexAmplitude", _simplexAmplitude );
+		_density.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
+		_density.Attributes.Set( "SimplexSeed", _simplexSeed );
 	}
 
 	private void SetBatchSize( int batchSize )

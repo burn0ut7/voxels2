@@ -44,6 +44,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		int chunkSize,
 		float voxelSize,
 		float sdfClampDistance,
+		float simplexFrequency,
+		float simplexAmplitude,
+		float simplexBaseHeight,
+		int simplexSeed,
 		int cullingPaddingChunks,
 		int residentCapacity,
 		int vertexCapacity,
@@ -58,7 +62,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_scheduler = new VoxelGpuBatchScheduler( System.Math.Max( 1, residentCapacity * 2 ) );
 		_scratchRing = new VoxelGpuScratchArena[VoxelGpuScratchArena.RingSize];
 		for ( var index = 0; index < _scratchRing.Length; index++ )
-			_scratchRing[index] = new VoxelGpuScratchArena( chunkSize, voxelSize, sdfClampDistance );
+			_scratchRing[index] = new VoxelGpuScratchArena( chunkSize, voxelSize, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
 		_activeBatches = new BatchContext[_scratchRing.Length];
 		_scheduledScratch = new VoxelGpuBatchScheduler.ScheduledRequest[_scratchRing.Length][];
 		_requestScratch = new VoxelGpuBlockRequest[_scratchRing.Length][];

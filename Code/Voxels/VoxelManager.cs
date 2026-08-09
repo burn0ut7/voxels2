@@ -133,6 +133,18 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "World" ), Range( 1.0f, MaximumChunkSize )]
 	public float SdfClampDistance { get; set; } = 8.0f;
 
+	[Property, Group( "Terrain" ), Range( 0.0001f, 0.1f )]
+	public float SimplexFrequency { get; set; } = 0.01f;
+
+	[Property, Group( "Terrain" ), Range( 0.0f, 128.0f )]
+	public float SimplexAmplitude { get; set; } = 24.0f;
+
+	[Property, Group( "Terrain" ), Range( -128.0f, 128.0f )]
+	public float SimplexBaseHeight { get; set; }
+
+	[Property, Group( "Terrain" )]
+	public int SimplexSeed { get; set; } = 1337;
+
 	[Property, Group( "Rendering" )]
 	public Material TerrainMaterial { get; set; }
 
@@ -268,6 +280,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		ChunkRadius = System.Math.Clamp( ChunkRadius, 1, MaximumChunkRadius );
 		VoxelSize = System.Math.Clamp( VoxelSize, 1.0f, 128.0f );
 		SdfClampDistance = System.Math.Clamp( SdfClampDistance, 1.0f, (float)MaximumChunkSize );
+		SimplexFrequency = System.Math.Clamp( SimplexFrequency, 0.0001f, 0.1f );
+		SimplexAmplitude = System.Math.Clamp( SimplexAmplitude, 0.0f, 128.0f );
+		SimplexBaseHeight = System.Math.Clamp( SimplexBaseHeight, -128.0f, 128.0f );
 		CpuChunkBuildConcurrency = System.Math.Clamp( CpuChunkBuildConcurrency, 1, MaximumConcurrentCpuChunkBuilds );
 		CpuMeshUploadsPerFrame = System.Math.Clamp( CpuMeshUploadsPerFrame, 1, MaximumCpuMeshUploadsPerFrame );
 		CpuMainThreadBudgetMilliseconds = System.Math.Clamp( CpuMainThreadBudgetMilliseconds, 0.25f, 12.0f );
@@ -628,6 +643,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				ChunkSize,
 				VoxelSize,
 				SdfClampDistance,
+				SimplexFrequency,
+				SimplexAmplitude,
+				SimplexBaseHeight,
+				SimplexSeed,
 				GpuFrustumPaddingChunks,
 				System.Math.Max( 1, residentCapacity ),
 				GpuVertexPoolCapacity,
@@ -635,7 +654,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
-			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
@@ -2511,8 +2530,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private WorldConfiguration CaptureWorldConfiguration()
 	{
-		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, TerrainMaterial, VisualBackend, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
 	}
+
+	private TerrainConfiguration CaptureTerrainConfiguration() => new( SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
 
 	private void ResetWorldGeneration()
 	{
@@ -2559,7 +2580,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
-	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
+	private readonly record struct TerrainConfiguration( float Frequency, float Amplitude, float BaseHeight, int Seed );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
 
 	private sealed class WorldGenerationWorkerResult
 	{
