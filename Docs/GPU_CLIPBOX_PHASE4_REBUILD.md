@@ -67,7 +67,7 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 | 4R-4 four-level toroidal streaming | Implemented; planner/runtime integration, bounded revision diagnostics, and editor visualization added; clean runtime benchmark gate passed in suite v17 |
 | 4R-5 transition ownership and residency | Implemented; stable seam slots, fine-side ownership, generation dependency metadata, diagnostics, proof, and editor visualization added; suite v18 runtime gate pending |
 | 4R-6 Transvoxel golden reference and GPU proof | Implemented proof path; pinned official transition tables, CPU reference, six orientations, all 512 cases, winding, scale, fixtures, gradient normals, boundary checks, and live GPU case proof pass; production transition pipeline pending |
-| 4R-7 production GPU transition pipeline | Not started |
+| 4R-7 production GPU transition pipeline | In progress; bounded GPU transition count/emission arena integrated with exact persistent-pool allocation and shared indirect rendering; live shader/runtime gate pending |
 | 4R-8 coherent publication and stability | Not started |
 | 4R-9 performance/adoption campaign | Not started |
 

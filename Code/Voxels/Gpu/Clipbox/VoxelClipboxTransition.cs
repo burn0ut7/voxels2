@@ -27,6 +27,9 @@ internal readonly record struct VoxelClipboxTransitionSlotAssignment(
 
 internal static class VoxelClipboxTransitionPlanner
 {
+	public static VoxelVisualBlockKey GetVisualKey( VoxelClipboxTransitionSlotAssignment assignment ) =>
+		new( assignment.FineCoordinate, assignment.FineLevel, assignment.RuleVersion, assignment.EditRevision, assignment.StableSlotId );
+
 	public static int GetStableSlotId( VoxelClipboxConfig config, int fineLevel, VoxelClipboxFaceDirection face, int u, int v ) =>
 		checked( fineLevel * 6 * config.BlocksPerAxis * config.BlocksPerAxis + (int)face * config.BlocksPerAxis * config.BlocksPerAxis + u + config.BlocksPerAxis * v );
 

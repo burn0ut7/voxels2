@@ -3,7 +3,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly VoxelGpuCapabilityReport _capabilities;
 	private readonly VoxelGpuTerrainDiagnosticCounters _diagnostics = new();
 	private readonly VoxelGpuBatchScheduler _scheduler;
+	private readonly VoxelGpuBatchScheduler _transitionScheduler;
 	private readonly VoxelGpuScratchArena[] _scratchRing;
+	private readonly VoxelGpuTransitionScratchArena _transitionScratch;
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainRenderer _renderer;
@@ -15,24 +17,38 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly float _voxelSize;
 	private readonly BatchContext[] _activeBatches;
 	private readonly VoxelGpuBatchScheduler.ScheduledRequest[][] _scheduledScratch;
+	private readonly VoxelGpuBatchScheduler.ScheduledRequest[] _transitionScheduledScratch;
 	private readonly VoxelGpuBlockRequest[][] _requestScratch;
+	private readonly VoxelGpuTransitionRequest[] _transitionRequestScratch;
 	private readonly int[][] _slotScratch;
+	private readonly int[] _transitionSlotScratch;
 	private readonly VoxelGpuAllocationDescriptor[][] _allocationScratch;
+	private readonly VoxelGpuAllocationDescriptor[] _transitionAllocationScratch;
 	private readonly PendingResident[][] _pendingScratch;
+	private readonly PendingResident[] _transitionPendingScratch;
 	private readonly PendingResident[][] _publicationScratch;
+	private readonly PendingResident[] _transitionPublicationScratch;
 	private readonly HashSet<VoxelVisualBlockKey> _desiredKeys = new();
+	private readonly HashSet<VoxelVisualBlockKey> _desiredTransitionKeys = new();
 	private readonly HashSet<VoxelVisualBlockKey> _desiredScratch = new();
+	private readonly HashSet<VoxelVisualBlockKey> _desiredTransitionScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrder = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
 	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
+	private readonly List<VoxelVisualBlockKey> _transitionLeavingScratch = new();
 	private readonly HashSet<VoxelVisualBlockKey> _pendingRequests = new();
+	private readonly HashSet<VoxelVisualBlockKey> _pendingTransitionRequests = new();
 	private readonly HashSet<VoxelVisualBlockKey> _blockedRequests = new();
+	private readonly HashSet<VoxelVisualBlockKey> _blockedTransitionRequests = new();
 	private readonly Dictionary<VoxelVisualBlockKey, BlockedRequest> _blockedDetails = new();
 	private readonly List<VoxelVisualBlockKey> _wakeScratch = new();
+	private readonly List<VoxelVisualBlockKey> _transitionWakeScratch = new();
 	private readonly VoxelGpuResidentTable.ResidentEntry[] _publishedScratch;
 	private readonly List<EvictionCandidate> _evictionCandidates;
+	private readonly Dictionary<VoxelVisualBlockKey, VoxelGpuTransitionKey> _transitionDependencyKeys = new();
+	private readonly Dictionary<VoxelVisualBlockKey, BlockedRequest> _blockedTransitionDetails = new();
 	private readonly object _desiredSync = new();
 	private ulong _epoch;
 	private long _nextProgressLogTimestamp;
@@ -44,13 +60,17 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private int _retireUndesiredRequested;
 	private int _worstPublishedRank = -1;
 
-	public bool IsSettled => IsStreamingWorkIdle && (DesiredCount == _residents.PublishedCount || BlockedRequestCount >= System.Math.Max( 0, DesiredCount - _residents.PublishedCount ));
+	public bool IsSettled => IsStreamingWorkIdle && (DesiredCount + TransitionDesiredCount == _residents.PublishedCount || BlockedRequestCount + BlockedTransitionRequestCount >= System.Math.Max( 0, DesiredCount + TransitionDesiredCount - _residents.PublishedCount ));
 	public bool IsCapacityLimited => BlockedRequestCount > 0;
 	private int DesiredCount { get { lock ( _desiredSync ) return _desiredKeys.Count; } }
+	private int TransitionDesiredCount { get { lock ( _desiredSync ) return _desiredTransitionKeys.Count; } }
 	private int PendingRequestCount { get { lock ( _desiredSync ) return _pendingRequests.Count; } }
+	private int PendingTransitionRequestCount { get { lock ( _desiredSync ) return _pendingTransitionRequests.Count; } }
 	private int BlockedRequestCount { get { lock ( _desiredSync ) return _blockedRequests.Count; } }
-	private bool IsDesired( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _desiredKeys.Contains( key ); }
-	private bool IsStreamingWorkIdle => _scheduler.PendingCount == 0 && PendingRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle );
+	private int BlockedTransitionRequestCount { get { lock ( _desiredSync ) return _blockedTransitionRequests.Count; } }
+	private bool IsDesired( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return key.IsTransition ? _desiredTransitionKeys.Contains( key ) : _desiredKeys.Contains( key ); }
+	private bool IsStreamingWorkIdle => _scheduler.PendingCount == 0 && _transitionScheduler.PendingCount == 0 && PendingRequestCount == 0 && PendingTransitionRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _transitionBatch.Count == 0 && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle ) && _transitionScratch.IsIdle;
+	private BatchContext _transitionBatch;
 	public bool IsAvailable => _capabilities.Available;
 	public bool IsTerrainRenderingEnabled => _renderer.IsTerrainRenderingEnabled;
 	public bool IsProcessingEnabled => _processingEnabled;
@@ -80,6 +100,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_chunkSize = chunkSize;
 		_voxelSize = voxelSize;
 		_scheduler = new VoxelGpuBatchScheduler( System.Math.Max( 1, residentCapacity * 2 ) );
+		_transitionScheduler = new VoxelGpuBatchScheduler( System.Math.Max( 1, residentCapacity ) );
 		_scratchRing = new VoxelGpuScratchArena[VoxelGpuScratchArena.RingSize];
 		for ( var index = 0; index < _scratchRing.Length; index++ )
 			_scratchRing[index] = new VoxelGpuScratchArena( chunkSize, voxelSize, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
@@ -100,6 +121,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_publicationScratch[index] = new PendingResident[VoxelGpuScratchArena.MaximumBatchSize];
 			_activeBatches[index] = new BatchContext( _scheduledScratch[index], _slotScratch[index] );
 		}
+		_transitionPublicationScratch = new PendingResident[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionScratch = new VoxelGpuTransitionScratchArena( chunkSize, voxelSize, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+		_transitionScheduledScratch = new VoxelGpuBatchScheduler.ScheduledRequest[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionRequestScratch = new VoxelGpuTransitionRequest[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionSlotScratch = new int[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionAllocationScratch = new VoxelGpuAllocationDescriptor[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionPendingScratch = new PendingResident[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionBatch = new BatchContext( _transitionScheduledScratch, _transitionSlotScratch );
 		_pool = new VoxelGpuMeshPool( vertexCapacity, indexCapacity );
 		_residents = new VoxelGpuResidentTable( residentCapacity );
 		if ( clipboxConfig.HasValue )
@@ -116,7 +145,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ResidentCapacity = residentCapacity;
 		_diagnostics.PendingRequestCapacity = _scheduler.MaximumPendingRequests;
 		_renderer = new VoxelGpuTerrainRenderer( world, camera, _pool, _residents, _diagnostics, _capabilities.IndirectCommandGroupSize, System.Math.Max( 0, cullingPaddingChunks ) * chunkSize * voxelSize );
-		_diagnostics.ScratchBytes = _scratchRing.Sum( scratch => scratch.CapacityBytes );
+		_diagnostics.ScratchBytes = _scratchRing.Sum( scratch => scratch.CapacityBytes ) + _transitionScratch.CapacityBytes;
 		_nextProgressLogTimestamp = System.Diagnostics.Stopwatch.GetTimestamp() + 10 * System.Diagnostics.Stopwatch.Frequency;
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
 	}
@@ -152,10 +181,55 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
 		if ( !_clipboxTransitions.DependenciesValid )
 			_diagnostics.Failure = $"GPU transition metadata has {_clipboxTransitions.DependencyMismatchCount} unresolved regular generation dependencies.";
+		UpdateDesiredTransitions();
 		_clipboxPlanner.Commit();
 		_clipboxTransitions.Commit();
 		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		return true;
+	}
+
+	private void UpdateDesiredTransitions()
+	{
+		if ( _clipboxTransitions is null ) return;
+		lock ( _desiredSync )
+		{
+			_desiredTransitionScratch.Clear();
+			foreach ( var entry in _clipboxTransitions.Desired )
+			{
+				if ( !entry.Active ) continue;
+				var transitionKey = VoxelClipboxTransitionPlanner.GetVisualKey( _clipboxPlanner.DesiredTransitions[entry.StableSlotId] );
+				_desiredTransitionScratch.Add( transitionKey );
+				if ( _transitionDependencyKeys.TryGetValue( transitionKey, out var previousDependency ) && previousDependency != entry.Key )
+				{
+					_transitionScheduler.Cancel( transitionKey );
+					_pendingTransitionRequests.Remove( transitionKey );
+					if ( _residents.TryRemove( transitionKey, out var replacedAllocation ) && !replacedAllocation.IsEmpty ) _pool.Retire( replacedAllocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
+				}
+				_transitionDependencyKeys[transitionKey] = entry.Key;
+			}
+			_transitionLeavingScratch.Clear();
+			foreach ( var key in _desiredTransitionKeys ) if ( !_desiredTransitionScratch.Contains( key ) ) _transitionLeavingScratch.Add( key );
+			foreach ( var key in _transitionLeavingScratch )
+			{
+				_transitionScheduler.Cancel( key );
+				_pendingTransitionRequests.Remove( key );
+				_blockedTransitionRequests.Remove( key );
+				_blockedTransitionDetails.Remove( key );
+				_residents.CancelUnpublishedReservation( key );
+				_desiredTransitionKeys.Remove( key );
+				_transitionDependencyKeys.Remove( key );
+			}
+			foreach ( var key in _desiredTransitionScratch )
+			{
+				_desiredTransitionKeys.Add( key );
+				if ( _residents.ContainsKey( key ) || !_pendingTransitionRequests.Add( key ) ) continue;
+				if ( !_transitionScheduler.TryEnqueue( key, out _ ) )
+				{
+					_pendingTransitionRequests.Remove( key );
+					_blockedTransitionRequests.Add( key );
+				}
+			}
+		}
 	}
 
 	public void SetRenderingEnabled( bool enabled ) => _renderer.SetRenderingEnabled( enabled );
@@ -299,11 +373,13 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_epoch++;
 			if ( System.Threading.Interlocked.Exchange( ref _retireUndesiredRequested, 0 ) != 0 ) RetireUndesiredResidents();
 			var reclaimed = _pool.Reclaim( _epoch );
-			if ( reclaimed > 0 ) WakeBlockedRequests();
+			if ( reclaimed > 0 ) { WakeBlockedRequests(); WakeBlockedTransitionRequests(); }
 			UpdateQueueDiagnostics();
 			PublishCompletedEmits();
 			for ( var index = 0; index < _scratchRing.Length; index++ ) ProcessCountReadback( index );
+			ProcessTransitionCountReadback();
 			SubmitCountBatches();
+			SubmitTransitionCountBatch();
 			LogProgress();
 			var renderMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( renderStart ).TotalMilliseconds;
 			if ( renderMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowRenderLogCount ) <= 32 )
@@ -381,6 +457,134 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 			_diagnostics.CountSubmissionMilliseconds += submissionMilliseconds;
 		}
+		UpdatePendingCountBatches();
+	}
+
+	private void SubmitTransitionCountBatch()
+	{
+		if ( _transitionBatch.Count != 0 || !_transitionScratch.IsIdle || _transitionScheduler.PendingCount == 0 ) return;
+		var scheduledCount = _transitionScheduler.TakeBatch( VoxelGpuTransitionScratchArena.MaximumBatchSize, _transitionBatch.Requests );
+		var acceptedCount = 0;
+		for ( var index = 0; index < scheduledCount; index++ )
+		{
+			var item = _transitionBatch.Requests[index];
+			if ( !item.Key.IsTransition || item.Key.TransitionSlotId < 0 || item.Key.TransitionSlotId >= _clipboxTransitions.Capacity || !_residents.TryReserve( item.Key, item.Generation, out var slot ) )
+			{
+				_diagnostics.BackpressureEvents++;
+				continue;
+			}
+			var entry = _clipboxTransitions.Desired[item.Key.TransitionSlotId];
+			var fineStep = 1 << entry.FineLevel;
+			var coarseStep = 1 << entry.CoarseLevel;
+			_transitionBatch.Requests[acceptedCount] = item;
+			_transitionSlotScratch[acceptedCount] = slot;
+			_transitionRequestScratch[acceptedCount] = new VoxelGpuTransitionRequest
+			{
+				FineOrigin = new Vector4( entry.FineCoordinate.x * _chunkSize * fineStep, entry.FineCoordinate.y * _chunkSize * fineStep, (entry.FineCoordinate.z - 1) * _chunkSize * fineStep, 0.0f ),
+				CoarseOrigin = new Vector4( entry.CoarseCoordinate.x * _chunkSize * coarseStep, entry.CoarseCoordinate.y * _chunkSize * coarseStep, (entry.CoarseCoordinate.z - 1) * _chunkSize * coarseStep, 0.0f ),
+				FineStep = (uint)fineStep,
+				CoarseStep = (uint)coarseStep,
+				Face = (uint)entry.Face,
+				Generation = item.Generation,
+				RequestIndex = (uint)acceptedCount,
+				ResidentSlot = (uint)slot,
+				TransitionSlot = (uint)item.Key.TransitionSlotId
+			};
+			acceptedCount++;
+		}
+		_transitionBatch.Count = acceptedCount;
+		if ( acceptedCount == 0 ) return;
+		if ( !_transitionScratch.TrySubmitCount( _transitionRequestScratch, acceptedCount, out var submissionMilliseconds ) ) throw new System.InvalidOperationException( "transition scratch arena rejected a count batch while idle" );
+		_diagnostics.CountSubmissionMilliseconds += submissionMilliseconds;
+	}
+
+	private void ProcessTransitionCountReadback()
+	{
+		if ( _transitionBatch.Count == 0 || !_transitionScratch.TryTakeCounts( out var counts, out var count, out var readbackMilliseconds ) ) return;
+		_diagnostics.RecordCountReadback( readbackMilliseconds );
+		var allocations = _transitionAllocationScratch;
+		var pending = _transitionPendingScratch;
+		var pendingCount = 0;
+		System.Array.Clear( allocations, 0, allocations.Length );
+		var resultCount = System.Math.Min( count, _transitionBatch.Count );
+		for ( var index = 0; index < resultCount; index++ )
+		{
+			var scheduled = _transitionBatch.Requests[index];
+			var countResult = counts[index];
+			var dependencyValid = scheduled.Key.TransitionSlotId >= 0 && scheduled.Key.TransitionSlotId < _clipboxTransitions.Capacity && _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId].DependenciesValid;
+			if ( countResult.RequestIndex != index || countResult.Generation != scheduled.Generation || !_transitionScheduler.IsCurrent( scheduled.Key, scheduled.Generation ) || !dependencyValid )
+			{
+				RemovePendingTransitionRequest( scheduled.Key );
+				_residents.CancelUnpublishedReservation( scheduled.Key );
+				_diagnostics.StalePublicationsRejected++;
+				continue;
+			}
+			if ( countResult.VertexCount == 0 || countResult.IndexCount == 0 )
+			{
+				RemovePendingTransitionRequest( scheduled.Key );
+				_residents.TryPublish( _transitionBatch.Slots[index], scheduled.Key, scheduled.Generation, default, new VoxelGpuResidentDescriptor { Generation = scheduled.Generation }, out _ );
+				continue;
+			}
+			if ( countResult.Overflow != 0 || countResult.VertexCount > int.MaxValue || countResult.IndexCount > int.MaxValue )
+			{
+				RemovePendingTransitionRequest( scheduled.Key );
+				_residents.CancelUnpublishedReservation( scheduled.Key );
+				_diagnostics.Failure = $"GPU transition count overflow for slot {scheduled.Key.TransitionSlotId}";
+				_transitionScheduler.Cancel( scheduled.Key );
+				continue;
+			}
+			if ( !_pool.TryAllocate( (int)countResult.VertexCount, (int)countResult.IndexCount, countResult.Generation, out var handle, out var allocationFailure ) )
+			{
+				RemovePendingTransitionRequest( scheduled.Key );
+				_residents.CancelUnpublishedReservation( scheduled.Key );
+				_diagnostics.BackpressureEvents++;
+				_diagnostics.CapacityDeferrals++;
+				if ( allocationFailure is VoxelGpuAllocationFailureReason.OversizedVertex or VoxelGpuAllocationFailureReason.OversizedIndex ) _diagnostics.Failure = $"GPU transition slot {scheduled.Key.TransitionSlotId} exceeds the persistent mesh pool";
+				else BlockTransitionRequest( scheduled.Key, (int)countResult.VertexCount, (int)countResult.IndexCount );
+				continue;
+			}
+			var entry = _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId];
+			var scale = 1 << entry.FineLevel;
+			var drawOrigin = new Vector3( entry.FineCoordinate.x * _chunkSize * scale * _voxelSize, entry.FineCoordinate.y * _chunkSize * scale * _voxelSize, (entry.FineCoordinate.z - 1) * _chunkSize * scale * _voxelSize );
+			var extent = _chunkSize * scale * _voxelSize;
+			allocations[index] = new VoxelGpuAllocationDescriptor
+			{
+				VertexOffset = (uint)handle.Vertices.Offset,
+				VertexCapacity = (uint)handle.Vertices.Count,
+				IndexOffset = (uint)handle.Indices.Offset,
+				IndexCapacity = (uint)handle.Indices.Count,
+				Generation = scheduled.Generation,
+				ResidentSlot = (uint)_transitionBatch.Slots[index],
+				RequestIndex = (uint)index,
+				Flags = 2,
+				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
+				DrawScale = new Vector4( 1, 1, 1, 0 )
+			};
+			var descriptor = new VoxelGpuResidentDescriptor
+			{
+				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
+				BoundsMin = new Vector4( drawOrigin - Vector3.One * _voxelSize * scale * 2.0f, 0.0f ),
+				BoundsMax = new Vector4( drawOrigin + Vector3.One * extent + Vector3.One * _voxelSize * scale * 2.0f, 0.0f ),
+				Generation = scheduled.Generation,
+				VertexOffset = (uint)handle.Vertices.Offset,
+				IndexOffset = (uint)handle.Indices.Offset,
+				IndexCount = countResult.IndexCount
+			};
+			pending[pendingCount++] = new PendingResident( _transitionBatch.Slots[index], scheduled.Key, scheduled.Generation, scheduled.RequestedTimestamp, handle, descriptor, entry.Key );
+		}
+		if ( !_transitionScratch.TrySubmitEmit( allocations, _transitionBatch.Count, _pool, out var emitMilliseconds ) )
+		{
+			for ( var index = 0; index < pendingCount; index++ ) _pool.ReleaseImmediately( pending[index].Allocation );
+			throw new System.InvalidOperationException( "transition scratch arena rejected an emit batch after count publication" );
+		}
+		_diagnostics.EmitSubmissionMilliseconds += emitMilliseconds;
+		_diagnostics.PendingEmitBatches++;
+		var publicationResidents = _transitionPublicationScratch;
+		System.Array.Copy( pending, publicationResidents, pendingCount );
+		var requestedTimestamp = _transitionBatch.Requests[0].RequestedTimestamp;
+		for ( var index = 1; index < _transitionBatch.Count; index++ ) requestedTimestamp = System.Math.Min( requestedTimestamp, _transitionBatch.Requests[index].RequestedTimestamp );
+		_publications.Enqueue( new PendingPublication( _epoch + 1, requestedTimestamp, publicationResidents, pendingCount ) );
+		_transitionBatch.Count = 0;
 		UpdatePendingCountBatches();
 	}
 
@@ -488,7 +692,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private void UpdatePendingCountBatches()
 	{
 		_diagnostics.PendingCountBatches = _activeBatches.Count( batch => batch is not null && batch.Count != 0 ) +
-			(_scheduler.PendingCount + VoxelGpuScratchArena.MaximumBatchSize - 1) / VoxelGpuScratchArena.MaximumBatchSize;
+			(_scheduler.PendingCount + VoxelGpuScratchArena.MaximumBatchSize - 1) / VoxelGpuScratchArena.MaximumBatchSize +
+			(_transitionScheduler.PendingCount + VoxelGpuTransitionScratchArena.MaximumBatchSize - 1) / VoxelGpuTransitionScratchArena.MaximumBatchSize +
+			(_transitionBatch.Count == 0 ? 0 : 1);
 	}
 
 	private void PublishCompletedEmits()
@@ -499,7 +705,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			for ( var residentIndex = 0; residentIndex < publication.Count; residentIndex++ )
 			{
 				var resident = publication.Residents[residentIndex];
-				if ( !_scheduler.IsCurrent( resident.Key, resident.Generation ) ||
+				var current = resident.Key.IsTransition ? _transitionScheduler.IsCurrent( resident.Key, resident.Generation ) : _scheduler.IsCurrent( resident.Key, resident.Generation );
+				if ( resident.Key.IsTransition && (resident.Key.TransitionSlotId < 0 || resident.Key.TransitionSlotId >= _clipboxTransitions.Capacity || _clipboxTransitions.Desired[resident.Key.TransitionSlotId].Key != resident.TransitionDependency) ) current = false;
+				if ( !current ||
 					!_residents.TryPublish( resident.Slot, resident.Key, resident.Generation, resident.Allocation, resident.Descriptor, out var replaced ) )
 				{
 					if ( !IsDesired( resident.Key ) )
@@ -524,13 +732,13 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	private void UpdateQueueDiagnostics()
 	{
-		_diagnostics.DesiredBlocks = DesiredCount;
-		_diagnostics.RequestedBlocks = DesiredCount;
-		_diagnostics.PendingRequestCount = _scheduler.PendingCount;
+		_diagnostics.DesiredBlocks = DesiredCount + TransitionDesiredCount;
+		_diagnostics.RequestedBlocks = DesiredCount + TransitionDesiredCount;
+		_diagnostics.PendingRequestCount = _scheduler.PendingCount + _transitionScheduler.PendingCount;
 		_diagnostics.PendingPublicationCount = _publications.Count;
-		_diagnostics.BlockedRequests = BlockedRequestCount;
-		_diagnostics.CapacityLimited = BlockedRequestCount > 0;
-		_diagnostics.QueuesBounded = _scheduler.PendingCount <= _scheduler.MaximumPendingRequests && _publications.Count <= VoxelGpuScratchArena.RingSize;
+		_diagnostics.BlockedRequests = BlockedRequestCount + BlockedTransitionRequestCount;
+		_diagnostics.CapacityLimited = BlockedRequestCount + BlockedTransitionRequestCount > 0;
+		_diagnostics.QueuesBounded = _scheduler.PendingCount <= _scheduler.MaximumPendingRequests && _transitionScheduler.PendingCount <= _transitionScheduler.MaximumPendingRequests && _publications.Count <= VoxelGpuScratchArena.RingSize + 1;
 		if ( _clipboxPlanner is not null )
 		{
 			_diagnostics.ClipboxPendingRevisionCount = IsSettled ? 0 : 1;
@@ -558,6 +766,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	}
 
 	private void RemovePendingRequest( VoxelVisualBlockKey key ) { lock ( _desiredSync ) _pendingRequests.Remove( key ); }
+	private void RemovePendingTransitionRequest( VoxelVisualBlockKey key ) { lock ( _desiredSync ) _pendingTransitionRequests.Remove( key ); }
 
 	private void BlockRequest( VoxelVisualBlockKey key, int vertexCount, int indexCount )
 	{
@@ -566,6 +775,16 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			{
 				_blockedRequests.Add( key );
 				_blockedDetails[key] = new BlockedRequest( vertexCount, indexCount );
+			}
+	}
+
+	private void BlockTransitionRequest( VoxelVisualBlockKey key, int vertexCount, int indexCount )
+	{
+		lock ( _desiredSync )
+			if ( _desiredTransitionKeys.Contains( key ) )
+			{
+				_blockedTransitionRequests.Add( key );
+				_blockedTransitionDetails[key] = new BlockedRequest( vertexCount, indexCount );
 			}
 	}
 
@@ -594,6 +813,34 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					_blockedRequests.Add( key );
 					_blockedDetails[key] = blocked;
 					break;
+				}
+			}
+		}
+	}
+
+	private void WakeBlockedTransitionRequests()
+	{
+		lock ( _desiredSync )
+		{
+			if ( _blockedTransitionRequests.Count == 0 ) return;
+			_transitionWakeScratch.Clear();
+			foreach ( var key in _desiredTransitionKeys )
+			{
+				if ( !_blockedTransitionRequests.Contains( key ) || _residents.ContainsKey( key ) || !_blockedTransitionDetails.TryGetValue( key, out var blocked ) ) continue;
+				if ( _pool.VertexLargestFree < blocked.VertexCount || _pool.IndexLargestFree < blocked.IndexCount ) continue;
+				_transitionWakeScratch.Add( key );
+				if ( _transitionWakeScratch.Count >= VoxelGpuTransitionScratchArena.MaximumBatchSize ) break;
+			}
+			foreach ( var key in _transitionWakeScratch )
+			{
+				if ( !_blockedTransitionDetails.TryGetValue( key, out var blocked ) || !_blockedTransitionRequests.Remove( key ) ) continue;
+				_blockedTransitionDetails.Remove( key );
+				if ( !_pendingTransitionRequests.Add( key ) ) continue;
+				if ( !_transitionScheduler.TryEnqueue( key, out _ ) )
+				{
+					_pendingTransitionRequests.Remove( key );
+					_blockedTransitionRequests.Add( key );
+					_blockedTransitionDetails[key] = blocked;
 				}
 			}
 		}
@@ -671,8 +918,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_disposed = true;
 		_renderer.Dispose();
 		foreach ( var scratch in _scratchRing ) scratch.Dispose();
+		_transitionScratch.Dispose();
 		_pool.Dispose();
 		_scheduler.Clear();
+		_transitionScheduler.Clear();
 		Delete();
 	}
 
@@ -683,6 +932,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		public int Count { get; set; }
 		public BatchContext( VoxelGpuBatchScheduler.ScheduledRequest[] requests, int[] slots ) { Requests = requests; Slots = slots; }
 	}
-	private readonly record struct PendingResident( int Slot, VoxelVisualBlockKey Key, uint Generation, long RequestedTimestamp, VoxelGpuAllocationHandle Allocation, VoxelGpuResidentDescriptor Descriptor );
+	private readonly record struct PendingResident( int Slot, VoxelVisualBlockKey Key, uint Generation, long RequestedTimestamp, VoxelGpuAllocationHandle Allocation, VoxelGpuResidentDescriptor Descriptor, VoxelGpuTransitionKey TransitionDependency = default );
 	private readonly record struct PendingPublication( ulong PublishEpoch, long RequestedTimestamp, PendingResident[] Residents, int Count );
 }

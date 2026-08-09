@@ -1,6 +1,24 @@
 using System.Runtime.InteropServices;
 
-internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int Lod, int RuleVersion, uint EditRevision = 0 );
+internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int Lod, int RuleVersion, uint EditRevision = 0, int TransitionSlotId = -1 )
+{
+	public bool IsTransition => TransitionSlotId >= 0;
+}
+
+[StructLayout( LayoutKind.Sequential, Pack = 4, Size = 64 )]
+internal struct VoxelGpuTransitionRequest
+{
+	public Vector4 FineOrigin;
+	public Vector4 CoarseOrigin;
+	public uint FineStep;
+	public uint CoarseStep;
+	public uint Face;
+	public uint Generation;
+	public uint RequestIndex;
+	public uint ResidentSlot;
+	public uint TransitionSlot;
+	public uint Reserved0;
+}
 
 [StructLayout( LayoutKind.Sequential, Pack = 4, Size = 64 )]
 internal struct VoxelGpuBlockRequest
@@ -76,6 +94,7 @@ internal static class VoxelGpuContractValidation
 	public static void AssertLayouts()
 	{
 		AssertGpuStride<VoxelGpuBlockRequest>( 64 );
+		AssertGpuStride<VoxelGpuTransitionRequest>( 64 );
 		AssertGpuStride<VoxelGpuCountResult>( 32 );
 		AssertGpuStride<VoxelGpuAllocationDescriptor>( 64 );
 		AssertGpuStride<VoxelGpuResidentDescriptor>( 64 );
