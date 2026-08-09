@@ -110,10 +110,17 @@ internal sealed class VoxelGpuResidentTable
 	}
 
 	public void CancelUnpublishedReservation( VoxelVisualBlockKey key )
+		=> CancelUnpublishedReservation( key, null );
+
+	public void CancelUnpublishedReservation( VoxelVisualBlockKey key, uint generation )
+		=> CancelUnpublishedReservation( key, (uint?)generation );
+
+	private void CancelUnpublishedReservation( VoxelVisualBlockKey key, uint? generation )
 	{
 		lock ( _sync )
 		{
 			if ( !_slotsByKey.TryGetValue( key, out var slot ) || _entries[slot].Published ) return;
+			if ( generation.HasValue && _entries[slot].Generation != generation.Value ) return;
 			_slotsByKey.Remove( key );
 			_entries[slot] = default;
 			_freeSlots.Push( slot );

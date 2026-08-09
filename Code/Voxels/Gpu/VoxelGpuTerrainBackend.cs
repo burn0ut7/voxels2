@@ -806,14 +806,23 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var scheduled = _transitionBatch.Requests[index];
 			var countResult = counts[index];
 			var dependencyValid = scheduled.Key.TransitionSlotId >= 0 && scheduled.Key.TransitionSlotId < _clipboxTransitions.Capacity && _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId].DependenciesValid;
-			if ( countResult.RequestIndex != index || countResult.Generation != scheduled.Generation || !_transitionScheduler.IsCurrent( scheduled.Key, scheduled.Generation ) || !dependencyValid )
+			var schedulerCurrent = _transitionScheduler.IsCurrent( scheduled.Key, scheduled.Generation );
+			if ( !schedulerCurrent )
 			{
-				if ( dependencyValid ) RetryTransitionRequest( scheduled.Key );
-				else
-				{
-					RemovePendingTransitionRequest( scheduled.Key );
-					_residents.CancelUnpublishedReservation( scheduled.Key );
-				}
+				_residents.CancelUnpublishedReservation( scheduled.Key, scheduled.Generation );
+				_diagnostics.StalePublicationsRejected++;
+				continue;
+			}
+			if ( !dependencyValid )
+			{
+				RemovePendingTransitionRequest( scheduled.Key );
+				_residents.CancelUnpublishedReservation( scheduled.Key, scheduled.Generation );
+				_diagnostics.StalePublicationsRejected++;
+				continue;
+			}
+			if ( countResult.RequestIndex != index || countResult.Generation != scheduled.Generation )
+			{
+				RetryTransitionRequest( scheduled.Key );
 				_diagnostics.StalePublicationsRejected++;
 				continue;
 			}
@@ -1018,7 +1027,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				if ( !current ||
 					!_residents.TryPublish( resident.Slot, resident.Key, resident.Generation, resident.Allocation, resident.Descriptor, out var replaced ) )
 				{
-					if ( resident.Key.IsTransition ) RetryTransitionRequest( resident.Key );
+					if ( resident.Key.IsTransition && schedulerCurrent ) RetryTransitionRequest( resident.Key );
+					else if ( resident.Key.IsTransition ) _residents.CancelUnpublishedReservation( resident.Key, resident.Generation );
 					else if ( !IsDesired( resident.Key ) )
 					{
 						RemovePendingRequest( resident.Key );
