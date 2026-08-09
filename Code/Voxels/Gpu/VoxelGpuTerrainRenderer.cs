@@ -9,10 +9,17 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly float _cullingPaddingWorld;
 	private readonly GpuBuffer<VoxelGpuResidentDescriptor> _residentBuffer;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
+	private readonly VoxelGpuResidentTable.ResidentEntry[] _residentSnapshot;
+	private readonly VoxelGpuResidentDescriptor[] _descriptorData;
+	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _argumentData;
+	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _uploadedArgumentData;
 	private readonly Sandbox.Rendering.CommandList[] _depthCommandLists;
 	private readonly Sandbox.Rendering.CommandList[] _opaqueCommandLists;
 	private readonly RenderAttributes _attributes = new();
 	private readonly Material _material;
+	private readonly long _cullingRefreshIntervalTicks = System.Diagnostics.Stopwatch.Frequency / 30;
+	private readonly float _cullingPositionThresholdSquared;
+	private readonly float _cullingDirectionThresholdSquared;
 	private int _attachedDepthCommandListCount;
 	private int _attachedOpaqueCommandListCount;
 	private int _dirty = 1;
@@ -20,6 +27,9 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private Vector3 _lastCameraPosition;
 	private Vector3 _lastCameraForward;
 	private Vector3 _lastCameraUp;
+	private long _nextCullingRefreshTimestamp;
+	private bool _hasUploadedArguments;
+	private int _uploadedArgumentCount;
 	private bool _disposed;
 
 	public bool UsesProductionLighting => true;
@@ -35,6 +45,13 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_residents = residents ?? throw new System.ArgumentNullException( nameof( residents ) );
 		_diagnostics = diagnostics ?? throw new System.ArgumentNullException( nameof( diagnostics ) );
 		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
+		var cullingPositionThreshold = _cullingPaddingWorld > 0.0f ? System.MathF.Max( 16.0f, _cullingPaddingWorld * 0.25f ) : 0.0f;
+		_cullingPositionThresholdSquared = cullingPositionThreshold * cullingPositionThreshold;
+		_cullingDirectionThresholdSquared = _cullingPaddingWorld > 0.0f ? 0.02f : 0.000001f;
+		_residentSnapshot = new VoxelGpuResidentTable.ResidentEntry[residents.Capacity];
+		_descriptorData = new VoxelGpuResidentDescriptor[residents.Capacity];
+		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
+		_uploadedArgumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
 		_material = Material.FromShader( ShaderName );
 		_residentBuffer = new GpuBuffer<VoxelGpuResidentDescriptor>( residents.Capacity, GpuBuffer.UsageFlags.Structured, "Voxel GPU Residents" );
 		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( residents.Capacity,
@@ -47,7 +64,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Opaque Multi Draw {index}" ) )
 			.ToArray();
 		_attributes.Set( "TerrainResidents", _residentBuffer );
-		_drawArguments.SetData( new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity], 0 );
+		_drawArguments.SetData( _argumentData, 0 );
 		for ( var index = 0; index < commandListCapacity; index++ )
 		{
 			var offset = index * MaximumCommandsPerSubmission;
@@ -70,49 +87,73 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		var cameraForward = cameraRotation.Forward;
 		var cameraUp = cameraRotation.Up;
 		var cameraChanged = !_hasCameraCullingState ||
-			(cameraPosition - _lastCameraPosition).LengthSquared > 0.0001f ||
-			(cameraForward - _lastCameraForward).LengthSquared > 0.000001f ||
-			(cameraUp - _lastCameraUp).LengthSquared > 0.000001f;
-		if ( cameraChanged )
+			(cameraPosition - _lastCameraPosition).LengthSquared > _cullingPositionThresholdSquared ||
+			(cameraForward - _lastCameraForward).LengthSquared > _cullingDirectionThresholdSquared ||
+			(cameraUp - _lastCameraUp).LengthSquared > _cullingDirectionThresholdSquared;
+		var now = System.Diagnostics.Stopwatch.GetTimestamp();
+		var cullingRefreshDue = now >= _nextCullingRefreshTimestamp;
+		var cullingChanged = cameraChanged && cullingRefreshDue;
+		if ( cullingChanged )
 		{
 			_hasCameraCullingState = true;
 			_lastCameraPosition = cameraPosition;
 			_lastCameraForward = cameraForward;
 			_lastCameraUp = cameraUp;
+			_nextCullingRefreshTimestamp = now + _cullingRefreshIntervalTicks;
 		}
 		var residentsChanged = System.Threading.Interlocked.Exchange( ref _dirty, 0 ) != 0;
-		if ( residentsChanged || cameraChanged ) Rebuild( residentsChanged );
+		if ( residentsChanged || cullingChanged ) Rebuild( residentsChanged );
 	}
 
 	private void Rebuild( bool uploadResidents )
 	{
-		var descriptorData = new VoxelGpuResidentDescriptor[_residents.Capacity];
-		var arguments = new List<GpuBuffer.IndirectDrawIndexedArguments>( _residents.Capacity );
+		_residents.CopyEntries( _residentSnapshot );
 		var frustum = _camera.GetFrustum();
-		foreach ( var (slot, entry) in _residents.PublishedEntries() )
+		var visibleCommandCount = 0;
+		for ( var slot = 0; slot < _residentSnapshot.Length; slot++ )
 		{
-			descriptorData[slot] = entry.Descriptor;
+			var entry = _residentSnapshot[slot];
+			if ( uploadResidents ) _descriptorData[slot] = entry.Published ? entry.Descriptor : default;
+			if ( !entry.Published ) continue;
 			if ( entry.Descriptor.IndexCount == 0 ) continue;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );
 			var boundsMax = new Vector3( entry.Descriptor.BoundsMax.x, entry.Descriptor.BoundsMax.y, entry.Descriptor.BoundsMax.z );
 			var padding = Vector3.One * _cullingPaddingWorld;
 			var bounds = new BBox( boundsMin - padding, boundsMax + padding );
 			if ( !frustum.IsInside( bounds, true ) ) continue;
-			arguments.Add( new GpuBuffer.IndirectDrawIndexedArguments
+			_argumentData[visibleCommandCount++] = new GpuBuffer.IndirectDrawIndexedArguments
 			{
 				IndexCount = entry.Descriptor.IndexCount,
 				InstanceCount = 1,
 				FirstIndex = entry.Descriptor.IndexOffset,
 				BaseVertex = (int)entry.Descriptor.VertexOffset,
 				FirstInstance = 0
-			} );
+			};
 		}
 
-		var visibleCommandCount = arguments.Count;
-		while ( arguments.Count < _residents.Capacity ) arguments.Add( default );
-		if ( uploadResidents ) _residentBuffer.SetData( descriptorData );
+		System.Array.Clear( _argumentData, visibleCommandCount, _argumentData.Length - visibleCommandCount );
+		if ( uploadResidents ) _residentBuffer.SetData( _descriptorData );
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
-		_drawArguments.SetData( arguments, 0 );
+		if ( ArgumentsChanged( visibleCommandCount ) )
+		{
+			System.Array.Copy( _argumentData, _uploadedArgumentData, _argumentData.Length );
+			_uploadedArgumentCount = visibleCommandCount;
+			_hasUploadedArguments = true;
+			_drawArguments.SetData( _argumentData, 0 );
+		}
+	}
+
+	private bool ArgumentsChanged( int visibleCommandCount )
+	{
+		if ( !_hasUploadedArguments || visibleCommandCount != _uploadedArgumentCount ) return true;
+		for ( var index = 0; index < _argumentData.Length; index++ )
+		{
+			var current = _argumentData[index];
+			var previous = _uploadedArgumentData[index];
+			if ( current.IndexCount != previous.IndexCount || current.InstanceCount != previous.InstanceCount ||
+				current.FirstIndex != previous.FirstIndex || current.BaseVertex != previous.BaseVertex || current.FirstInstance != previous.FirstInstance ) return true;
+		}
+		return false;
 	}
 
 	private void BuildAndAttachCommandList( Sandbox.Rendering.CommandList commandList, int offset, uint commandCount, Sandbox.Rendering.Stage stage )

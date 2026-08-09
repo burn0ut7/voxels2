@@ -1,775 +1,1844 @@
-# GPU-Resident Smooth Voxel Terrain Experiment
+# GPU-Resident Smooth Voxel Terrain — Codex Implementation Specification
 
-## Document status
+## Purpose
 
-- Status: implementation specification
-- Scope: experimental GPU visual-terrain branch
-- Decision under test: full GPU-resident visual terrain, targeted GPU use, or no GPU terrain adoption
-- CPU baseline: frozen separately and compared by revision-tagged benchmark runs
-- Runtime authority on the GPU branch: one GPU visual backend; CPU remains authoritative for world state, gameplay queries, edits, and local collision
+This document is the standalone implementation handoff for the GPU visual-terrain architecture in `burn0ut7/voxels2`.
 
-## Implementation status (2026-08-08)
+A new Codex session should be able to use this file without any prior conversation. It defines:
 
-Phase 1 regular-cell meshing is implemented as an opt-in proof and registered as the second required scenario in authoritative benchmark suite v8. The proof generates a flat LOD0 density field on the GPU, runs the existing regular-cell Transvoxel tables through six phase-specific compute shaders, keeps generated vertices and indices in GPU buffers, and performs bounded diagnostic conformance readback.
+- the target architecture;
+- the expected repository starting point;
+- the next required implementation phase;
+- concrete C# and shader responsibilities;
+- data contracts and lifetime rules;
+- implementation order;
+- tests, diagnostics, and stop/go gates;
+- the roadmap for later LOD, editing, and collision work.
 
-Measured proof result on a 32Â³-cell block:
+This is an implementation specification, not a request to redesign the terrain system.
 
-| Result | Value |
-|---|---:|
-| Conformance | PASS |
-| GPU vertices | 1,089 |
-| GPU indices | 6,144 |
-| Active regular cells | 1,024 |
-| Overflow attempts | 0 |
-| Proof buffer allocation | 7.77 MiB |
-| CPU submission | 0.964 ms |
-| Dispatch-to-validation completion | 30.031 ms |
-| Diagnostic geometry readback | 11.128 ms |
+## Codex execution contract
 
-The generated positions, normals, winding, and triangle topology match the CPU Transvoxel reference. These timings are proof instrumentation, not adoption evidence: completion includes a frame fence and synchronous diagnostic readback, and no timestamp-query GPU phase timings exist yet.
+When implementing from this document:
 
-Phase 1 is therefore **partially passed**. GPU density generation and regular-cell Transvoxel conformance pass. GPU-authored indexed-indirect arguments do not yet pass in the current s&box route: binding the argument buffer as a compute UAV invalidated the compute pipeline. The proof currently performs a small diagnostic statistics readback and writes the draw count from C# before visualization. This is explicitly disallowed for the production path and keeps the Phase 1 direct-publication gate open.
+1. Inspect the actual repository before editing. File names below describe the intended responsibilities; adapt to harmless naming differences, but do not change the architecture without a measured blocker.
+2. Build the project and run the existing GPU Transvoxel proof before modifying it.
+3. Implement only the next incomplete phase. Do not skip ahead to clipbox LOD, transition cells, GPU culling, or sparse edit baking.
+4. Preserve the existing proof as a diagnostic/conformance harness. Production code must be separate.
+5. Compile after each implementation slice and fix all new warnings, shader errors, and console errors before continuing.
+6. Do not introduce a CPU visual fallback on the GPU branch.
+7. Do not use synchronous GPU readback, `Graphics.FlushGPU()`, or a fence wait during normal play.
+8. Do not read generated visual vertices or indices back to C# during normal play or performance measurement.
+9. Keep all queues, buffers, pools, and work per frame explicitly bounded.
+10. Update this document's status table and the benchmark schema when a phase is completed.
+11. If an s&box API does not behave as expected, reduce it to a minimal capability test, record the result, and implement the simplest supported architecture that preserves the invariants below.
+12. Avoid unrelated refactors while a phase gate is open.
 
-The next target is not LOD. First replace the serial allocation scan with a parallel batched scan, move output into a bounded shared pool, and solve GPU-authored publication/indirect arguments without readback. Then measure fixed-LOD batches before beginning transition cells and production LOD.
+Recommended instruction for a new Codex chat:
 
-## Executive decision
+> Read `Docs/GPU_TERRAIN_IMPLEMENTATION.md`, inspect the repository, and implement the next incomplete phase exactly as specified. Start by reporting the current code-to-spec gaps. Do not implement later phases or change the terrain algorithm. Compile and validate each slice before continuing.
 
-The experiment is technically feasible in the installed s&box build. The engine exposes compute shaders, structured GPU buffers, indirect draw arguments, command lists, and indexed indirect drawing. The archived prototype also proves that the basic API path works.
+---
 
-The experiment should proceed before a complete LOD system is implemented, but it must begin with an LOD-independent request contract. The first producer will request only fixed LOD0 blocks. After density generation, pooled mesh allocation, direct GPU rendering, batching, residency, and bounded scheduling pass, the same contract will gain real clipbox/LOD selection and Transvoxel transitions.
+# 1. Product Goal
 
-This order answers the central risk directly: first prove that work remains on the GPU and scales better than the CPU pipeline; then add the complexity needed for production terrain. Building the full LOD system first would not prove the GPU hypothesis and would make failures harder to isolate.
+Build a large, smooth, editable voxel terrain system for s&box where the expensive visual work scales on the GPU without moving gameplay authority to the GPU.
 
-The target is not high GPU utilization for its own sake. The target is better player-visible scaling, lower CPU terrain pressure, bounded latency, and bounded VRAM. A busier GPU is acceptable only when those outcomes improve.
+The two primary visual costs to move off the CPU are:
 
-## Final changes to the proposed direction
+1. dense procedural SDF/material evaluation for visible terrain;
+2. visual Transvoxel classification and mesh generation.
 
-The supplied direction is accepted with these corrections:
+The system must support:
 
-1. **Separate branches are the rollback mechanism.** Preserve the CPU visual implementation on the frozen CPU branch. On the GPU experiment branch, compile and run one authoritative visual path. Do not add an automatic CPU visual fallback, dual visual generation, or a cascading backend selector.
-2. **Keep CPU Transvoxel for collision only on the GPU branch.** It may also produce frozen reference fixtures outside normal runtime. It must not silently become a second visual backend.
-3. **There is no existing clipbox/LOD implementation to connect.** The current manager streams a square, single-LOD set by `ChunkRadius`. A terrain-request contract and LOD planner are new work.
-4. **Use the current Transvoxel algorithm from the first GPU proof.** Port the existing regular-cell lookup tables, corner numbering, interpolation, vertex reuse, triangle winding, normals, and material behavior directly. Do not introduce Marching Cubes or MC33 as an intermediate mesher.
-5. **Replace the Godot-specific `ArrayMesh` prohibition.** For s&box, the requirement is: normal GPU regeneration must not read generated vertices or indices back to C# and must not rebuild CPU-authored `Mesh`/`Model` objects per block.
-6. **Define one procedural specification.** CPU authority and GPU visual evaluation must implement the same versioned SDF/material rules. Cross-implementation fixtures and tolerances prevent the two implementations from drifting.
-7. **Make lifetime safety part of the design.** Every request, edit state, pool allocation, draw descriptor, and deferred release carries a generation/version. Stale jobs must never publish or overwrite live geometry.
-8. **Bound memory and work explicitly.** Shared pools need a hard budget, allocation-failure behavior, deferred reclamation, fragmentation metrics, and queue backpressure. “Global pool” alone is not a memory policy.
-9. **Permit diagnostic readback only.** Small, asynchronous, opt-in validation readbacks are allowed for tests and aggregate counters. Geometry readback remains forbidden during normal play and performance measurement.
-10. **LOD is required for the final architecture decision.** It is not required for the first GPU proof, but full adoption cannot pass without regular and transition-cell seam validation under LOD churn.
+- caves, overhangs, and non-heightmap terrain;
+- large streaming worlds;
+- real-time topology-changing edits;
+- Transvoxel LOD transitions;
+- bounded CPU time, GPU time, and VRAM;
+- headless authoritative servers;
+- CPU collision and gameplay queries near relevant players.
 
-## Experiment question and hypothesis
+The target is not maximum GPU utilization. The target is lower CPU terrain pressure, bounded request-to-visible latency, stable frame pacing, and bounded memory at equivalent visual coverage.
 
-### Question
+---
 
-Can a GPU-resident visual pipeline perform procedural density evaluation, surface extraction, persistent mesh storage, culling, indirect command generation, and rendering with better scaling than the complete CPU visual pipeline while preserving terrain behavior and keeping VRAM bounded?
+# 2. Non-Negotiable Architecture
 
-### Hypothesis
+```text
+CPU/server canonical terrain
+    world seed
+    procedural-rule version
+    macro-world descriptors
+    ordered sparse edits
+    baked sparse edit bricks
+    gameplay queries and validation
+    nearby collision
+                |
+                +---- GPU client visual terrain
+                        requested visual blocks
+                        procedural SDF/material evaluation
+                        Transvoxel classification and emission
+                        persistent GPU geometry
+                        terrain rendering
+```
 
-At equivalent visible coverage and terrain detail, the GPU branch will:
+## 2.1 CPU authority
 
-- remove CPU SDF halo-copy and visual-meshing work from the normal visual path;
-- remove per-block CPU visual mesh uploads after generation;
-- reduce CPU terrain submission and request-to-render latency under streaming and edit churn;
-- trade that CPU work for bounded GPU compute and pool traffic;
-- preserve authoritative CPU edits, gameplay queries, multiplayer intent, and near-player collision;
-- scale more gracefully as resident and requested block counts increase.
-
-### Possible conclusions
-
-- **Adopt full GPU visual terrain:** the complete pipeline passes feature, stability, memory, and performance gates.
-- **Adopt a narrower GPU responsibility:** a self-contained GPU stage provides a repeatable win without geometry readback or a duplicate runtime path. The minimum coherent terrain candidate is GPU density plus GPU surface extraction; GPU density followed by CPU readback is not an acceptable result.
-- **Reject or park GPU terrain:** the complete path does not improve player outcomes, cannot remain bounded, or is too fragile for the benefit measured.
-
-## Current baseline and motivation
-
-The current runtime is a CPU Transvoxel regular-cell visual mesher with CPU SDF storage, worker-pool meshing, main-thread `Mesh` upload, and CPU collision built from the same local topology. Streaming is one LOD and uses a square radius around observers.
-
-The latest available stress report is useful diagnostic evidence, but it is **not the frozen comparison baseline** because it identifies revision `dfc6358+working-tree` while the repository has since advanced. Before implementation begins, create a clean CPU baseline commit and run the complete suite again.
-
-Diagnostic snapshot from complete suite v7, run `20260808-050802`, radius 32, 4,096 blocks, 32³ cells, Ryzen 7 9800X3D, RTX 5090, engine 26.07.22:
-
-| Observation | Current result |
-|---|---:|
-| Suite completeness | 10/10, PASS |
-| Cold visual batch completion | 21.79 s |
-| Cold request-to-render p95 | 20.93 s |
-| Cold aggregate worker meshing | 13.71 s |
-| Cold aggregate snapshot wait/copy | 5.74 / 3.76 s |
-| Cold aggregate main upload | 0.74 s |
-| Infinity traversal batch completion | 53.02 s |
-| Infinity traversal request-to-render p95 | 6.68 s |
-| Worst scenario frame p95 | 32.24 ms |
-| Worst observed frame | 849.21 ms |
-| Cold peak process memory | 12.43 GiB |
-| Cold authoritative SDF storage | 421.14 MiB |
-
-The suite passes its correctness/completeness contract, but the stress experience does not settle quickly. The numbers indicate that CPU worker meshing is a major cost, while snapshot creation, queueing, publication, and repeated block orchestration are collectively just as important. This is why the experiment must replace the complete visual path rather than move only the triangle loop to compute.
-
-The archived GPU prototype is negative evidence worth preserving. On a 324-block radius-9 fixture it took about 7.7–8.1 seconds versus about 1.4 seconds for the then-current CPU path. Its per-block dispatching, synchronization, buffer management, and readback overwhelmed the useful compute work. The new architecture must prove that those costs are absent or amortized.
-
-## Product and technical scope
-
-### In scope
-
-- versioned visual block requests;
-- direct LOD-specific procedural SDF/material evaluation on the GPU;
-- GPU regular-cell Transvoxel matching the current CPU implementation;
-- batched block classification, allocation/scan, and mesh emission;
-- shared vertex/index storage with hard VRAM limits;
-- block residency, replacement, eviction, and deferred reclamation;
-- GPU culling and indexed indirect drawing;
-- Transvoxel transition cells after the regular-cell resident path passes;
-- sparse authoritative edits, compact GPU edit data, dirty propagation, and coalescing;
-- CPU collision within a configurable local interest region;
-- one- and multi-observer request planning;
-- complete benchmark, correctness, and stress coverage.
-
-### Out of scope for the first proof
-
-- multiplayer replication implementation;
-- persistence/file format implementation;
-- GPU collision or GPU-to-CPU geometry readback;
-- a persistent dense full-resolution SDF for untouched terrain;
-- any Marching Cubes or MC33 intermediate visual mesher;
-- Transvoxel transition cells and production LOD in the first single-block proof;
-- final terrain art, biome, or material complexity;
-- supporting both CPU and GPU visual backends in one runtime build.
-
-Multiplayer and persistence must still influence data contracts: seed/rule versions, edit ordering, edit IDs, and world revisions cannot be local-only assumptions.
-
-## Authority and ownership
-
-### CPU authority
-
-The CPU owns:
+The CPU/server owns:
 
 - world seed and procedural-rule version;
-- sparse persistent edit state and deterministic edit order;
-- multiplayer/world authority;
-- gameplay terrain queries;
-- visual block request and LOD policy;
-- request priority and per-frame submission budget;
-- local CPU collision;
-- compact GPU request/edit submission;
-- diagnostics orchestration and report persistence.
+- biome regions, POIs, roads, and authored macro descriptors;
+- authoritative edit IDs, ordering, validation, replication, and persistence;
+- gameplay SDF/material queries;
+- visual request and LOD policy;
+- request priorities and frame budgets;
+- the initial persistent vertex/index range allocator;
+- resident lifetime and eviction policy;
+- nearby CPU collision;
+- benchmark orchestration and report persistence.
 
-### GPU visual system
+## 2.2 GPU visual ownership
 
-The GPU owns:
+The client GPU owns:
 
-- visual density/material evaluation at the requested spacing;
+- visual SDF/material evaluation at requested world coordinates;
+- block empty/solid/surface reduction;
 - regular and transition-cell classification;
-- prefix sums/offset allocation or an equivalent bounded allocation pass;
-- visual vertex/index generation;
-- global mesh-pool storage;
-- resident block descriptors and bounds;
-- visibility culling;
-- indirect draw argument generation;
-- terrain rendering.
+- local prefix scans and geometry counts;
+- visual vertex/index emission;
+- persistent visual geometry storage;
+- terrain rendering;
+- optional later GPU culling and command generation.
 
-### Single-system invariant
+## 2.3 Single visual system invariant
 
-On the experiment branch, the GPU system is the only visual terrain implementation used during play and benchmark runs. The CPU Transvoxel mesher remains legitimate for local collision and fixture generation because those are separate responsibilities. It may not publish visual geometry, rescue failed GPU blocks, or participate in measured GPU runs.
+During measured GPU runtime:
 
-## Target data flow
+- the GPU backend is the only visual terrain backend;
+- CPU Transvoxel may generate collision and frozen reference fixtures only;
+- CPU Transvoxel may not publish visual meshes;
+- failed GPU work may delay or reduce visual coverage, but may not activate CPU visual generation.
+
+## 2.4 Algorithm decision
+
+Keep Transvoxel.
+
+Do not replace it with:
+
+- Marching Cubes;
+- MC33;
+- Dual Contouring;
+- FlexiCubes;
+- a sparse voxel octree renderer;
+- ray-marched primary terrain;
+- mesh shaders or meshlets as a prerequisite.
+
+Reuse the current project's:
+
+- regular-cell lookup tables;
+- corner numbering;
+- edge ownership;
+- interpolation convention;
+- winding behavior;
+- gradient normals;
+- transition-cell tables when Phase 4 begins.
+
+---
+
+# 3. Expected Repository Starting Point
+
+Codex must verify this against the current checkout rather than blindly assume it.
+
+Expected relevant files include:
 
 ```text
-CPU world authority
-  seed + procedural-rule version + sparse edits
-                    |
-CPU request planner | block key + LOD + generation + priority
-                    v
-================ GPU boundary ================
-GPU request/edit buffers
-                    |
-LOD-specific density/material scratch
-                    |
-regular-cell and transition-cell classification
-                    |
-bounded count/scan/allocation
-                    |
-mesh emission into shared vertex/index pools
-                    |
-resident block descriptor table
-                    |
-GPU culling + indirect argument generation
-                    |
-indexed indirect terrain render
+Code/Voxels/VoxelManager.cs
+Code/Voxels/VoxelGpuTransvoxelProof.cs
+Code/Voxels/VoxelGpuMeshPoolLifecycleProof.cs
+Code/Voxels/VoxelTerrainBenchmark.cs
+Code/Voxels/VoxelTransvoxelMesher.cs
+Code/Voxels/VoxelTransvoxelTables.cs
+
+Assets/shaders/voxel_gpu_transvoxel_clear_cs.shader
+Assets/shaders/voxel_gpu_transvoxel_density_cs.shader
+Assets/shaders/voxel_gpu_transvoxel_classify_cs.shader
+Assets/shaders/voxel_gpu_transvoxel_scan_cs.shader
+Assets/shaders/voxel_gpu_transvoxel_vertices_cs.shader
+Assets/shaders/voxel_gpu_transvoxel_indices_cs.shader
+Assets/shaders/voxel_gpu_transvoxel.shader
 ```
 
-Collision is intentionally parallel to the visual path:
+Expected functional state:
+
+- `VoxelManager` still runs the CPU visual world during ordinary gameplay.
+- `VoxelGpuTransvoxelProof` is an opt-in diagnostic object.
+- The proof generates a flat SDF on the GPU.
+- The proof validates regular-cell Transvoxel output against a CPU reference.
+- The proof supports batches of `1`, `8`, `32`, and `128` blocks.
+- The proof has batched density, classification, local scans, counts, and shared batch output.
+- The proof performs diagnostic readback and is not a production no-readback backend.
+- `VoxelGpuMeshPoolLifecycleProof` models allocation on the CPU but is not the production GPU geometry pool.
+- Production LOD and transition cells are not implemented.
+
+If the current code already contains part of a later phase, preserve working code, verify it against the contracts below, and continue from the first unmet gate.
+
+---
+
+# 4. Phase Status
+
+| Phase | Required state |
+|---|---|
+| Phase 0 — Baseline and contracts | Maintain a reproducible CPU baseline and versioned request/report contracts. |
+| Phase 1 — Single-block regular-cell proof | Expected complete for conformance. Keep as a test harness. |
+| Phase 2A — Batched scratch proof | Expected complete. Keep as a batch/conformance test. |
+| **Phase 2B — Persistent fixed-LOD GPU backend** | **NEXT REQUIRED PHASE.** |
+| Phase 3A — Production render integration | After Phase 2B. |
+| Phase 3B — Fixed-LOD movement streaming | After Phase 3A. |
+| Phase 4 — 3D clipbox LOD and transitions | After fixed-LOD streaming passes. |
+| Phase 5 — Sparse edits and CPU collision integration | After LOD correctness. |
+| Phase 6 — Final adoption campaign | After all mandatory behavior exists. |
+
+Do not start Phase 4 merely because the current batch proof renders multiple blocks.
+
+---
+
+# 5. Target Production Data Flow
 
 ```text
-CPU world authority -> local collision interest -> CPU Transvoxel -> collider
+CPU request planner
+    BlockKey + request generation + priority + rule/edit versions
+                         |
+                         v
+GPU PASS A — bounded scratch batch
+    evaluate density/material
+    reduce block min/max
+    classify regular cells
+    scan edge flags and cell index counts
+    produce per-block vertex/index counts
+                         |
+                         v
+bounded asynchronous count-result readback
+    request ID + generation + counts + surface state + flags
+                         |
+                         v
+CPU persistent mesh allocator
+    reject stale results
+    allocate vertex and index ranges transactionally
+    preserve old resident if replacement allocation fails
+                         |
+                         v
+upload allocation descriptors
+                         |
+                         v
+GPU PASS B
+    emit vertices into assigned ranges
+    emit indices into assigned ranges
+    apply resource barriers
+                         |
+                         v
+resident publication
+    publish matching generation only
+    switch draw commands to new resident
+    retire previous allocation
+                         |
+                         v
+CPU frustum culling initially
+    compact indirect command array
+                         |
+                         v
+one indexed multi-draw per applicable view/pass
 ```
 
-Visual completion never waits for collision outside the local safety contract, and collision never consumes GPU visual mesh readback.
+Normal visual geometry never crosses from GPU to CPU.
 
-## Required contracts
+---
 
-### Block key
+# 6. Shared Data Contracts
 
-A visual block is identified by:
+Use explicit, versioned data contracts. CPU and HLSL layouts must match exactly.
+
+Requirements for GPU-facing structs:
+
+- use sequential fields with 4-byte packing;
+- prefer sizes that are multiples of 16 bytes;
+- avoid C# `bool` in GPU structs;
+- use `uint` flags;
+- add debug assertions for `Marshal.SizeOf<T>()`;
+- centralize matching C#/HLSL definitions or document every offset;
+- include a layout self-test in diagnostic builds.
+
+The exact names may change, but the information and invariants may not.
+
+## 6.1 Block key
+
+```csharp
+public readonly record struct VoxelVisualBlockKey(
+    Vector3Int Coordinate,
+    int Lod,
+    int RuleVersion
+);
+```
+
+A world block is uniquely defined by:
 
 - integer block coordinate;
 - LOD level;
-- procedural-rule version;
-- world/edit revision or generation;
-- optional observer partition only if multi-observer ownership requires it.
+- procedural-rule version.
 
-The coordinate and LOD define an unambiguous world-space origin and sample spacing. Neighboring blocks must derive shared boundary samples from identical world coordinates, never from accumulated local floating-point steps.
+Edit/world generation is tracked separately so the same spatial key can have multiple requested generations over time.
 
-### Visual request
+Neighboring blocks must derive shared boundary sample coordinates from integer world coordinates. Never accumulate floating-point origins from neighboring blocks.
 
-Each request contains or references:
+## 6.2 GPU block request
 
-- block key;
-- world-space integer sample origin;
-- cell count, initially 32³;
-- sample spacing derived directly from LOD;
-- seed/rule constants;
-- edit-data range or edit revision;
-- priority class and distance key;
-- request generation;
-- cancellation/staleness token.
+Conceptual 64-byte record:
 
-No request carries a full CPU-generated dense SDF for procedural terrain.
+```csharp
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct GpuVoxelBlockRequest
+{
+    public int BlockX;
+    public int BlockY;
+    public int BlockZ;
+    public uint RequestId;
 
-### Resident descriptor
+    public uint Lod;
+    public uint RequestGeneration;
+    public uint RuleVersion;
+    public uint EditRevision;
 
-Each resident block descriptor records:
+    public uint EditOffset;
+    public uint EditCount;
+    public uint Flags;
+    public uint Reserved0;
 
-- block key and published generation;
-- vertex offset/count;
-- index offset/count;
-- bounds;
-- material range or material classification data;
-- allocation handle generation;
-- residency/visibility flags;
-- last-used frame or eviction score;
-- transition-neighbor state where applicable.
-
-### Lifecycle
-
-The observable state machine is:
-
-```text
-Missing -> Requested -> Density -> Classified -> Allocated -> Emitted
-        -> Resident -> Visible
-        -> Dirty/Replaced -> Retired -> Reclaimed
+    public float VoxelSize;
+    public float SdfClampDistance;
+    public uint PriorityClass;
+    public uint Reserved1;
+}
 ```
 
-Cancellation can occur before publication. A result whose generation no longer matches the requested generation is retired without becoming visible. Releases are deferred until the GPU can no longer reference the allocation.
+`RequestId` maps the compact GPU result back to a CPU job. Do not copy a large key or managed object through readback when an ID is sufficient.
 
-## Procedural SDF and material parity
+## 6.3 Count result
 
-The current procedural fixture is a flat signed-distance field. Future caves/noise must be introduced as a versioned procedural module with a CPU reference implementation and a GPU implementation.
+Conceptual 32-byte record:
+
+```csharp
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct GpuVoxelBlockCountResult
+{
+    public uint RequestId;
+    public uint RequestGeneration;
+    public uint VertexCount;
+    public uint IndexCount;
+
+    public uint SurfaceKind;      // Empty, Solid, Surface, Invalid
+    public uint ActiveCellCount;
+    public uint Flags;            // Overflow, invalid table access, etc.
+    public uint Reserved;
+}
+```
+
+Rules:
+
+- Pass A writes one result per request slot.
+- Empty and solid blocks report zero geometry.
+- A result never authorizes emission by itself.
+- CPU generation validation happens before allocation.
+- Production count readback is asynchronous and bounded.
+
+## 6.4 Allocation descriptor
+
+Conceptual 64-byte record:
+
+```csharp
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct GpuVoxelAllocationDescriptor
+{
+    public uint RequestId;
+    public uint RequestGeneration;
+    public uint ResidentSlot;
+    public uint AllocationGeneration;
+
+    public uint VertexOffset;
+    public uint VertexCapacity;
+    public uint IndexOffset;
+    public uint IndexCapacity;
+
+    public uint ExpectedVertexCount;
+    public uint ExpectedIndexCount;
+    public uint Flags;
+    public uint Reserved0;
+
+    public int BlockX;
+    public int BlockY;
+    public int BlockZ;
+    public uint Lod;
+}
+```
+
+No Pass B emission is submitted unless:
+
+```text
+VertexCapacity >= ExpectedVertexCount
+IndexCapacity  >= ExpectedIndexCount
+```
+
+## 6.5 Resident descriptor
+
+Conceptual record:
+
+```csharp
+public struct VoxelGpuResidentDescriptor
+{
+    public VoxelVisualBlockKey Key;
+    public uint PublishedGeneration;
+    public uint AllocationGeneration;
+
+    public uint VertexOffset;
+    public uint VertexCount;
+    public uint IndexOffset;
+    public uint IndexCount;
+
+    public BBox Bounds;
+    public uint ResidentSlot;
+    public uint Flags;
+    public long LastVisibleFrame;
+    public float EvictionScore;
+}
+```
+
+The GPU-facing resident descriptor may use a packed 16-byte-aligned representation. The CPU representation may contain additional bookkeeping.
+
+## 6.6 Indirect draw command
+
+For each resident draw:
+
+```text
+IndexCount     = resident.IndexCount
+InstanceCount  = 1
+FirstIndex     = resident.IndexOffset
+VertexOffset   = resident.VertexOffset when indices are block-local
+FirstInstance  = resident.ResidentSlot
+```
+
+Preferred production representation:
+
+- indices stored local to each block allocation;
+- `VertexOffset` supplies the vertex range base;
+- `FirstInstance` identifies the resident descriptor.
+
+The multi-draw capability test must validate `VertexOffset` and `FirstInstance`. If either is not correctly exposed by the installed s&box path:
+
+- use global vertex indices with `VertexOffset = 0`; and/or
+- add a packed resident slot to the vertex as a temporary fallback.
+
+Do not fall back to one C# draw call per block.
+
+---
+
+# 7. Runtime State Machine
+
+Each visual request follows this state machine:
+
+```text
+Missing
+  -> Requested
+  -> Counting
+  -> CountReadbackPending
+  -> CountReady
+  -> AwaitingAllocation
+  -> Allocated
+  -> EmissionSubmitted
+  -> ReadyToPublish
+  -> Resident
+  -> Visible
+  -> Dirty/Replacing
+  -> Retired
+  -> Reclaimed
+```
+
+Required rules:
+
+1. Every transition is keyed by block key and request generation.
+2. A newer request makes older unfinished generations stale.
+3. Stale count results are discarded before allocation.
+4. Stale emission work may complete, but it may never publish.
+5. Replacements use a different safe allocation from the currently visible resident.
+6. The old resident remains visible while counting, allocation, or emission is pending.
+7. Failed replacement allocation leaves the old resident untouched.
+8. The old allocation is retired only after the replacement becomes the selected resident.
+9. A retired range is not reused until the GPU can no longer reference it.
+10. Empty/solid replacement may publish a zero-geometry resident, then retire old geometry.
+11. No normal state transition waits synchronously for the GPU.
+
+---
+
+# 8. Phase 2B — Persistent Fixed-LOD GPU Backend
+
+## Objective
+
+Convert the existing batched Transvoxel proof into a production-capable fixed-LOD visual backend with:
+
+- bounded scratch buffers;
+- count-before-allocation;
+- asynchronous count metadata;
+- persistent shared vertex/index pools;
+- safe emission;
+- generation-safe publication;
+- replacement and reclamation;
+- a static fixed-LOD resident renderer;
+- no normal visual geometry readback.
+
+Do not implement movement streaming, production LOD transitions, GPU culling, or terrain edits until the static persistent backend passes.
+
+## 8.1 Required production files
+
+Create or equivalent:
+
+```text
+Code/Voxels/Gpu/VoxelGpuTerrainBackend.cs
+Code/Voxels/Gpu/VoxelGpuBatchScheduler.cs
+Code/Voxels/Gpu/VoxelGpuScratchArena.cs
+Code/Voxels/Gpu/VoxelGpuMeshPool.cs
+Code/Voxels/Gpu/VoxelGpuRangeAllocator.cs
+Code/Voxels/Gpu/VoxelGpuResidentTable.cs
+Code/Voxels/Gpu/VoxelGpuTerrainRenderer.cs
+Code/Voxels/Gpu/VoxelGpuTerrainDiagnostics.cs
+Code/Voxels/Gpu/VoxelGpuContracts.cs
+Code/Voxels/Gpu/VoxelGpuCapabilities.cs
+```
+
+Shader source files should be production-specific rather than silently mutating proof behavior:
+
+```text
+Assets/shaders/voxel_gpu_count_clear_cs.shader
+Assets/shaders/voxel_gpu_density_material_cs.shader
+Assets/shaders/voxel_gpu_block_reduce_cs.shader
+Assets/shaders/voxel_gpu_classify_regular_cs.shader
+Assets/shaders/voxel_gpu_scan_regular_cs.shader
+Assets/shaders/voxel_gpu_block_totals_cs.shader
+Assets/shaders/voxel_gpu_emit_vertices_cs.shader
+Assets/shaders/voxel_gpu_emit_indices_cs.shader
+Assets/shaders/voxel_gpu_terrain.shader
+```
+
+Reuse common tables and helper code where the shader system permits it. Do not manually edit generated `.shader_c` artifacts as the source of truth.
+
+## 8.2 Keep the proof separate
+
+`VoxelGpuTransvoxelProof` remains responsible for:
+
+- diagnostic readback;
+- CPU/GPU topology comparison;
+- all 256 regular cases;
+- selected batch offset validation;
+- proof-only experiments.
+
+Rename proof-facing terminology from `shared mesh pool` to `shared batch output` unless it is actually using the production persistent pool.
+
+Production runtime must not instantiate the proof object.
+
+## 8.3 Capability spikes before backend integration
+
+Implement small, isolated tests before depending on engine behavior.
+
+### A. Asynchronous readback test
+
+Validate:
+
+- `GpuBuffer<T>.GetDataAsync` or the current installed equivalent;
+- multiple readbacks in flight;
+- completion without blocking the main thread;
+- safe buffer-slot reuse only after completion;
+- cancellation/stale-result handling;
+- behavior during component disable, scene reload, and device/resource recreation.
+
+### B. Sixteen-command multi-draw test
+
+Create one vertex buffer, one index buffer, and 16 indirect records with:
+
+- distinct index ranges;
+- distinct vertex offsets;
+- distinct `FirstInstance` values;
+- multiple nonzero draws;
+- zero-count records;
+- explicit count and stride;
+- forward rendering;
+- depth rendering;
+- resource transitions after buffer updates.
+
+Pass only if the correct geometry and instance IDs render in one bounded multi-draw submission.
+
+### C. Safe retirement test
+
+Determine the current engine-supported way to know when a submitted range may be reused.
+
+Preferred order:
+
+1. explicit engine submission/fence completion primitive that does not block;
+2. engine-provided deferred destruction/release mechanism;
+3. conservative frame-epoch ring based on the maximum frames in flight plus a safety margin.
+
+Do not call a synchronous fence wait or `Graphics.FlushGPU()` during normal operation.
+
+Record the selected mechanism in `VoxelGpuCapabilities` and in benchmark identity.
+
+## 8.4 Scratch arena
+
+`VoxelGpuScratchArena` owns fixed-capacity reusable buffers for a configured maximum batch size.
+
+Minimum scratch resources:
+
+```text
+BlockRequests
+DensitySamples
+MaterialSamples or packed density/material samples
+BlockSurfaceKinds
+Cells
+EdgeFlags
+EdgeLocalOffsets
+CellLocalOffsets
+EdgeGroupSums
+CellGroupSums
+BlockCounts
+CountResults
+AllocationDescriptors
+DebugFlags
+```
+
+Rules:
+
+- one arena is sized for a bounded batch, not resident world size;
+- no per-block scratch buffer creation;
+- no capacity derived from a flat reference mesh;
+- every shader checks request/batch bounds;
+- batch capacities to test: `16`, `32`, `64`, `128`;
+- choose the production default from measured latency, GPU time, scratch VRAM, and frame pacing;
+- likely initial default: `32` or `64`;
+- `128` remains a stress option unless measurements justify it.
+
+## 8.5 GPU Pass A — count only
+
+Pass A must not write final vertices or indices.
+
+### Pass A.1 — clear request ranges
+
+Clear only the active request range, not the entire maximum arena when avoidable.
+
+Reset:
+
+- cell records;
+- edge flags;
+- group sums;
+- per-block counts;
+- result flags.
+
+### Pass A.2 — density and material evaluation
+
+For every requested sample:
+
+```text
+Base procedural field
++ macro descriptors
++ baked edit brick, when Phase 5 exists
++ recent edit operations, when Phase 5 exists
+```
+
+Phase 2B initially supports the current flat rule plus `TerrainRuleStressV1`.
+
+Use integer world sample coordinates derived from:
+
+```text
+block coordinate
+LOD sample spacing
+local sample coordinate
+```
+
+Do not derive shared samples from accumulated floating-point block origins.
+
+### Pass A.3 — block reduction
+
+Compute conservative per-block min/max SDF:
+
+```text
+minSdf > 0 -> Empty
+maxSdf < 0 -> Solid
+otherwise  -> Surface
+```
+
+`ClassifyRegularCS` must early-out for empty and solid blocks.
+
+The first version may dispatch across all request cells and early-out by block kind. Add surface-block compaction/indirect dispatch only after profiling proves it useful.
+
+### Pass A.4 — regular-cell classification
+
+For surface blocks:
+
+- compute regular case code;
+- determine cell index count;
+- set owned edge flags;
+- increment diagnostic active-cell counts;
+- never emit geometry.
+
+### Pass A.5 — local scans
+
+Keep the existing workgroup-local 256-thread scan approach unless profiling proves a better group size.
+
+Perform:
+
+- exclusive scan of edge flags within each group;
+- exclusive scan of per-cell index counts within each group;
+- group totals per block.
+
+### Pass A.6 — block totals
+
+Produce per-block vertex and index totals without the current `O(batch²)` loop over all previous blocks.
+
+Pass A does not need global batch output offsets. It only needs independent block totals for CPU allocation.
+
+Therefore:
+
+- remove the cross-block prefix-allocation pass from the production count path;
+- write one `GpuVoxelBlockCountResult` per request slot;
+- preserve local edge/cell offsets needed by Pass B or recompute them in Pass B if that is measurably cheaper than retaining scratch across frames.
+
+### Scratch-retention decision
+
+Because count readback introduces a frame delay, choose one explicit strategy:
+
+**Strategy A — retain classified scratch until allocation returns**
+
+- lower recomputation;
+- higher scratch residency;
+- limits count batches in flight.
+
+**Strategy B — rerun deterministic Pass A before Pass B**
+
+- simpler scratch reuse;
+- doubles density/classification work for accepted blocks.
+
+Default requirement: implement Strategy A with a bounded ring of scratch slots unless measured scratch memory makes it impractical. Each in-flight scratch slot is owned by one batch until Pass B submission or cancellation.
+
+Do not silently overwrite a scratch slot whose count result or emission still depends on it.
+
+## 8.6 Bounded asynchronous count readback
+
+Implement a ring of `CountReadbackSlot` objects.
+
+Each slot records:
+
+```text
+SlotState
+BatchId
+ScratchSlotId
+RequestCount
+SubmitFrame
+Request IDs and generations
+Readback task/callback
+```
+
+Requirements:
+
+- configurable maximum readbacks in flight;
+- no `GetData` in normal runtime;
+- no polling that blocks;
+- completion processed on the main thread or a safe game task continuation;
+- component disable/disposal invalidates callbacks by owner generation;
+- stale results are discarded before allocation;
+- count readback bytes are reported;
+- readback latency and queue age are reported;
+- scheduler stops submitting Pass A when no readback/scratch slot is available;
+- count records are batched in one transfer per scratch batch where possible.
+
+Count readback is the only production GPU-to-CPU terrain transfer permitted in Phase 2B.
+
+## 8.7 Persistent mesh pool
+
+### Range allocators
+
+`VoxelGpuMeshPool` owns two independent allocators:
+
+```text
+VertexRangeAllocator
+IndexRangeAllocator
+```
+
+Allocate in element units internally and expose byte metrics.
+
+First implementation:
+
+- sorted free-range list;
+- first-fit or best-fit chosen explicitly;
+- alignment sufficient for the installed buffer API, with 256-byte accounting alignment for metrics unless the API requires another value;
+- adjacent free-range coalescing;
+- no compaction initially.
+
+### Transactional allocation
+
+Allocating a mesh is one transaction:
+
+1. allocate vertex range;
+2. allocate index range;
+3. if either fails, roll back both;
+4. create an allocation handle with a monotonically increasing generation;
+5. do not modify the currently visible resident.
+
+### Allocation handle
+
+```csharp
+public readonly record struct VoxelGpuAllocationHandle(
+    int Id,
+    uint Generation,
+    int VertexOffset,
+    int VertexCapacity,
+    int IndexOffset,
+    int IndexCapacity
+);
+```
+
+### Replacement
+
+For replacement generation `N`:
+
+- current resident remains active;
+- allocate a separate pending handle;
+- emit into the pending handle;
+- publish only if request generation still equals `N`;
+- atomically select the new resident in CPU bookkeeping/command construction;
+- enqueue old handle for deferred release.
+
+### Eviction
+
+Eviction priority should initially consider:
+
+```text
+not visible
+outside desired set
+distance from primary observer
+age since visible
+LOD priority later
+recent edit protection later
+```
+
+Never evict the old resident merely to allocate its replacement unless the scheduler explicitly accepts a visible hole. The player safety region must not accept that behavior.
+
+### Deferred release
+
+A deferred release record contains:
+
+```text
+AllocationHandle
+RetireSubmissionSerial or RetireFrame
+SafeReuseSerial or SafeReuseFrame
+Reason
+```
+
+Ranges become free only after the selected safe-retirement mechanism says they cannot be referenced by compute or draw commands.
+
+### Required metrics
+
+- vertex pool capacity/used/free/high-water;
+- index pool capacity/used/free/high-water;
+- live allocations;
+- pending replacements;
+- retired allocations;
+- internal and external fragmentation;
+- largest free range;
+- allocation failures;
+- eviction retries;
+- deferred-release age;
+- stale generation rejections.
+
+Refactor `VoxelGpuMeshPoolLifecycleProof` to test the actual production allocator classes. Do not keep a second allocator implementation solely for the proof.
+
+## 8.8 GPU Pass B — safe emission
+
+Pass B consumes:
+
+- the original request batch/scratch slot;
+- accepted allocation descriptors;
+- local scan results from Pass A;
+- regular lookup tables.
+
+### Vertex emission
+
+For each owned edge:
+
+- compute interpolation from SDF values;
+- compute gradient normal using the halo;
+- write only inside the descriptor's vertex range;
+- write block-local positions, not large absolute world positions;
+- validate output index against `VertexCapacity` in diagnostic builds;
+- set a debug flag instead of writing when invalid.
+
+Initially reuse the current vertex format to minimize risk. Packing normals/materials is a later measured optimization.
+
+### Index emission
+
+Preferred behavior:
+
+- write indices local to the block allocation;
+- use indirect `VertexOffset` during draw;
+- write only inside the descriptor's index range;
+- validate all local indices `< ExpectedVertexCount` in diagnostic builds.
+
+If the capability test proves `VertexOffset` unusable, write global indices and document that fallback.
+
+### Bounds
+
+Use conservative CPU-known block bounds in Phase 2B. Do not add a GPU bounds readback.
+
+A later phase may calculate tighter GPU bounds if profiling proves conservative bounds harm culling.
+
+### Submission ordering
+
+Use the graphics queue or an explicitly synchronized queue for the first implementation.
+
+Required ordering:
+
+```text
+Pass B UAV writes
+-> UAV/resource barriers
+-> terrain vertex/index consumption
+```
+
+Do not depend on accidental frame timing.
+
+## 8.9 Publication without normal readback
+
+The CPU already knows:
+
+- accepted counts;
+- allocation ranges;
+- request generation;
+- block bounds.
+
+Therefore production publication does not need a geometry or completion-status readback.
+
+First implementation:
+
+1. submit Pass B in frame `F`;
+2. keep the old resident selected for frame `F`;
+3. after the Pass B command stream is enqueued, mark the replacement `EmissionSubmitted`;
+4. select the replacement for draw-command construction no earlier than frame `F + 1`, relying on guaranteed queue ordering from the validated capability path;
+5. retire the old allocation using the safe-retirement mechanism;
+6. diagnostic builds may optionally read a small status buffer asynchronously, but rendering may not depend on it.
+
+If the engine uses a separate asynchronous compute queue, explicit cross-queue synchronization is mandatory. Do not assume next-frame ordering across queues.
+
+## 8.10 Resident table
+
+`VoxelGpuResidentTable` owns:
+
+- fixed-capacity resident slots;
+- map from block key to resident slot;
+- current resident generation;
+- pending replacement generation;
+- current allocation;
+- pending allocation;
+- bounds and visibility timestamps;
+- zero-geometry empty/solid residents;
+- eviction state.
+
+Resident slot IDs must remain stable while a resident is selected because they are used by indirect commands and shader descriptor lookup.
+
+When a slot is reused, increment a slot generation to prevent stale references.
+
+## 8.11 Static fixed-LOD renderer
+
+Before movement streaming, render a deterministic static set of persistent residents.
+
+`VoxelGpuTerrainRenderer` should be one scene render object/component, not one object per block.
+
+Initial rendering steps:
+
+1. gather selected resident descriptors;
+2. CPU frustum-cull conservative block bounds;
+3. create a compact indirect command array;
+4. upload command metadata only;
+5. submit one indexed multi-draw for the view/pass;
+6. render directly from the persistent vertex/index buffers.
+
+The renderer must not:
+
+- create `Mesh` or `Model` objects per block;
+- upload geometry after Pass B;
+- call one draw per block;
+- read visibility or geometry back from the GPU.
+
+## 8.12 Phase 2B integration with `VoxelManager`
+
+Add an explicit visual-backend boundary instead of embedding all GPU code in `VoxelManager`.
+
+Suggested interface:
+
+```csharp
+internal interface IVoxelVisualBackend : IDisposable
+{
+    void Reset(in VoxelVisualWorldConfiguration configuration);
+    void SubmitDesiredBlocks(ReadOnlySpan<VoxelVisualBlockRequest> requests);
+    void MarkDirty(ReadOnlySpan<VoxelVisualBlockKey> blocks, uint editRevision);
+    void Update(in VoxelVisualFrameContext context);
+    bool IsSettled { get; }
+    VoxelVisualBackendDiagnostics CaptureDiagnostics();
+}
+```
+
+Branch policy:
+
+- CPU branch uses the CPU visual backend;
+- GPU branch uses the GPU visual backend;
+- do not create an automatic fallback chain;
+- dedicated server constructs no visual backend or a no-op headless implementation with no GPU resources.
+
+Collision remains separate from `IVoxelVisualBackend`.
+
+## 8.13 Phase 2B test matrix
+
+### Correctness
+
+- flat plane;
+- empty block;
+- solid block;
+- single corner;
+- sphere;
+- border-crossing surface;
+- deterministic cave;
+- fragmented surface;
+- selected regular cases, then all 256 cases through the proof;
+- first, middle, and last surface block in a batch;
+- all block offsets in a small batch;
+- every emitted index in range;
+- no non-finite vertex values;
+- no degenerate or reversed triangles beyond declared Transvoxel behavior.
+
+### Allocation/lifetime
+
+- allocate, publish, replace, retire, reclaim;
+- replacement while old resident is visible;
+- replacement allocation failure;
+- stale count result;
+- stale Pass B submission;
+- stale publication attempt;
+- eviction while count is pending;
+- eviction while emission is pending;
+- component disable during readback;
+- scene reload/resource recreation;
+- deliberate vertex exhaustion;
+- deliberate index exhaustion;
+- fragmented free space;
+- repeated out-and-back resident sets;
+- return-to-origin memory stability.
+
+### Batch capacities
+
+```text
+16
+32
+64
+128
+```
+
+### Server
+
+- dedicated server starts without `ComputeShader`, `GpuBuffer`, `CommandList`, or scene-render object creation;
+- gameplay queries and collision continue to work.
+
+## 8.14 Phase 2B pass gate
+
+Phase 2B passes only when all are true:
+
+- production code is separate from the proof harness;
+- Pass A emits no geometry;
+- every Pass B job has a valid allocation with sufficient capacity;
+- out-of-range geometry writes are structurally prevented;
+- normal vertex/index readbacks are zero;
+- synchronous count/statistics readbacks are zero;
+- asynchronous count queues and scratch slots remain bounded;
+- no per-block GPU buffers are created;
+- no per-block visual objects are created;
+- stale generations never replace newer generations;
+- replacement failure preserves the old resident;
+- retired ranges are not reused early;
+- pool usage never exceeds configured budgets;
+- deliberate exhaustion applies bounded backpressure/eviction rather than corruption or CPU fallback;
+- repeated equivalent resident routes settle to stable retained memory;
+- a static persistent fixed-LOD resident set renders through one bounded multi-draw path;
+- dedicated server contains no GPU visual resources;
+- the project compiles with a clean console.
+
+Phase 2B does not require movement streaming, LOD transitions, GPU culling, or edits.
+
+---
+
+# 9. Phase 3A — Production Render Integration
+
+## Objective
+
+Replace the proof material and proof draw path with terrain rendering that behaves like normal world geometry.
+
+## 9.1 Production shader
+
+Create `voxel_gpu_terrain.shader` with at least:
+
+```hlsl
+MODES
+{
+    Forward();
+    Depth();
+}
+```
+
+Requirements:
+
+- Source 2/s&box standard lighting path;
+- depth prepass and G-buffer data;
+- dynamic shadows;
+- fog and atmosphere;
+- base material ID;
+- secondary material ID;
+- blend weight;
+- world-space normal;
+- roughness/metalness policy;
+- TAA and configured upscalers;
+- debug modes.
+
+Remove hard-coded sun direction and fake proof lighting.
+
+## 9.2 Camera-relative rendering
+
+Store vertices block-local.
+
+Store integer block coordinate in the resident descriptor.
+
+Reconstruct position:
+
+```text
+(blockCoordinate - cameraBlockCoordinate) * blockWorldSize
++ localVertexPosition
++ cameraLocalOffset
+```
+
+Preferred descriptor selection:
+
+```text
+FirstInstance = ResidentSlot
+SV_InstanceID -> resident descriptor
+```
+
+Validate this in the multi-draw capability test.
+
+## 9.3 Render views
+
+Use shared residents and geometry for:
+
+- main/depth view;
+- shadow cascades/views;
+- reflection/refraction views when required.
+
+Each view may have a separate command buffer, but auxiliary views do not create independent terrain residency or LOD trees.
+
+## 9.4 Phase 3A tests
+
+- opaque main view;
+- depth prepass;
+- G-buffer normal/roughness inspection;
+- all enabled shadow cascades;
+- fog/atmosphere;
+- decals where supported;
+- TAA/upscaler motion and stability;
+- large camera coordinates;
+- camera-origin rebasing;
+- zero-count indirect commands;
+- buffer and renderer recreation.
+
+## 9.5 Phase 3A pass gate
+
+- standard terrain lighting is correct;
+- depth/G-buffer output is correct;
+- shadows are correct;
+- fog/post-processing works;
+- no hard-coded proof lighting remains;
+- no per-block draw call exists;
+- no per-block visual object exists;
+- camera-relative rendering remains stable at large coordinates.
+
+---
+
+# 10. Phase 3B — Fixed-LOD Movement Streaming
+
+## Objective
+
+Connect the current observer-driven fixed-LOD desired set to the production GPU backend without changing world coverage or adding LOD.
+
+## 10.1 Request planner
+
+Preserve current fixed-LOD coverage for the first comparison.
+
+The request planner emits:
+
+- desired block keys;
+- generation;
+- distance/priority;
+- whether the request is new, dirty, replacing, or already resident.
+
+Deduplicate by block key and generation.
+
+Cancel requests that leave the desired set before publication.
+
+## 10.2 Scheduler priority
+
+1. missing blocks in the player safety region;
+2. visible missing blocks nearest the observer;
+3. blocks in movement direction;
+4. dirty/replacing blocks when edits are later integrated;
+5. return-to-origin cache reuse;
+6. prefetch/background work.
+
+Apply age promotion to prevent starvation.
+
+## 10.3 Bounded queues
+
+Configure caps for:
+
+- desired/request queue;
+- Pass A batches;
+- scratch slots;
+- count readbacks;
+- allocation-ready jobs;
+- Pass B batches;
+- pending publications;
+- retired allocations.
+
+When saturated, stop accepting lower-priority work. Do not grow queues without a cap.
+
+## 10.4 Culling and command submission
+
+First version:
+
+- CPU frustum-cull resident block bounds;
+- compact commands by view/pass;
+- upload command metadata;
+- one multi-draw or the smallest supported bounded submission count.
+
+GPU culling is not required for this phase.
+
+## 10.5 Streaming tests
+
+- stationary cold settle;
+- straight-line traversal;
+- diagonal traversal;
+- infinity traversal;
+- high-speed reversal;
+- teleport/outlier movement;
+- camera frustum sweep;
+- return to origin;
+- repeated route loops;
+- minimum memory budget;
+- allocation pressure during movement;
+- main and shadow views sharing residents.
+
+## 10.6 Phase 3B pass gate
+
+- fixed-LOD visible coverage has no persistent holes after the declared settle window;
+- CPU visual mesh generation is disabled during measured GPU runs;
+- no per-block draw submission exists;
+- all queues remain bounded;
+- VRAM remains bounded;
+- stale jobs and publications remain zero;
+- return-to-origin retained memory stabilizes;
+- the complete fixed-LOD GPU backend can be compared with the CPU backend at equivalent coverage and quality.
+
+---
+
+# 11. Phase 4 — 3D Clipbox LOD and Transvoxel Transitions
+
+Begin only after Phases 2B, 3A, and 3B pass.
+
+## 11.1 LOD model
+
+Each block keeps `32³` logical cells.
+
+| LOD | Sample spacing | World coverage per axis |
+|---|---:|---:|
+| 0 | 1x | 1x |
+| 1 | 2x | 2x |
+| 2 | 4x | 4x |
+| 3 | 8x | 8x |
+
+Each LOD evaluates the canonical procedural field directly at aligned world coordinates.
+
+Never generate LOD0 visual data first and downsample it for distant visual terrain.
+
+## 11.2 Toroidal 3D clipbox
+
+Each level owns a fixed-size 3D toroidal grid.
+
+Required behavior:
+
+- camera movement across a block boundary reassigns newly entered slabs only;
+- ordinary movement never rebuilds an entire level;
+- coarse levels render as shells around finer levels;
+- the primary player camera controls residency;
+- auxiliary views reuse residency;
+- neighboring rendered blocks differ by at most one supported LOD;
+- enter/exit hysteresis suppresses oscillation;
+- minimum residency time suppresses rapid churn.
+
+Suggested mapping:
+
+```text
+worldBlock -> level-local toroidal slot
+slot = positiveModulo(worldBlock - levelOrigin, levelDimensions)
+```
+
+Every slot stores its currently assigned world key and generation; slot reuse invalidates stale work.
+
+## 11.3 Transition ownership
+
+Define one owner for every fine/coarse boundary face.
+
+A transition mesh key includes:
+
+```text
+fine block key
+face direction
+fine generation
+coarse neighbor generation
+```
+
+Rules:
+
+- only the owner emits the transition geometry;
+- same-LOD faces emit no transition geometry;
+- unsupported LOD differences are prevented by the planner;
+- transition geometry uses the project's existing Transvoxel tables and orientation rules.
+
+## 11.4 Coherent publication
+
+For a seam-affecting replacement, publish as one coherent set:
+
+```text
+regular block replacement
+required transition faces
+neighbor generation dependencies
+```
+
+Keep the previous coherent set visible until the replacement set is complete.
+
+Do not hide cracks with skirts or overlapping duplicate geometry.
+
+## 11.5 Phase 4 tests
+
+- all 256 regular cases;
+- all supported transition cases;
+- every face orientation;
+- same-LOD borders on X/Y/Z;
+- every supported fine/coarse orientation;
+- repeated LOD boundary crossing;
+- rapid camera oscillation;
+- high-speed slab entry;
+- teleport;
+- caves and mostly-solid regions;
+- edited seams after Phase 5 integration.
+
+## 11.6 Phase 4 pass gate
+
+- no cracks, T-junction leaks, duplicate transition faces, invalid indices, or stale seams;
+- LOD1+ samples the canonical field directly;
+- ordinary movement updates slabs rather than complete levels;
+- transition ownership is unique;
+- coherent publication prevents partial seam replacement;
+- LOD churn and memory remain bounded.
+
+---
+
+# 12. Phase 5 — Sparse Editable Terrain and CPU Collision
+
+## 12.1 Canonical terrain state
+
+```text
+procedural base
++ macro-world descriptors
++ baked sparse edit bricks
++ recent ordered edit operations
+```
+
+The GPU is a visual cache of this state, not the authority.
+
+## 12.2 Edit operation contract
+
+```csharp
+public struct VoxelEditOp
+{
+    public ulong EditId;
+    public uint WorldRevision;
+    public VoxelEditShape Shape;
+    public VoxelCsgOperation Operation;
+    public Vector3 Position;
+    public Rotation Rotation;
+    public Vector3 Size;
+    public float Smoothness;
+    public ushort MaterialId;
+}
+```
+
+Supported initial shapes:
+
+- sphere;
+- capsule;
+- oriented box.
+
+Supported operations:
+
+- add;
+- subtract;
+- smooth add;
+- smooth subtract;
+- material paint.
+
+## 12.3 Edit flow
+
+1. client requests edit;
+2. server validates range, permissions, ownership, and cost;
+3. server assigns monotonic edit ID/world revision;
+4. CPU applies and persists the edit;
+5. CPU bins the edit into affected visual/collision blocks;
+6. repeated brush samples are coalesced by affected block;
+7. GPU receives compact edit data;
+8. affected blocks, halos, and transition faces receive newer generations;
+9. GPU remeshes affected blocks;
+10. CPU collision remeshes the local gameplay region independently.
+
+Do not patch individual mesh vertices. Edits can change topology.
+
+## 12.4 Baked edit bricks
+
+When a region exceeds a configurable edit-count or evaluation-cost threshold:
+
+- bake older edits into a sparse base-resolution SDF/material brick;
+- record rule version and world revision;
+- remove baked operations from the active journal;
+- retain recent operations above the baked result;
+- upload only nearby baked bricks and recent operations;
+- map world edit-brick coordinate to GPU atlas slot through a flat hash/table.
+
+Untouched terrain requires no dense persistent storage.
+
+## 12.5 Invalidation
+
+An edit invalidates:
+
+- all regular blocks whose owned samples can change;
+- neighboring halo consumers;
+- all transition faces that consume affected fine/coarse samples;
+- local CPU collision chunks.
+
+The invalidation function must be deterministic and shared by runtime and tests.
+
+## 12.6 CPU collision
+
+Keep CPU Transvoxel collision.
+
+Policy:
+
+- high resolution immediately around players and important edits;
+- reduced resolution in a wider safety region;
+- no collision outside gameplay relevance;
+- direct CPU SDF queries for point tests when practical;
+- collision never consumes GPU visual geometry.
+
+## 12.7 Phase 5 tests
+
+- varied dig/place operations;
+- four-block intersection edit;
+- all block-border directions;
+- LOD boundary edits;
+- continuous 20 Hz digging;
+- continuous 20 Hz placement;
+- large explosion;
+- repeated edits while older generations are in flight;
+- edit then eviction/re-entry;
+- edit-journal bake threshold;
+- rule-version mismatch for baked data;
+- local walking/falling/contact after edits.
+
+## 12.8 Phase 5 pass gate
+
+- authoritative edits immediately affect CPU queries;
+- every edit eventually converges visually and in local collision;
+- stale generations never overwrite newer edits;
+- unaffected residents are not remeshed;
+- repeated brush samples are coalesced;
+- edit evaluation cost remains bounded as the world ages;
+- collision never waits for GPU visual completion;
+- no GPU visual geometry readback is introduced.
+
+---
+
+# 13. Procedural Terrain Rules and Parity
+
+The flat plane remains a topology fixture only.
+
+Create a versioned `TerrainRuleStressV1` implemented on CPU and GPU with:
+
+- rolling terrain;
+- steep slopes;
+- overhangs;
+- caves;
+- mostly empty blocks;
+- mostly solid blocks;
+- sparse surface blocks;
+- highly fragmented surface blocks;
+- deterministic material boundaries;
+- controlled high-frequency detail.
 
 Parity requirements:
 
-- both implementations consume the same integer world sample coordinate, seed, and rule version;
-- sign and material classification are authoritative outputs;
-- arithmetic order and clamping are specified rather than incidental;
-- SDF comparison tolerance is
-  `max(2 * SdfClampDistance / (32767 * 2), 0.0001 voxel)` unless a future rule version declares and justifies a different tolerance;
-- samples farther than the tolerance from zero must have identical solid/air classification;
-- every rule-version change updates conformance fixtures before performance comparisons;
-- performance runs disable diagnostic sample readback.
+- same integer world sample coordinate;
+- same seed;
+- same rule version;
+- specified arithmetic order and clamping;
+- identical solid/air classification outside declared tolerance;
+- identical authoritative material classification;
+- fixtures updated whenever rule version changes.
 
-GPU output is a visual cache. Persistent edits and gameplay truth remain on the CPU.
+Initial scratch representation may remain `float` until the complete path is correct.
 
-## LOD and seam model
+Quantized SDF/material packing is a later optimization and requires measured error and bandwidth evidence.
 
-Each requested block keeps a constant logical cell count while changing world-space sample spacing:
+---
 
-| LOD | Cells | Sample spacing | Relative world coverage |
-|---|---:|---:|---:|
-| 0 | 32³ | 1x | 1x |
-| 1 | 32³ | 2x | 2x per axis |
-| 2 | 32³ | 4x | 4x per axis |
-| 3 | 32³ | 8x | 8x per axis |
+# 14. Memory and Scheduling Policies
 
-Lower-detail blocks evaluate the procedural field directly at their spacing. They are never generated from LOD0 data.
+## 14.1 Initial terrain memory profiles
 
-Seam requirements:
+| Profile | Combined terrain GPU budget |
+|---|---:|
+| Minimum | 512 MiB |
+| Default | 1,024 MiB |
+| High | 2,048 MiB |
+| Diagnostic stress | 4,096 MiB |
 
-- same-LOD neighbors share exact world-coordinate boundary samples;
-- regular cells consume a defined one-sample halo/ownership rule;
-- LOD differences are restricted to supported Transvoxel neighbor relationships;
-- transition ownership is unique so two blocks cannot emit competing transition geometry;
-- an edit touching a border invalidates all regular and transition blocks that consume affected samples;
-- replacement is coherent: all blocks in a seam-affecting publication set become visible together or the old set remains visible;
-- no crack, T-junction leak, duplicate face, invalid index, degenerate triangle, or non-manifold transition is accepted.
+Combined terrain budget includes:
 
-## GPU memory model
+- vertex pool;
+- index pool;
+- scratch rings;
+- request/count/allocation buffers;
+- resident descriptors;
+- command buffers;
+- edit data when implemented.
 
-### Persistent storage
+Clamp configured budget against current reported GPU memory budget where the engine exposes it.
 
-Use shared vertex, index, resident-descriptor, and indirect-command pools. Do not allocate worst-case vertex/index capacity per block.
+## 14.2 Pressure degradation order
 
-### Scratch storage
+1. stop speculative requests;
+2. cancel obsolete low-priority jobs;
+3. evict invisible distant residents;
+4. reduce distant coverage/refinement after LOD exists;
+5. preserve nearby LOD0 and recently edited terrain;
+6. never overrun, synchronously wait, corrupt geometry, or activate CPU visual generation.
 
-Density, material, classification, count, and scan buffers are reusable scratch arenas sized for a bounded batch. Scratch capacity is independent of total resident-block count.
+## 14.3 Frame budgets
 
-### Allocation policy
+Expose configurable budgets for:
 
-The implementation must define one allocator and one owner. A page allocator, buddy allocator, or size-class free-list is acceptable after measurement; a silent mixture is not.
+- CPU request planning;
+- count-result processing;
+- allocation processing;
+- GPU Pass A requests submitted;
+- GPU Pass B requests submitted;
+- command-buffer construction;
+- collision jobs;
+- maximum queue age.
 
-The allocator must provide:
+GPU time is asynchronous. A frame budget controls submissions, not synchronous completion.
 
-- hard vertex/index byte budgets;
-- allocation handles with generations;
-- bounds checks on every produced range;
-- deferred release after draw/compute use;
-- fragmentation and largest-free-range metrics;
-- explicit behavior when allocation fails;
-- replacement without exposing partially written geometry;
-- an opt-in compaction path only if fragmentation data proves it necessary.
+---
 
-### Budget profiles
+# 15. Diagnostics and Benchmark Contract
 
-- Adoption profile: `TerrainVramBudgetMiB = 2048` for mesh pools, scratch, descriptors, and edit data combined.
-- High-end stress profile: `TerrainVramBudgetMiB = 4096`.
-- The system may expose smaller profiles later, but passing only on the RTX 5090's available VRAM is not sufficient.
+## 15.1 CPU metrics
 
-When the budget cannot satisfy a request, the scheduler must apply backpressure and evict lower-priority residents. It must never overrun a buffer, grow without a cap, block the frame waiting for GPU geometry, or switch to CPU visual generation.
+- request planning time;
+- request deduplication/priority time;
+- Pass A submission time;
+- count-result processing time;
+- allocator time;
+- Pass B submission time;
+- publication time;
+- command-compaction time;
+- collision queue/mesh/publication time;
+- managed allocations and GC;
+- queue depths, cancellations, and backpressure events.
 
-## Scheduling
-
-Priority, highest to lowest:
-
-1. dirty blocks caused by player edits/explosions;
-2. missing LOD0 blocks in the local safety region;
-3. missing LOD0 blocks in movement direction;
-4. nearby transition blocks required to close visible seams;
-5. remaining LOD1;
-6. LOD2 and above;
-7. distant refinement and speculative cache fill.
-
-Scheduling requirements:
-
-- a configurable CPU submission budget;
-- a configurable GPU terrain-compute budget measured asynchronously;
-- bounded request, edit, and retirement queues;
-- batch dispatches rather than per-block command-list churn;
-- deduplication by block key and generation;
-- coalescing of repeated dirty notifications;
-- age promotion so low-priority work cannot starve forever;
-- cancellation of obsolete movement/LOD requests;
-- no synchronous waits for ordinary publication.
-
-The compute budget is a pacing control, not a claim that GPU work completes synchronously in the submission frame.
-
-## Editing and collision
-
-The conceptual terrain state is:
-
-```text
-procedural base SDF + ordered sparse persistent edits = authoritative terrain
-```
-
-Each edit has a stable ID, world revision, operation/type, bounds, parameters, material effect, and deterministic ordering key. The CPU applies and persists it first. The GPU receives a compact command or updated edit range plus affected-block generations.
-
-Editing requirements:
-
-- repeated brush samples in one frame are coalesced by affected block;
-- boundary edits invalidate neighboring halos and transitions;
-- obsolete in-flight generations cannot publish over a newer edit;
-- edits receive the highest visual priority;
-- GPU edit storage is compact and budgeted;
-- normal edits do not rebuild unaffected residents;
-- visual and local collision convergence are measured separately;
-- authoritative gameplay queries observe CPU state immediately even if visuals are still converging.
-
-Collision requirements:
-
-- CPU Transvoxel remains the sole collision mesher;
-- collision uses authoritative CPU state, never GPU mesh readback;
-- the local interest radius and build budget are configurable;
-- local holes/placements become physically correct within the acceptance latency;
-- visual progress outside the collision region is not blocked by collision generation.
-
-## Instrumentation contract
-
-Instrumentation is always on during an active authoritative benchmark run and inert otherwise. Aggregate counters update once per operation or batch, not per sample.
-
-### CPU metrics
-
-- request-planner/clipbox update time;
-- request deduplication and priority time;
-- GPU submission time and submitted batches;
-- edit-authority time and affected-block calculation;
-- collision queue, mesh, publication, and convergence time;
-- managed allocations/GC and process memory;
-- queue depths, cancellations, stale results, and backpressure events.
-
-### GPU metrics
+## 15.2 GPU metrics
 
 - density/material evaluation;
-- regular-cell classification;
-- transition-cell classification;
-- count/scan/allocation;
-- regular mesh emission;
-- transition mesh emission;
-- culling;
-- indirect argument generation;
-- terrain render;
-- total terrain compute and end-to-end request-to-visible latency;
-- GPU frame association/latency for asynchronous measurements.
+- block reduction;
+- regular classification;
+- local scans/totals;
+- vertex emission;
+- index emission;
+- transition classification/emission later;
+- terrain render by pass;
+- total terrain compute;
+- request-to-visible latency association.
 
-### Work and memory metrics
+Use engine GPU profiler scopes/timestamps. Do not call a synchronous readback to measure GPU time.
 
-- requested/generated/remeshed/retired/evicted blocks;
-- resident and visible blocks by LOD;
-- vertices, indices, triangles, and transition triangles;
+## 15.3 Work metrics
+
+- requested/counting/allocated/emitting/resident/visible blocks;
+- stale results rejected;
 - empty/solid/surface blocks;
-- mesh-pool used/free/high-water bytes;
-- scratch/edit/descriptor/indirect bytes;
-- internal and external fragmentation;
+- active cells;
+- vertices/indices/triangles;
+- residents by LOD later;
+- transition triangles later;
+- count readback bytes and latency;
+- Pass A/Pass B batch sizes;
+- multi-draw calls per view/pass;
+- zero-count commands;
+- normal geometry readback count, which must remain zero.
+
+## 15.4 Memory metrics
+
+- scratch bytes by ring slot;
+- vertex/index pool capacity, used, free, and high-water;
+- descriptor/command/edit bytes;
+- live/pending/retired allocations;
+- fragmentation;
 - largest free range;
-- allocation failures and retries;
-- stale generations rejected;
-- normal-operation geometry readback count, which must remain zero.
+- allocation failures/retries;
+- reported GPU memory budget and use.
 
-## Branch and comparison protocol
+## 15.5 Benchmark identity
 
-1. Commit or otherwise resolve unrelated working-tree changes before branch creation.
-2. Create a clean CPU baseline commit from `main` and tag or record it immutably.
-3. Run and validate the complete authoritative suite on that exact CPU commit.
-4. Create the GPU experiment branch from that commit.
-5. Record engine, CPU, GPU, display, VSync/frame cap, graphics settings, seed, scene, route, warm-up, and benchmark configuration.
-6. If a correctness fix is required in both branches, commit it once and cherry-pick the exact change to the other branch; then regenerate both baselines. Do not compare diverged behavior.
-7. Run CPU and GPU measurements in separate editor sessions to avoid stale hotload and retained-resource contamination.
-8. Use at least three complete valid runs per branch for the final decision. Compare medians, p95 distributions, and worst-case evidence; do not claim a win from one run.
-9. Preserve all JSON, JSONL, CSV, Markdown, and HTML output with revision and backend identifiers.
+Every report records:
 
-The benchmark configuration identity must add at least: visual architecture, procedural-rule version, LOD policy version, pool budget, scratch batch capacity, edit-data version, and terrain compute budget.
+- actual Git revision automatically;
+- dirty working-tree state;
+- s&box engine version/revision;
+- CPU and GPU;
+- resolution, VSync, frame cap, and graphics settings;
+- visual backend identity;
+- procedural-rule version;
+- LOD policy version;
+- chunk size and voxel size;
+- batch capacity;
+- scratch-ring count;
+- terrain memory profile;
+- edit-data version;
+- collision policy;
+- material/shadow settings.
 
-## Implementation phases and gates
+Remove dependence on manually maintained scene revision strings.
 
-Every phase is a stop/go gate. A failed gate is fixed or documented before later phases begin; later features must not conceal an earlier architectural failure.
+## 15.6 Scenario states
 
-### Phase 0 — Freeze baseline and define contracts
+```text
+PASS
+FAIL
+NOT_APPLICABLE_IN_THIS_PHASE
+BLOCKED_BY_LATER_PHASE
+```
 
-Deliverables:
+A fixed-LOD phase is not failed merely because transition edits belong to a later phase. All scenarios still appear in reports.
 
-- clean CPU baseline revision and complete validated report;
-- current CPU pipeline audit;
-- versioned block request, resident descriptor, edit, and diagnostics contracts;
-- fixed LOD0 request producer replacing direct visual-backend assumptions;
-- benchmark schema additions for backend identity and unavailable GPU stages;
-- API ledger for installed s&box compute, buffers, barriers, command lists, indirect draw, and profiling surfaces.
+---
 
-Pass:
+# 16. Benchmark Scenarios by Phase
 
-- CPU behavior and complete suite remain unchanged except additive report fields;
-- all ten required scenarios execute in order and validation passes;
-- fixed LOD0 requests reproduce the same desired world coverage;
-- runtime still has exactly one CPU visual path at this phase;
-- baseline revision is clean and reproducible.
+## Phase 2B
 
-Fail:
+- regular-cell conformance proof;
+- static persistent resident set;
+- allocator churn;
+- replacement failure;
+- deliberate exhaustion;
+- return-to-origin resident-set stability;
+- asynchronous readback saturation;
+- resource recreation;
+- dedicated server startup.
 
-- an incomplete/stale report is used as baseline;
-- the request abstraction changes player-visible coverage or edit behavior;
-- a second visual path is introduced;
-- backend-specific assumptions leak into world authority contracts.
+## Phase 3B
 
-### Phase 1 — Single-block GPU Transvoxel proof
-
-Deliverables:
-
-- procedural GPU density/material generation for one 32³ LOD0 block;
-- GPU regular-cell Transvoxel classification and emission using the current CPU tables and topology rules;
-- direct indexed drawing from generated GPU buffers;
-- opt-in bounded diagnostic readback for conformance only;
-- CPU/GPU phase timing and byte counters.
-
-Tests:
-
-- empty, solid, flat plane, single corner, sphere, border-crossing surface, and deterministic edited fixture;
-- exhaustive coverage of all 256 regular-cell case codes;
-- density sign/material conformance against CPU samples;
-- CPU/GPU comparison of regular-cell class, vertex count, index count, edge ownership, positions, winding, normals, and materials;
-- invalid index, NaN/Inf vertex, degenerate triangle, winding, and bounds validation;
-- repeated rebuild and resource-retirement loop.
-
-Pass:
-
-- the block renders correctly from GPU-generated buffers;
-- normal-operation geometry readback count is zero;
-- all non-boundary density signs/materials match and SDF deltas are within tolerance;
-- GPU regular-cell topology matches the current CPU Transvoxel output within the declared numeric tolerance;
-- no invalid indices, non-finite vertices, allocator overruns, or leaked resources occur;
-- repeated generations publish only the newest generation.
-
-Fail:
-
-- CPU-created visual geometry is required to render the result;
-- readback is required for draw counts or publication;
-- one block requires permanent worst-case buffers that would be multiplied by resident count;
-- the implementation cannot identify GPU stage timing or memory use.
-
-### Phase 2 — Batched shared-pool generation
-
-Deliverables:
-
-- bounded scratch arena;
-- shared mesh allocator and resident table;
-- batched density, classification, scan, allocation, and emission;
-- generation-safe replacement and deferred reclamation;
-- backpressure and allocation-failure policy.
-
-Tests:
-
-- batches of 1, 8, 32, 128, and scheduler-selected capacities;
-- mixed empty/solid/surface topology;
-- random allocate/replace/evict churn;
-- deliberate exhaustion at the configured VRAM budget;
-- cancellation and stale-generation storms;
-- return-to-origin and repeated-route memory stabilization.
-
-Pass:
-
-- no per-block worst-case geometry allocation exists;
-- no overlap, out-of-range write, stale publication, or use-after-retire is detected;
-- allocation failure causes bounded backpressure/eviction without crash or CPU fallback;
-- used bytes never exceed the configured budget;
-- after two identical out-and-back loops and settling, retained terrain bytes are within 5% of the first settled loop;
-- batching reduces submission/dispatch count relative to block count and is reported explicitly.
-
-Fail:
-
-- memory grows with cumulative requests rather than resident demand;
-- retirement needs a synchronous GPU wait in normal operation;
-- geometry buffers are allocated/recreated per block;
-- fragmentation makes valid steady-state workloads fail while nominal free space remains, without a measured mitigation plan.
-
-### Phase 3 — Streaming, residency, culling, and indirect draw
-
-Deliverables:
-
-- current observer-driven fixed-LOD requests feeding the GPU path;
-- block cache, eviction score, and residency limits;
-- GPU frustum culling;
-- GPU indirect command generation and indexed indirect terrain rendering;
-- CPU visual path removed from measured GPU runtime;
-- authoritative benchmark scenarios extended with GPU metrics.
-
-Tests:
-
+- cold fixed-LOD generation;
 - stationary settle;
-- infinity, line, and diagonal traversal;
-- high-speed direction reversal;
-- teleport/outlier movement;
-- camera frustum sweep and occlusion-unaware frustum correctness;
-- radius-32/4,096-block stress profile;
-- one complete authoritative suite, including edits and collision even if GPU edit support is still marked unavailable and therefore causes an explicit phase failure.
+- line traversal;
+- diagonal traversal;
+- infinity traversal;
+- reversal;
+- teleport;
+- frustum sweep;
+- minimum-budget degradation;
+- repeated route loops.
 
-Pass:
+## Phase 4
 
-- visible coverage has no persistent holes after the configured settle window;
-- CPU never loops over visible blocks to issue one draw per block;
-- culled blocks do not contribute indirect draw work;
-- request queues and VRAM remain bounded during all routes;
-- zero normal geometry readbacks, stale publications, and pool errors;
-- the full report persists in every required format, including failed runs.
+- LOD slab movement;
+- LOD oscillation;
+- all transition orientations;
+- cave seams;
+- fast clipbox movement;
+- coherent replacement.
 
-Fail:
+## Phase 5
 
-- culling requires per-frame GPU geometry readback;
-- the system dispatches or submits one independent full pipeline per block at scale;
-- motion causes unbounded queue growth or never-settling holes;
-- the benchmark omits required scenarios because a stage is incomplete.
+- varied edits;
+- border edits;
+- 20 Hz dig/place;
+- explosion;
+- stale edit generations;
+- edit bake threshold;
+- visual/collision convergence.
 
-### Phase 4 — LOD and Transvoxel transitions
+---
 
-Deliverables:
+# 17. Final CPU/GPU Comparison Protocol
 
-- production hardening of the Phase 1–3 GPU regular-cell Transvoxel path;
-- LOD planner/clipbox request producer;
-- direct LOD-specific sampling;
-- GPU transition-cell generation and unique transition ownership;
-- coherent regular/transition replacement;
-- LOD residency and churn metrics.
+1. Preserve an immutable clean CPU baseline revision.
+2. Run the complete CPU suite on that exact revision.
+3. Run GPU measurements on the same engine revision.
+4. Apply shared correctness fixes identically to both branches.
+5. Use separate clean editor sessions.
+6. Match voxel size, visible coverage, vertical coverage, procedural rules, materials, shadows, collision policy, and graphics settings.
+7. Use at least three complete valid runs per branch.
+8. Compare medians, p95, 1% lows, request-to-visible latency, and memory stability.
+9. Preserve JSON, JSONL, CSV, Markdown, and HTML reports.
+10. Validate on the primary development GPU and at least one representative mid-range GPU.
+11. Once GPU LOD exists, compare equivalent visible coverage/quality rather than raw block counts.
 
-Tests:
+---
 
-- regression coverage for all 256 regular-cell case codes;
-- exhaustive supported transition-cell case coverage;
-- CPU fixture comparison for counts, indices/topology class, positions within tolerance, normals, and materials;
-- same-LOD border fixtures in all axes;
-- every supported fine/coarse neighbor orientation;
-- camera motion across each LOD boundary;
-- edited seams and repeated LOD oscillation;
-- caves and mostly-solid regions once those procedural rules exist.
+# 18. Final Adoption Gates
 
-Pass:
+## 18.1 Correctness
 
-- zero crack, invalid topology, ownership, or stale-transition failures;
-- LOD1+ density is evaluated directly at its requested spacing;
-- mesh-job cell count remains constant across LODs;
-- regular and transition publication is coherent;
-- CPU/GPU reference differences stay within declared tolerance;
-- LOD churn remains bounded under repeated boundary crossing.
+- every mandatory scenario passes;
+- density/material parity passes;
+- regular and transition topology passes;
+- normal geometry readbacks are zero;
+- synchronous normal metadata readbacks are zero;
+- invalid writes are zero;
+- stale publications are zero;
+- visible cracks and persistent holes are zero;
+- edits and local collision converge correctly.
 
-Fail:
+## 18.2 Rendering
 
-- skirts or overlapping duplicate geometry hide transition defects;
-- LOD0 is generated and downsampled for distant blocks;
-- transitions depend on CPU-generated visual meshes;
-- visual correctness depends on unsupported neighbor LOD differences.
+- opaque/depth/G-buffer/shadow/fog/post-processing paths are correct;
+- renderer uses GPU-owned geometry directly;
+- no per-block visual objects remain;
+- no per-block draw submissions remain;
+- camera-relative rendering is stable.
 
-### Phase 5 — Sparse edits and CPU collision integration
+## 18.3 Memory and stability
 
-Deliverables:
+- player-profile budget is never exceeded;
+- minimum profile degrades gracefully;
+- queues remain bounded and recover;
+- no resource leak or monotonic retained-memory growth;
+- repeated equivalent routes settle within 5% retained terrain memory;
+- exhaustion never causes corruption, synchronous waiting, or CPU fallback.
 
-- compact, versioned GPU edit representation;
-- affected regular/transition block invalidation;
-- same-frame and in-flight edit coalescing;
-- high-priority regeneration;
-- local CPU collision using authoritative state;
-- visual/collision convergence metrics.
+## 18.4 Full GPU adoption performance
 
-Tests:
+Against the equivalent CPU baseline:
 
-- varied dig/place operations;
-- four-block and LOD-boundary edits;
-- continuous 20 Hz digging and placement;
-- large explosion;
-- repeated edits to one block while older work is in flight;
-- edit followed by immediate eviction/re-entry;
-- local collision walk/fall/contact after edits;
-- multi-observer affected-region calculation.
+- median CPU visual-terrain work, excluding collision, improves by at least 50%;
+- cold completion improves by at least 25%;
+- request-to-render p95 improves by at least 30% in at least two traversal routes and regresses by no more than 10% in the third;
+- no scenario frame p95 regresses by more than 5%;
+- no scenario 1% low regresses by more than 5%;
+- sustained edit settle p95 regresses by no more than 10%;
+- player profile meets its frame/GPU target;
+- stress profile remains bounded;
+- results reproduce in three runs and on representative hardware.
 
-Pass:
+If full adoption fails, targeted GPU adoption is allowed only for a self-contained path with no normal geometry readback, a repeatable end-to-end benefit of at least 25%, and no duplicate runtime visual system.
 
-- every authoritative edit eventually appears visually and in local collision;
-- no obsolete generation overwrites a newer edit;
-- unaffected blocks are not remeshed;
-- same-frame repeated edits are coalesced by block;
-- visual seam coherence violations remain zero;
-- gameplay queries reflect CPU authority immediately;
-- collision is generated without GPU mesh readback.
+GPU density followed by CPU geometry readback is not an acceptable targeted architecture.
 
-Fail:
+---
 
-- one brush sample causes one independent remesh;
-- visual and collision use different edit ordering;
-- distant or unaffected residents are repeatedly dirtied;
-- local collision waits on visual GPU completion.
+# 19. Explicit Non-Goals Until Profiling Justifies Them
 
-### Phase 6 — Final decision campaign
+Do not add these as prerequisites:
 
-Required workloads:
+- GPU-managed persistent free-list allocator;
+- GPU frustum culling;
+- hierarchical-Z occlusion;
+- mesh shaders;
+- meshlets;
+- compressed/quantized vertex format;
+- compressed SDF scratch;
+- per-tile mesh allocations;
+- SVO/SVDAG storage;
+- ray-marched primary terrain;
+- individual vertex patching after edits.
 
-- all current authoritative scenarios in their declared order;
-- stationary viewing and cold generation;
-- walking, fast traversal, extreme traversal, reversals, and backtracking;
-- continuous digging and placement;
-- large explosions;
-- dense caves and mostly-solid terrain when implemented;
-- LOD-boundary churn;
-- repeated memory-stability loops;
-- multiple separated observers when multiplayer observation exists.
+Implement the simplest bounded architecture that removes CPU visual generation and meshing first. Optimize only measured bottlenecks.
 
-Every run must capture player-facing behavior, CPU and GPU distributions, request-to-visible latency, edits/collision convergence, work totals, allocations, process/render memory, and all GPU pool metrics.
+---
 
-## Final pass/fail decision
+# 20. Immediate Codex Task Checklist
 
-Use three complete, valid, equivalent runs per branch. Compare the median of each run-level metric unless the metric is explicitly a maximum. Any missing scenario, stale revision, changed workload, validation failure, compiler error, fresh console error, or missing report format invalidates the run.
+Implement **Phase 2B only**, in this order:
 
-Lock two decision profiles before the final campaign:
+- [ ] Inspect current code and list code-to-spec gaps.
+- [ ] Build and run the existing GPU proof.
+- [ ] Preserve the proof as diagnostic-only.
+- [ ] Add GPU/C# layout assertions.
+- [ ] Implement async readback capability test.
+- [ ] Implement 16-command multi-draw capability test.
+- [ ] Select and document safe deferred-release mechanism.
+- [ ] Create production GPU contracts.
+- [ ] Create bounded scratch-ring arena.
+- [ ] Implement Pass A density/material generation.
+- [ ] Implement block min/max reduction.
+- [ ] Implement count-only regular classification/scans/totals.
+- [ ] Implement bounded asynchronous count-result ring.
+- [ ] Refactor the real vertex/index range allocator.
+- [ ] Make lifecycle tests use the production allocator.
+- [ ] Implement transactional allocation and replacement.
+- [ ] Upload allocation descriptors.
+- [ ] Implement capacity-safe Pass B vertex emission.
+- [ ] Implement capacity-safe Pass B index emission.
+- [ ] Implement resident slots and generation-safe publication.
+- [ ] Implement deferred retirement/reclamation.
+- [ ] Render a static persistent resident set with one bounded multi-draw.
+- [ ] Add Phase 2B diagnostics and report fields.
+- [ ] Run correctness, exhaustion, stale-generation, and memory-stability tests.
+- [ ] Update the phase status only after every Phase 2B gate passes.
 
-- **Player profile:** intended production coverage, LOD policy, terrain quality, and graphics settings. Its default target is 60 Hz, so frame and total GPU p95 must be at or below 16.67 ms unless the project records a different product target before gathering baselines.
-- **Stress profile:** equivalent to the current radius-32/4,096-block pressure test or an explicitly matched LOD coverage/quality replacement. This profile judges relative scaling and bounded behavior; it is not required to meet the player profile's absolute frame target.
+Stop after Phase 2B. Do not begin clipbox LOD or transition cells in the same implementation task.
 
-Do not change either profile between CPU and GPU decision runs.
+---
 
-### Correctness gate — mandatory
+# 21. Definition of Phase 2B Done
 
-Pass only if:
+Phase 2B is done when a clean run proves:
 
-- every authoritative scenario passes;
-- density/material conformance passes;
-- regular and transition topology/seam tests pass;
-- normal geometry readbacks, invalid writes, stale publications, and coherence violations are all zero;
-- edits and local collision converge correctly;
-- the integrated player journey has no persistent holes, visible cracks, corrupt geometry, or incorrect physical terrain.
+```text
+CPU requests fixed-LOD visual blocks
+GPU counts their Transvoxel geometry
+CPU asynchronously receives only compact counts
+CPU allocates bounded persistent GPU ranges
+GPU emits directly into those ranges
+one renderer draws the resident set through multi-draw
+old residents survive failed replacements
+stale generations never publish
+retired ranges are reclaimed safely
+normal visual geometry readback is zero
+CPU visual mesh generation is not used by the static GPU backend
+```
 
-Any failure rejects full adoption regardless of performance.
-
-### Memory/stability gate — mandatory
-
-Pass only if:
-
-- the 2,048 MiB adoption terrain-VRAM budget is never exceeded;
-- all queues have configured caps and recover after workload pressure;
-- no resource leak or monotonic retained-memory growth appears across repeated routes;
-- post-loop settled terrain VRAM remains within 5% of the first equivalent settled loop;
-- allocation exhaustion degrades by delayed/dropped low-priority refinement, not crash, corruption, synchronous wait, or CPU fallback.
-
-### Full GPU adoption performance gate
-
-Against the clean CPU baseline at equivalent coverage and quality, pass only if all are true:
-
-- median combined CPU visual-terrain work, excluding collision, is reduced by at least 50%;
-- cold-generation batch completion improves by at least 25%;
-- request-to-render p95 improves by at least 30% in at least two of the three traversal routes and regresses by no more than 10% in the third;
-- no scenario's frame p95 regresses by more than 5%;
-- no scenario's 1% low FPS regresses by more than 5%;
-- sustained dig/place post-edit settle p95 regresses by no more than 10%;
-- the player profile meets its declared frame and total-GPU p95 target, while the stress profile obeys the configured terrain-compute budget without queue divergence;
-- the improvement reproduces in all three decision runs without a major unexplained outlier.
-
-Frame maximum is reported and investigated but is not a sole adoption threshold because it is noisy. A reproducible severe hitch still fails the player-experience gate.
-
-### Targeted GPU adoption gate
-
-If the complete visual pipeline misses the full-adoption gate, a narrower GPU use may be proposed only when:
-
-- it is a self-contained responsibility with no normal geometry readback;
-- it improves its end-to-end player-relevant metric by at least 25% in three valid runs;
-- it passes all applicable correctness and memory gates;
-- it does not create dual runtime implementations or a fallback chain;
-- the complete authoritative suite confirms no material regression elsewhere.
-
-GPU culling/indirect rendering is independently eligible. GPU density alone followed by CPU readback is not.
-
-### Reject/park gate
-
-Reject or park the terrain experiment when any is true after reasonable profiling-led correction:
-
-- the correctness or memory gate cannot pass;
-- the complete path misses both full and targeted performance gates;
-- unavoidable synchronization/readback dominates the path;
-- CPU submission and resource management remain proportional to resident block count;
-- GPU terrain work harms frame pacing more than the CPU pressure it removes;
-- required complexity is disproportionate to the measured player benefit.
-
-## Definition of experiment complete
-
-The experiment is complete only when:
-
-- phases 0–6 have explicit PASS/FAIL records;
-- the GPU branch has one authoritative visual path;
-- all required architecture, edit, LOD, memory, and lifetime contracts are implemented or explicitly failed;
-- the project compiles in the settled live s&box editor with a fresh clean console;
-- the full player-driven benchmark suite runs with the exact current revision;
-- `scripts/validate-voxel-benchmark.ps1` passes;
-- JSON, JSONL, CSV, Markdown, and HTML reports are preserved for every decision run, including failures;
-- CPU and GPU results are comparable and reproduced;
-- the decision is recorded as full adoption, targeted adoption, or rejection with evidence;
-- the resulting player experience is evaluated separately from subsystem timings.
-
-“A block rendered with GPU regular-cell Transvoxel” is Phase 1 completion, not experiment completion.
-
-## Immediate implementation target
-
-Start with Phase 0, then Phase 1. The first code milestone should be:
-
-> One fixed-LOD0 32³ block whose procedural density is generated on the GPU, whose surface is produced by a direct GPU port of the current regular-cell Transvoxel implementation, and whose indexed geometry is drawn directly without normal vertex/index readback.
-
-Before expanding to many blocks, prove the request generation, resource lifetime, direct draw, diagnostics, and conformance contracts. Before implementing full LOD, prove batched shared-pool generation, residency, eviction, and indirect drawing under the current fixed-LOD radius workload.
-
-That sequence gives the experiment the highest information value: it tests whether the GPU architecture fixes the actual scaling problem with the intended Transvoxel topology before investing in transition-cell and LOD complexity.
+Only then proceed to production rendering and movement streaming.

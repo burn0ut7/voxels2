@@ -83,6 +83,16 @@ internal sealed class VoxelGpuResidentTable
 		}
 	}
 
+	public int CopyEntries( ResidentEntry[] destination )
+	{
+		if ( destination is null || destination.Length < _entries.Length ) throw new System.ArgumentException( "Destination is smaller than the resident table.", nameof( destination ) );
+		lock ( _sync )
+		{
+			System.Array.Copy( _entries, destination, _entries.Length );
+			return _entries.Length;
+		}
+	}
+
 	internal readonly record struct ResidentEntry(
 		VoxelVisualBlockKey Key,
 		uint Generation,

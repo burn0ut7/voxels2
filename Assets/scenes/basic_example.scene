@@ -43,7 +43,7 @@
           "RenderTexture": null,
           "TargetEye": "None",
           "Viewport": "0,0,1,1",
-          "ZFar": 10000,
+          "ZFar": 100000,
           "ZNear": 10
         }
       ],
@@ -466,11 +466,17 @@
           "ChunkSize": 32,
           "CollisionBuildConcurrency": 2,
           "CollisionBuildsPerFrame": 4,
-          "CollisionChunkRadius": 2,
+          "CollisionChunkRadius": 4,
           "CpuChunkBuildConcurrency": 4,
           "CpuMainThreadBudgetMilliseconds": 4,
           "CpuMeshUploadsPerFrame": 4,
           "DetailedChunkLogLimit": 64,
+          "GenerateInEditor": false,
+          "GpuFrustumPaddingChunks": 1,
+          "GpuIndexPoolCapacity": 50331648,
+          "GpuTerrainLiveDiagnostics": "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=",
+          "GpuTerrainRuleVersion": 0,
+          "GpuVertexPoolCapacity": 8388608,
           "LogGeneration": true,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
@@ -478,9 +484,12 @@
           "OnComponentFixedUpdate": null,
           "OnComponentStart": null,
           "OnComponentUpdate": null,
+          "RequestGpuTerrainDiagnosticsLog": false,
           "RequestGpuTransvoxelProof": false,
           "SdfClampDistance": 8,
           "TerrainMaterial": null,
+          "TerrainSettleDiagnostics": "desiredLoaded=True; generationQueue=0; gpuSettled=; cpuStates=0/0; activeObjects=0; pendingVisual=0; pendingCollision=0; worldPending=False; batchSummaryPending=False; safety=False",
+          "VisualBackend": "GpuPersistentFixedLod",
           "VoxelSize": 32
         },
         {
@@ -510,20 +519,20 @@
           "__enabled": true,
           "Flags": 0,
           "MajorOutlierThresholdPercent": 20,
+          "Mode": "GpuOnly",
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
           "OnComponentFixedUpdate": null,
           "OnComponentStart": null,
           "OnComponentUpdate": null,
-          "Revision": "ad54d9422cabe8f04bae3338193cbd1c8cb5a55c",
           "RunOnStart": true,
           "ScenarioTimeoutSeconds": 90,
           "SustainedEditCount": 80,
           "SustainedEditIntervalSeconds": 0.05,
           "TraversalDistance": 10000,
           "TraversalLoopCount": 1,
-          "TraversalSpeed": 1000,
+          "TraversalSpeed": 3000,
           "WarmupFrames": 30
         }
       ],
@@ -625,7 +634,8 @@
     "GameObjectSystems": {
       "Sandbox.Clutter.ClutterGridSystem": {
         "Storage": {
-          "$blob": "bab54360-3186-4d3a-9f92-e9544090f36d"
+          "$blob": "64db792e-5935-8fbc-8cfa-050cd49fa7fd",
+          "$refs": []
         }
       },
       "Sandbox.SelectionSetsSystem": {
