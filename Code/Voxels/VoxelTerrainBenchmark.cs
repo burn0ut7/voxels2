@@ -461,6 +461,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			case BenchmarkPhase.StartPhase4Regular:
 				_holdBenchmarkPlayersAtOrigin = true;
 				HoldBenchmarkPlayersAtOrigin();
+				_manager.SetBenchmarkPlayerProtection( true );
 				_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
 				_manager.GpuClipboxBlocksPerAxis = Phase4RegularBlocksPerAxis[_phase4RegularScenarioIndex];
 				_manager.GpuClipboxLevelCount = Phase4RegularLevelCounts[_phase4RegularScenarioIndex];
