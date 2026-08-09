@@ -1273,9 +1273,6 @@ coordinate and sample spacing in the existing request ABI; the density and verte
 passes evaluate the canonical field directly at that spacing. The fixed-LOD path
 remains the default for compatibility.
 
-The authoritative GPU benchmark temporarily disables clipbox LOD while it runs,
-because its fixed-LOD scenarios require the configured resident-count contract.
-
 ## 11.1 LOD model
 
 Each block keeps `32³` logical cells.
