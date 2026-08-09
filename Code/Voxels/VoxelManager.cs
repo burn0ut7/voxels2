@@ -14,6 +14,16 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumConcurrentCollisionBuilds = 8;
 	private const int MaximumChunkTimingHistory = 65536;
 	private const int MaximumBatchTimingHistory = 4096;
+	private const int GpuPoolReferenceRadius = 32;
+	private const int GpuPoolMaximumRadius = 64;
+	private const int GpuPoolHeadroomPercent = 15;
+	private const int DefaultGpuVertexPoolCapacity = 8388608;
+	private const int DefaultGpuIndexPoolCapacity = 50331648;
+	private const int MaximumGpuVertexPoolCapacity = 33554432;
+	private const int MaximumGpuIndexPoolCapacity = 201326592;
+	private const long GpuReferenceResidentCount = 5979;
+	private const long GpuReferenceVertexCount = 8388556;
+	private const long GpuReferenceIndexCount = 47657688;
 
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
 	private readonly Dictionary<Vector3Int, GameObject> _chunkGameObjects = new();
@@ -151,11 +161,18 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Rendering" )]
 	public VoxelVisualBackendMode VisualBackend { get; set; } = VoxelVisualBackendMode.CpuChunks;
 
-	[Property, Group( "Rendering" ), Range( 65536, 16777216 )]
+	[Property, Group( "Rendering" )]
+	public bool GpuAutoScalePoolToChunkRadius { get; set; } = true;
+
+	[Property, Group( "Rendering" ), Range( 65536, MaximumGpuVertexPoolCapacity )]
 	public int GpuVertexPoolCapacity { get; set; } = 8388608;
 
-	[Property, Group( "Rendering" ), Range( 196608, 50331648 )]
+	[Property, Group( "Rendering" ), Range( 196608, MaximumGpuIndexPoolCapacity )]
 	public int GpuIndexPoolCapacity { get; set; } = 50331648;
+
+	public int EffectiveGpuVertexPoolCapacity { get; private set; }
+
+	public int EffectiveGpuIndexPoolCapacity { get; private set; }
 
 	[Property, Group( "Rendering" ), Range( 0, 1 )]
 	public int GpuTerrainRuleVersion { get; set; }
@@ -286,8 +303,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		CpuChunkBuildConcurrency = System.Math.Clamp( CpuChunkBuildConcurrency, 1, MaximumConcurrentCpuChunkBuilds );
 		CpuMeshUploadsPerFrame = System.Math.Clamp( CpuMeshUploadsPerFrame, 1, MaximumCpuMeshUploadsPerFrame );
 		CpuMainThreadBudgetMilliseconds = System.Math.Clamp( CpuMainThreadBudgetMilliseconds, 0.25f, 12.0f );
-		GpuVertexPoolCapacity = System.Math.Clamp( GpuVertexPoolCapacity, 65536, 16777216 );
-		GpuIndexPoolCapacity = System.Math.Clamp( GpuIndexPoolCapacity, 196608, 50331648 );
+		GpuVertexPoolCapacity = System.Math.Clamp( GpuVertexPoolCapacity, 65536, MaximumGpuVertexPoolCapacity );
+		GpuIndexPoolCapacity = System.Math.Clamp( GpuIndexPoolCapacity, 196608, MaximumGpuIndexPoolCapacity );
 		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
@@ -454,6 +471,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal void GenerateGpuTerrainWorld()
 	{
 		CountCall( ref _callWorldGenerationRequests );
+		ResolveGpuPoolCapacity();
 		_generationConfiguration = CaptureWorldConfiguration();
 		_worldGenerationPending = false;
 		_worldRegenerationRequested = false;
@@ -650,14 +668,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				SimplexSeed,
 				GpuFrustumPaddingChunks,
 				System.Math.Max( 1, residentCapacity ),
-				GpuVertexPoolCapacity,
-				GpuIndexPoolCapacity );
+				EffectiveGpuVertexPoolCapacity,
+				EffectiveGpuIndexPoolCapacity );
 			var orderedCoordinates = new List<Vector3Int>( _desiredChunkCoordinates );
 			orderedCoordinates.Sort( (left, right) => GetStreamingPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingPriority( right, _gpuStreamingObservers ) ) );
 			_gpuTerrainBackend.QueueStaticSet( orderedCoordinates, GpuTerrainRuleVersion );
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
-			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
@@ -1269,6 +1287,28 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			var material = distance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air;
 			chunk.FillLayer( z, new Voxel( distance, material ) );
 		}
+	}
+
+	private void ResolveGpuPoolCapacity()
+	{
+		if ( !GpuAutoScalePoolToChunkRadius )
+		{
+			EffectiveGpuVertexPoolCapacity = GpuVertexPoolCapacity;
+			EffectiveGpuIndexPoolCapacity = GpuIndexPoolCapacity;
+			return;
+		}
+
+		var targetRadius = System.Math.Min( GpuPoolMaximumRadius, System.Math.Max( 1, ChunkRadius ) );
+		var targetChunks = (long)targetRadius * 2L * targetRadius * 2L;
+		var chunkScaleNumerator = (long)ChunkSize * ChunkSize;
+		var chunkScaleDenominator = (long)GpuPoolReferenceRadius * GpuPoolReferenceRadius;
+		var vertexNumerator = checked( GpuReferenceVertexCount * targetChunks * (100L + GpuPoolHeadroomPercent) * chunkScaleNumerator );
+		var indexNumerator = checked( GpuReferenceIndexCount * targetChunks * (100L + GpuPoolHeadroomPercent) * chunkScaleNumerator );
+		var denominator = checked( GpuReferenceResidentCount * 100L * chunkScaleDenominator );
+		var scaledVertices = checked( (int)System.Math.Min( MaximumGpuVertexPoolCapacity, (vertexNumerator + denominator - 1) / denominator ) );
+		var scaledIndices = checked( (int)System.Math.Min( MaximumGpuIndexPoolCapacity, (indexNumerator + denominator - 1) / denominator ) );
+		EffectiveGpuVertexPoolCapacity = System.Math.Clamp( System.Math.Max( DefaultGpuVertexPoolCapacity, scaledVertices ), 65536, MaximumGpuVertexPoolCapacity );
+		EffectiveGpuIndexPoolCapacity = System.Math.Clamp( System.Math.Max( DefaultGpuIndexPoolCapacity, scaledIndices ), 196608, MaximumGpuIndexPoolCapacity );
 	}
 
 	private int DisplaceChunkSdf( VoxelChunk chunk, Vector3 brushCenter, float brushRadius, float sdfDisplacement )
@@ -2533,7 +2573,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private WorldConfiguration CaptureWorldConfiguration()
 	{
-		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuAutoScalePoolToChunkRadius, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
 	}
 
 	private TerrainConfiguration CaptureTerrainConfiguration() => new( SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
@@ -2584,7 +2624,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
 	private readonly record struct TerrainConfiguration( float Frequency, float Amplitude, float BaseHeight, int Seed );
-	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, bool GpuAutoScalePoolToChunkRadius, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
 
 	private sealed class WorldGenerationWorkerResult
 	{

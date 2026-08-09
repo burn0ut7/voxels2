@@ -1231,8 +1231,8 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"  \"gpu_phase2b_batch_capacity\":{VoxelGpuScratchArena.MaximumBatchSize},\n" +
 			$"  \"gpu_phase2b_scratch_ring_count\":{VoxelGpuScratchArena.RingSize},\n" +
 			$"  \"gpu_phase2b_multi_draw_command_limit\":{VoxelGpuTerrainRenderer.MaximumCommandsPerSubmission},\n" +
-			$"  \"gpu_phase2b_vertex_pool_capacity\":{_manager.GpuVertexPoolCapacity},\n" +
-			$"  \"gpu_phase2b_index_pool_capacity\":{_manager.GpuIndexPoolCapacity},\n" +
+			$"  \"gpu_phase2b_vertex_pool_capacity\":{_manager.EffectiveGpuVertexPoolCapacity},\n" +
+			$"  \"gpu_phase2b_index_pool_capacity\":{_manager.EffectiveGpuIndexPoolCapacity},\n" +
 			"  \"gpu_phase2b_vertex_addressing\":\"world_space_vertex_fallback\",\n" +
 			$"  \"gpu_phase2b_retirement_mechanism\":\"frame_epoch_{VoxelGpuCapabilities.RetirementEpochs}\",\n" +
 			$"  \"resolution\":\"{Screen.Width:F0}x{Screen.Height:F0}\",\n" +

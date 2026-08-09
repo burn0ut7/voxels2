@@ -473,6 +473,7 @@
           "CpuMeshUploadsPerFrame": 4,
           "DetailedChunkLogLimit": 64,
           "GenerateInEditor": true,
+          "GpuAutoScalePoolToChunkRadius": true,
           "GpuFrustumPaddingChunks": 1,
           "GpuIndexPoolCapacity": 50331648,
           "GpuTerrainLiveDiagnostics": "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=",
