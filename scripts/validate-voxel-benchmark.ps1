@@ -20,6 +20,14 @@ $fullRequiredScenarios = @(
 	'phase4_four_level_b8_movement',
 	'phase4_four_level_stationary_soak',
 	'phase4_transition_ownership',
+	'phase4_transition_all_512_cases',
+	'phase4_transition_six_orientations',
+	'phase4_transition_plane',
+	'phase4_transition_sphere',
+	'phase4_transition_cave',
+	'phase4_transition_tangent_surface',
+	'phase4_transition_watertight_edges',
+	'phase4_transition_no_duplicate_faces',
 	'phase4_indirect_1_to_1024',
 	'phase4_indirect_boundary_49',
 	'phase4_depth_opaque_parity',
@@ -51,14 +59,14 @@ $fullRequiredScenarios = @(
 	'sustained_world_spiral_place_20hz'
 )
 $gpuRequiredScenarios = @(
-	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_b8_l4_stationary',
+	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_b8_l4_stationary',
 	'gpu_persistent_static_set', 'gpu_production_render_integration',
 	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
 	'gpu_async_readback_saturation', 'gpu_resource_recreation', 'gpu_dedicated_server_startup'
 )
 $cpuRequiredScenarios = @(
-	'cold_generation', 'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'live_chunk_radius_reconfiguration', 'player_infinity_streaming', 'player_line_streaming',
+	'cold_generation', 'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'live_chunk_radius_reconfiguration', 'player_infinity_streaming', 'player_line_streaming',
 	'player_diagonal_streaming', 'chunk_seam_edit_coherence', 'varied_edits', 'bulk_edit',
 	'sustained_world_sweep_and_depth_dig_20hz', 'sustained_world_spiral_place_20hz'
 )
@@ -80,6 +88,7 @@ $requiredMetrics = @(
 	'gpu_transvoxel_completion_ms', 'gpu_transvoxel_readback_ms',
 	'gpu_transvoxel_batch_size', 'gpu_transvoxel_surface_blocks', 'gpu_transvoxel_dispatches',
 	'gpu_transvoxel_gpu_publication_passed', 'gpu_transvoxel_gpu_publication_ms', 'gpu_transvoxel_cpu_publication_ms',
+	'transition_reference_available', 'transition_reference_passed', 'transition_reference_failure', 'transition_reference_cases', 'transition_reference_orientations', 'transition_reference_fixture_cases', 'transition_reference_triangles', 'transition_reference_boundary_edges', 'transition_reference_gradient_normals', 'transition_reference_position_tolerance', 'transition_reference_tables_validated',
 	'gpu_terrain_available', 'gpu_terrain_backend', 'gpu_terrain_requested_blocks', 'gpu_terrain_resident_blocks',
 	'gpu_terrain_render_shader', 'gpu_terrain_production_lighting', 'gpu_terrain_depth_prepass',
 	'gpu_terrain_depth_command_lists', 'gpu_terrain_opaque_command_lists',
@@ -165,7 +174,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 18 ) { Add-Failure "Expected suite version 18, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 19 ) { Add-Failure "Expected suite version 19, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -250,6 +259,18 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.clipbox_planner_transition_capacity -ne 1152 ) { Add-Failure "$context did not report the B8 L4 transition capacity" }
 		if ( [int]$scenario.clipbox_planner_active_transition_count -le 0 -or [int]$scenario.clipbox_planner_active_transition_count -gt 1152 ) { Add-Failure "$context reported an invalid B8 L4 active transition count" }
 		if ( [int]$scenario.clipbox_planner_changed_transition_slots -le 0 ) { Add-Failure "$context recorded no transition slot movement" }
+	}
+	elseif ( $scenario.scenario -in @('phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces') )
+	{
+		if ( $scenario.transition_reference_available -ne $true ) { Add-Failure "$context has no Transvoxel transition reference result" }
+		if ( $scenario.transition_reference_passed -ne $true ) { Add-Failure "$context transition reference failed: $($scenario.transition_reference_failure)" }
+		if ( $scenario.transition_reference_tables_validated -ne $true ) { Add-Failure "$context did not validate official transition tables" }
+		if ( [int]$scenario.transition_reference_cases -ne 512 ) { Add-Failure "$context did not validate all 512 transition cases" }
+		if ( [int]$scenario.transition_reference_orientations -ne 3072 ) { Add-Failure "$context did not validate all six orientations for all cases" }
+		if ( [int]$scenario.transition_reference_fixture_cases -le 0 ) { Add-Failure "$context recorded no transition fixture cases" }
+		if ( [int]$scenario.transition_reference_triangles -le 0 ) { Add-Failure "$context recorded no transition triangles" }
+		if ( [int]$scenario.transition_reference_boundary_edges -le 0 ) { Add-Failure "$context recorded no watertight boundary edges" }
+		if ( [int]$scenario.transition_reference_gradient_normals -le 0 ) { Add-Failure "$context recorded no gradient normals" }
 	}
 	elseif ( $scenario.scenario -in @('phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range') )
 	{
