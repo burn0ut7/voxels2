@@ -68,6 +68,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private long _frameCounter;
 	private long _clipboxRevisionPlannedTimestamp;
 	private string _structuredDebugReportJson = "{}";
+	private string _latestRevisionEventJson = "{}";
+	private string _latestRevisionEventState = "none";
+	private readonly List<string> _revisionEventHistory = new( 64 );
 	private readonly List<VoxelGpuHitchTrace> _hitchTrace = new( 32 );
 	private readonly long[] _levelCountBatches = System.Array.Empty<long>();
 	private readonly long[] _levelEmitBatches = System.Array.Empty<long>();
@@ -221,7 +224,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		Log.Info( $"Voxel GPU transition scheduling: active={_clipboxTransitions.ActiveCount}, desired={TransitionDesiredCount}, dependenciesValid={_clipboxTransitions.DependenciesValid}, dependencyMismatches={_clipboxTransitions.DependencyMismatchCount}, schedulerPending={_transitionScheduler.PendingCount}." );
 		_clipboxRevisionPlannedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-		RefreshStructuredDebugReport( "planned" );
+		RecordRevisionEvent( "planned" );
 		return true;
 	}
 
@@ -394,14 +397,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		foreach ( var entry in _clipboxTransitions.Desired )
 		{
 			if ( !entry.Active ) continue;
-			var state = !entry.DependenciesValid ? VoxelGpuDebugBlockState.Deferred : entry.Pending ? VoxelGpuDebugBlockState.Pending : VoxelGpuDebugBlockState.Resident;
 			var vertexOffset = 0;
 			var vertexCapacity = 0;
 			var indexOffset = 0;
 			var indexCapacity = 0;
 			var indexCount = 0u;
 			var transitionKey = VoxelClipboxTransitionPlanner.GetVisualKey( _clipboxPlanner.DesiredTransitions[entry.StableSlotId] );
-			if ( _residents.TryGetPublished( transitionKey, out var resident ) )
+			var published = _residents.TryGetPublished( transitionKey, out var resident );
+			var state = !entry.DependenciesValid ? VoxelGpuDebugBlockState.Deferred : published ? VoxelGpuDebugBlockState.Resident : IsPending( transitionKey ) || entry.Pending ? VoxelGpuDebugBlockState.Pending : IsBlocked( transitionKey ) ? VoxelGpuDebugBlockState.Deferred : VoxelGpuDebugBlockState.Missing;
+			if ( published )
 			{
 				vertexOffset = checked( (int)resident.Descriptor.VertexOffset );
 				vertexCapacity = resident.Allocation.Vertices.Count;
@@ -442,13 +446,36 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_pool.CapacityBytes,
 			Sandbox.Diagnostics.PerformanceStats.GcPause,
 			Sandbox.Diagnostics.PerformanceStats.BytesAllocated ) );
+		if ( _revisionEventHistory.Count > 0 ) RefreshStructuredDebugReport();
 	}
 
-	private void RefreshStructuredDebugReport( string state )
+	private void RecordRevisionEvent( string state )
+	{
+		_latestRevisionEventState = state;
+		_latestRevisionEventJson = BuildRevisionEventJson( state );
+		if ( _revisionEventHistory.Count >= 64 ) _revisionEventHistory.RemoveAt( 0 );
+		_revisionEventHistory.Add( _latestRevisionEventJson );
+		RefreshStructuredDebugReport();
+	}
+
+	private string BuildRevisionEventJson( string state )
+	{
+		var builder = new System.Text.StringBuilder( 512 );
+		AppendRevisionEventJson( builder, state );
+		return builder.ToString();
+	}
+
+	private void RefreshStructuredDebugReport()
 	{
 		var builder = new System.Text.StringBuilder( 8192 );
-		builder.Append( "{\"revision_event\":" );
-		AppendRevisionEventJson( builder, state );
+		builder.Append( "{\"revision_event\":" ).Append( _latestRevisionEventJson );
+		builder.Append( ",\"revision_history\":[" );
+		for ( var eventIndex = 0; eventIndex < _revisionEventHistory.Count; eventIndex++ )
+		{
+			if ( eventIndex != 0 ) builder.Append( ',' );
+			builder.Append( _revisionEventHistory[eventIndex] );
+		}
+		builder.Append( "]" );
 		builder.Append( ",\"levels\":[" );
 		if ( _clipboxPlanner is not null )
 		{
@@ -466,6 +493,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		builder.Append( ",\"active_command_lists_per_pass\":{\"depth\":" ).Append( _renderer.DepthPrepassCommandListCount ).Append( ",\"opaque\":" ).Append( _renderer.OpaqueCommandListCount ).Append( "}" );
 		builder.Append( ",\"commands_per_submission\":" ).Append( _renderer.CommandsPerSubmission );
 		builder.Append( ",\"argument_upload_bytes\":" ).Append( _renderer.LastArgumentUploadBytes );
+		builder.Append( ",\"resident_upload_bytes\":0" );
 		builder.Append( ",\"culling_cpu_ms\":" ).Append( Number( _renderer.LastCullingMilliseconds ) );
 		builder.Append( ",\"argument_build_cpu_ms\":" ).Append( Number( _renderer.LastArgumentBuildMilliseconds ) );
 		builder.Append( ",\"terrain_depth_gpu_ms\":null,\"terrain_opaque_gpu_ms\":null}" );
@@ -478,7 +506,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		builder.Append( ",\"count_gpu_ms\":null,\"emit_gpu_ms\":null" );
 		builder.Append( ",\"count_readback_latency_ms\":" ).Append( Number( _diagnostics.CountReadbackAverageMilliseconds ) );
 		builder.Append( ",\"generation_mismatch_rejects\":" ).Append( _diagnostics.TransitionStaleSchedulerRejections + _diagnostics.TransitionStaleDependencyRejections );
-		builder.Append( ",\"coherence_wait_ms\":" ).Append( state == "committed" && _clipboxRevisionPlannedTimestamp != 0 ? Number( System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds ) : "null" ).Append( "}" );
+		builder.Append( ",\"coherence_wait_ms\":" ).Append( _latestRevisionEventState == "committed" && _clipboxRevisionPlannedTimestamp != 0 ? Number( System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds ) : "null" ).Append( "}" );
 		builder.Append( ",\"memory\":{\"regular_scratch_bytes\":" ).Append( _scratchRing.Sum( scratch => scratch.CapacityBytes ) );
 		builder.Append( ",\"transition_scratch_bytes\":" ).Append( _transitionScratch.CapacityBytes );
 		builder.Append( ",\"vertex_pool_used_bytes\":" ).Append( (long)_pool.UsedVertices * 44 );
@@ -652,7 +680,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ClipboxPendingRevisionCount = 0;
 		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
-		RefreshStructuredDebugReport( "committed" );
+		RecordRevisionEvent( "committed" );
 		Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
 	}
 

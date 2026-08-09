@@ -60,7 +60,7 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 | Slice | Status at document creation |
 |---|---|
 | Phase 3 fixed-LOD GPU terrain | Verified baseline |
-| 4R-0 baseline restoration and archive | Next |
+| 4R-0 baseline restoration and archive | Verified; the first attempt is preserved on `archive/phase4-attempt-1`, the rebuild branch is based on the verified runtime, and clean revision-tagged corpus output is retained |
 | 4R-1 mathematical clipbox planner | Verified; standalone proof, live editor integration, and clean suite v20 runtime gate passed |
 | 4R-2 renderer-capacity proof | Verified; standalone proof, live editor integration, and clean suite v20 runtime gate passed |
 | 4R-3 regular two-level clipbox | Verified; static integration, live compiler, and clean suite v20 runtime gates passed |
@@ -1471,7 +1471,7 @@ For any frame over 16.67, 33, or 50 ms, preserve a bounded history containing:
 
 Do not synchronously print a large hitch trace.
 
-The runtime implementation exposes this report through `VoxelManager.GpuTerrainStructuredDebugReport`. It is cached at planned and committed revisions, bounded to 32 hitch entries, and persisted with each GPU clipbox scenario in the JSON, JSONL, CSV, Markdown, and HTML benchmark corpus. Values the engine does not expose as measured timings or classifications remain `null`; they are never synthesized.
+The runtime implementation exposes this report through `VoxelManager.GpuTerrainStructuredDebugReport`. It is cached at planned and committed revisions, retains a bounded history of those structured events, keeps up to 32 hitch entries, and is persisted with each GPU clipbox scenario in the JSON, JSONL, CSV, Markdown, and HTML benchmark corpus. Values the engine does not expose as measured timings or classifications remain `null`; they are never synthesized. GPU-generated resident meshes report zero CPU resident-upload bytes and identify their persistent pool ranges instead.
 
 ---
 
