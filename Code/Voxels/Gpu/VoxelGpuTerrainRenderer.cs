@@ -128,7 +128,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		for ( var index = 0; index < publishedCount; index++ )
 		{
 			var entry = _residentSnapshot[index];
-			if ( entry.Descriptor.IndexCount == 0 ) continue;
+			if ( !entry.Renderable || entry.Descriptor.IndexCount == 0 ) continue;
 			if ( entry.Key.IsTransition ) publishedRenderableTransitionCount++;
 			else publishedRenderableRegularCount++;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );

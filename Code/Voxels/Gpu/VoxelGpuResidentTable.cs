@@ -71,12 +71,12 @@ internal sealed class VoxelGpuResidentTable
 			if ( _freeSlots.Count == 0 ) return false;
 			slot = _freeSlots.Pop();
 			_slotsByKey.Add( key, slot );
-			_entries[slot] = new ResidentEntry( key, generation, default, default, false );
+			_entries[slot] = new ResidentEntry( key, generation, default, default, false, false );
 			return true;
 		}
 	}
 
-	public bool TryPublish( int slot, VoxelVisualBlockKey key, uint generation, VoxelGpuAllocationHandle allocation, VoxelGpuResidentDescriptor descriptor, out VoxelGpuAllocationHandle replaced )
+	public bool TryPublish( int slot, VoxelVisualBlockKey key, uint generation, VoxelGpuAllocationHandle allocation, VoxelGpuResidentDescriptor descriptor, bool renderable, out VoxelGpuAllocationHandle replaced )
 	{
 		lock ( _sync )
 		{
@@ -86,7 +86,19 @@ internal sealed class VoxelGpuResidentTable
 			if ( entry.Key != key || generation < entry.Generation ) return false;
 			if ( entry.Published ) replaced = entry.Allocation;
 			else _publishedCount++;
-			_entries[slot] = new ResidentEntry( key, generation, allocation, descriptor, true );
+			_entries[slot] = new ResidentEntry( key, generation, allocation, descriptor, renderable, true );
+			return true;
+		}
+	}
+
+	public bool SetRenderable( VoxelVisualBlockKey key, bool renderable )
+	{
+		lock ( _sync )
+		{
+			if ( !_slotsByKey.TryGetValue( key, out var slot ) ) return false;
+			var entry = _entries[slot];
+			if ( !entry.Published || entry.Renderable == renderable ) return false;
+			_entries[slot] = entry with { Renderable = renderable };
 			return true;
 		}
 	}
@@ -148,5 +160,6 @@ internal sealed class VoxelGpuResidentTable
 		uint Generation,
 		VoxelGpuAllocationHandle Allocation,
 		VoxelGpuResidentDescriptor Descriptor,
+		bool Renderable,
 		bool Published );
 }

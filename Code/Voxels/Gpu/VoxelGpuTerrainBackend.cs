@@ -678,6 +678,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			if ( !metadata.DependenciesValid || !_residents.TryGetPublished( transitionVisualKey, out _ ) || !_publishedTransitionDependencies.TryGetValue( transitionVisualKey, out var publishedDependency ) || publishedDependency != metadata.Key ) return;
 		}
 
+		SetClipboxRenderOwnership();
 		_clipboxPlanner.Commit();
 		_clipboxTransitions.Commit();
 		_clipboxRevisionPending = false;
@@ -696,6 +697,19 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		RecordRevisionEvent( "committed" );
 		Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
 	}
+	private void SetClipboxRenderOwnership()
+	{
+		foreach ( var assignment in _clipboxPlanner.CurrentSlots )
+			if ( assignment.Active ) _residents.SetRenderable( assignment.Key, false );
+		foreach ( var assignment in _clipboxPlanner.CurrentTransitions )
+			if ( assignment.Active ) _residents.SetRenderable( VoxelClipboxTransitionPlanner.GetVisualKey( assignment ), false );
+		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
+			if ( assignment.Active ) _residents.SetRenderable( assignment.Key, true );
+		foreach ( var assignment in _clipboxPlanner.DesiredTransitions )
+			if ( assignment.Active ) _residents.SetRenderable( VoxelClipboxTransitionPlanner.GetVisualKey( assignment ), true );
+		_renderer.MarkDirty();
+	}
+
 
 	private void SubmitCountBatches()
 	{
@@ -829,7 +843,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			if ( countResult.VertexCount == 0 || countResult.IndexCount == 0 )
 			{
 				RemovePendingTransitionRequest( scheduled.Key );
-				_residents.TryPublish( _transitionBatch.Slots[index], scheduled.Key, scheduled.Generation, default, new VoxelGpuResidentDescriptor { Generation = scheduled.Generation }, out _ );
+				_residents.TryPublish( _transitionBatch.Slots[index], scheduled.Key, scheduled.Generation, default, new VoxelGpuResidentDescriptor { Generation = scheduled.Generation }, _clipboxPlanner is null, out _ );
 				_publishedTransitionDependencies[scheduled.Key] = _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId].Key;
 				continue;
 			}
@@ -1025,7 +1039,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				}
 				var current = schedulerCurrent && dependencyCurrent;
 				if ( !current ||
-					!_residents.TryPublish( resident.Slot, resident.Key, resident.Generation, resident.Allocation, resident.Descriptor, out var replaced ) )
+					!_residents.TryPublish( resident.Slot, resident.Key, resident.Generation, resident.Allocation, resident.Descriptor, _clipboxPlanner is null, out var replaced ) )
 				{
 					if ( resident.Key.IsTransition && schedulerCurrent ) RetryTransitionRequest( resident.Key );
 					else if ( resident.Key.IsTransition ) _residents.CancelUnpublishedReservation( resident.Key, resident.Generation );
