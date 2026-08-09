@@ -9,6 +9,7 @@ internal sealed class VoxelLodTransitionResidency
 	public int PublishedCount => _published.Count;
 	public IReadOnlyCollection<VoxelLodTransitionDescriptor> Entering => _entering;
 	public IReadOnlyCollection<VoxelLodTransitionDescriptor> Leaving => _leaving;
+	public IReadOnlyCollection<VoxelLodTransitionDescriptor> Published => _published;
 
 	public void Update( IEnumerable<VoxelLodTransitionDescriptor> transitions )
 	{

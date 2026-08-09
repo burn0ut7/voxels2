@@ -45,12 +45,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<BatchTimingEvent> _batchTimingHistory = new( MaximumBatchTimingHistory );
 	private readonly Dictionary<Vector3Int, double> _initialSdfGenerationMilliseconds = new();
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
+	private VoxelGpuTransitionProof _gpuTransitionProof;
 	private VoxelGpuTerrainBackend _gpuTerrainBackend;
 	private VoxelClipboxLodPlanner _gpuClipboxLodPlanner;
 	private readonly VoxelLodTransitionResidency _gpuTransitionResidency = new();
 	private bool _gpuEditUnavailableWarningLogged;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
+	private VoxelGpuTransitionProofResult _lastGpuTransitionProofResult;
+	private bool _hasGpuTransitionProofResult;
 	private long _nextChunkTimingSequence;
 	private long _nextBatchTimingSequence;
 	private long _cpuBatchStartTimestamp;
@@ -199,6 +202,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public bool RequestGpuTransvoxelProof { get; set; }
 
 	[Property, Group( "Diagnostics" )]
+	public bool RequestGpuTransitionProof { get; set; }
+
+	[Property, Group( "Diagnostics" )]
 	public bool RequestGpuTerrainDiagnosticsLog { get; set; }
 
 	[Property, Group( "Diagnostics" )]
@@ -221,6 +227,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal bool IsGpuTransvoxelProofRunning => _gpuTransvoxelProof?.IsRunning == true;
 	internal bool HasGpuTransvoxelProofResult => _hasGpuTransvoxelProofResult;
 	internal VoxelGpuTransvoxelProofResult LastGpuTransvoxelProofResult => _lastGpuTransvoxelProofResult;
+	internal bool IsGpuTransitionProofRunning => _gpuTransitionProof?.IsRunning == true;
+	internal bool HasGpuTransitionProofResult => _hasGpuTransitionProofResult;
+	internal VoxelGpuTransitionProofResult LastGpuTransitionProofResult => _lastGpuTransitionProofResult;
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
 	public bool IsTerrainSettled => (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod || AreDesiredChunksLoaded()) && _chunkStreamingGenerationQueue.Count == 0 &&
@@ -320,10 +329,16 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
+		UpdateGpuTransitionProof();
 		if ( RequestGpuTransvoxelProof )
 		{
 			RequestGpuTransvoxelProof = false;
 			RunGpuTransvoxelProof();
+		}
+		if ( RequestGpuTransitionProof )
+		{
+			RequestGpuTransitionProof = false;
+			RunGpuTransitionProof();
 		}
 		if ( CaptureWorldConfiguration() != _generationConfiguration )
 		{
@@ -358,6 +373,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
 		DisposeGpuTransvoxelProof();
+		DisposeGpuTransitionProof();
 		DisposeGpuTerrainBackend();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -368,6 +384,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	protected override void OnDestroy()
 	{
 		DisposeGpuTransvoxelProof();
+		DisposeGpuTransitionProof();
 		DisposeGpuTerrainBackend();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -790,6 +807,53 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		_gpuTransvoxelProof?.Dispose();
 		_gpuTransvoxelProof = null;
+	}
+
+	[Button]
+	public void RunGpuTransitionProof()
+	{
+		DisposeGpuTransitionProof();
+		_hasGpuTransitionProofResult = false;
+		_lastGpuTransitionProofResult = default;
+		if ( Application.IsDedicatedServer )
+		{
+			Log.Error( "Voxel GPU transition proof requires a rendering client." );
+			return;
+		}
+		if ( Scene.Camera is null )
+		{
+			Log.Error( "Voxel GPU transition proof requires an active scene camera." );
+			return;
+		}
+		try
+		{
+			_gpuTransitionProof = new VoxelGpuTransitionProof( Scene.SceneWorld );
+			_gpuTransitionProof.Run();
+			Log.Info( "Voxel GPU transition-cell emission proof scheduled: cases=512, lookup=Transvoxel, output=GPU table-driven topology." );
+		}
+		catch ( System.Exception exception )
+		{
+			DisposeGpuTransitionProof();
+			_lastGpuTransitionProofResult = new VoxelGpuTransitionProofResult( false, exception.Message, 512, 0, 0, 0.0, 0.0 );
+			_hasGpuTransitionProofResult = true;
+			Log.Error( $"Voxel GPU transition proof failed to start: {exception.Message}" );
+		}
+	}
+
+	public void ClearGpuTransitionProof() => DisposeGpuTransitionProof();
+
+	private void UpdateGpuTransitionProof()
+	{
+		if ( _gpuTransitionProof is null || !_gpuTransitionProof.TryTakeResult( out var result ) ) return;
+		_lastGpuTransitionProofResult = result;
+		_hasGpuTransitionProofResult = true;
+		Log.Info( $"Voxel GPU transition-cell emission proof: result={(result.Passed ? "PASS" : "FAIL")}, cases={result.Cases:N0}, vertices={result.EmittedVertices:N0}, indices={result.EmittedIndices:N0}, submission={result.SubmissionMilliseconds:F3}ms, completion={result.CompletionMilliseconds:F3}ms, validation={result.Failure}." );
+	}
+
+	private void DisposeGpuTransitionProof()
+	{
+		_gpuTransitionProof?.Dispose();
+		_gpuTransitionProof = null;
 	}
 
 	public VoxelChunk GenerateChunk( Vector3Int coordinate )
@@ -1653,6 +1717,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_gpuStreamingObservers.Clear();
 		PopulateStreamingObserverChunks( _gpuStreamingObservers );
 		var observersChanged = !_gpuStreamingObserversInitialized || !AreObserverChunksEqual( _gpuStreamingObservers );
+		if ( !observersChanged && GpuClipboxLodEnabled && _gpuTerrainBackend.AreKeysPublished( _gpuDesiredKeyScratch ) &&
+			_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch ) )
+			_gpuTerrainBackend.UpdateTransitions( _gpuTransitionResidency.Published, GpuTerrainRuleVersion );
 		// The observer is already quantized to chunk coordinates, so unchanged
 		// observers need no desired-set work. When a boundary is crossed, update
 		// in this frame rather than introducing a fixed streaming polling delay.
@@ -1668,8 +1735,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			// A seam replacement is not visible until every regular dependency has
 			// actually published into the resident table. Desired keys alone are
 			// insufficient because count/emit work is asynchronous.
-			if ( _gpuTerrainBackend.AreKeysPublished( _gpuDesiredKeyScratch ) )
-				_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch );
+			if ( _gpuTerrainBackend.AreKeysPublished( _gpuDesiredKeyScratch ) &&
+				_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch ) )
+				_gpuTerrainBackend.UpdateTransitions( _gpuTransitionResidency.Published, GpuTerrainRuleVersion );
 			if ( _gpuEnteringKeyScratch.Count == 0 && _gpuLeavingKeyScratch.Count == 0 ) return;
 			_gpuEnteringKeyScratch.Sort( (left, right) => GetStreamingKeyPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingKeyPriority( right, _gpuStreamingObservers ) ) );
 			_gpuTerrainBackend.UpdateDesiredDelta( _gpuEnteringKeyScratch, _gpuLeavingKeyScratch );
