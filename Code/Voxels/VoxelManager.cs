@@ -139,6 +139,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Rendering" ), Range( 0, 1 )]
 	public int GpuTerrainRuleVersion { get; set; }
 
+	[Property, Group( "Rendering" ), Range( 0, 4 )]
+	public int GpuFrustumPaddingChunks { get; set; } = 1;
+
 	[Property, Group( "Meshing" ), Range( 1, MaximumConcurrentCpuChunkBuilds )]
 	public int CpuChunkBuildConcurrency { get; set; } = 4;
 
@@ -260,6 +263,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuVertexPoolCapacity = System.Math.Clamp( GpuVertexPoolCapacity, 65536, 16777216 );
 		GpuIndexPoolCapacity = System.Math.Clamp( GpuIndexPoolCapacity, 196608, 50331648 );
 		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
+		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
 		CollisionBuildConcurrency = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
@@ -597,11 +601,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				ChunkSize,
 				VoxelSize,
 				SdfClampDistance,
+				GpuFrustumPaddingChunks,
 				System.Math.Max( 1, residentCapacity ),
 				GpuVertexPoolCapacity,
 				GpuIndexPoolCapacity );
 			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
-			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{

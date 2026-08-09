@@ -6,6 +6,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainDiagnosticCounters _diagnostics;
+	private readonly float _cullingPaddingWorld;
 	private readonly GpuBuffer<VoxelGpuResidentDescriptor> _residentBuffer;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
 	private readonly Sandbox.Rendering.CommandList[] _depthCommandLists;
@@ -26,13 +27,14 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	public int DepthPrepassCommandListCount => _attachedDepthCommandListCount;
 	public int OpaqueCommandListCount => _attachedOpaqueCommandListCount;
 
-	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics )
+	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, float cullingPaddingWorld )
 		: base( world )
 	{
 		_camera = camera ?? throw new System.ArgumentNullException( nameof( camera ) );
 		_pool = pool ?? throw new System.ArgumentNullException( nameof( pool ) );
 		_residents = residents ?? throw new System.ArgumentNullException( nameof( residents ) );
 		_diagnostics = diagnostics ?? throw new System.ArgumentNullException( nameof( diagnostics ) );
+		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
 		_material = Material.FromShader( ShaderName );
 		_residentBuffer = new GpuBuffer<VoxelGpuResidentDescriptor>( residents.Capacity, GpuBuffer.UsageFlags.Structured, "Voxel GPU Residents" );
 		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( residents.Capacity,
@@ -93,7 +95,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			if ( entry.Descriptor.IndexCount == 0 ) continue;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );
 			var boundsMax = new Vector3( entry.Descriptor.BoundsMax.x, entry.Descriptor.BoundsMax.y, entry.Descriptor.BoundsMax.z );
-			var bounds = new BBox( boundsMin, boundsMax );
+			var padding = Vector3.One * _cullingPaddingWorld;
+			var bounds = new BBox( boundsMin - padding, boundsMax + padding );
 			if ( !frustum.IsInside( bounds, true ) ) continue;
 			arguments.Add( new GpuBuffer.IndirectDrawIndexedArguments
 			{
