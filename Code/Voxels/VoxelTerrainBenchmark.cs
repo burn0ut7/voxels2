@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 12;
+	private const int SuiteVersion = 13;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
@@ -244,7 +244,9 @@ public sealed class VoxelTerrainBenchmark : Component
 				var idleTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Idle.GetMetric( 1 );
 				var asyncTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Async.GetMetric( 1 );
 				var gcTiming = Sandbox.Diagnostics.PerformanceStats.Timings.GcPause.GetMetric( 1 );
-				Log.Info( $"Voxel terrain stutter diagnostic: frameMs={Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, gpuPendingCount={terrain.PendingCountBatches}, gpuPendingEmit={terrain.PendingEmitBatches}, gpuResidents={terrain.ResidentBlocks}/{terrain.DesiredBlocks}, gpuVisible={terrain.VisibleDrawCommands}, gpuReadbackMs={terrain.CountReadbackAverageMilliseconds:F2}, gpuBatchP95Ms={terrain.BatchCompletion.P95Milliseconds:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
+				var frameMilliseconds = Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0;
+				var unaccountedFrameMilliseconds = VoxelManager.ComputeUnaccountedFrameMilliseconds( frameMilliseconds, updateTiming.Max, renderTiming.Max, physicsTiming.Max, idleTiming.Max, asyncTiming.Max, gcTiming.Max );
+				Log.Info( $"Voxel terrain stutter diagnostic: frameMs={frameMilliseconds:F2}, unaccountedFrameMs={unaccountedFrameMilliseconds:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, gpuPendingCount={terrain.PendingCountBatches}, gpuPendingEmit={terrain.PendingEmitBatches}, gpuResidents={terrain.ResidentBlocks}/{terrain.DesiredBlocks}, gpuVisible={terrain.VisibleDrawCommands}, gpuReadbackMs={terrain.CountReadbackAverageMilliseconds:F2}, gpuBatchP95Ms={terrain.BatchCompletion.P95Milliseconds:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
 			}
 		}
 		if ( _manager?.HasPartialVisualEditPublication == true ||
@@ -1160,7 +1162,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private void AppendHistoryCsv()
 	{
 		var comparisonHeader = string.Join( ",", ComparisonMetrics.Select( metric => $"change_{metric.Name}_pct" ) );
-		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,working_tree_dirty,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,visual_coherence_violation_frames,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms,gpu_transvoxel_available,gpu_transvoxel_passed,gpu_transvoxel_failure,gpu_transvoxel_vertices,gpu_transvoxel_indices,gpu_transvoxel_active_cells,gpu_transvoxel_overflow_attempts,gpu_transvoxel_buffer_bytes,gpu_transvoxel_submission_ms,gpu_transvoxel_completion_ms,gpu_transvoxel_readback_ms,gpu_transvoxel_batch_size,gpu_transvoxel_surface_blocks,gpu_transvoxel_dispatches,gpu_transvoxel_gpu_publication_passed,gpu_transvoxel_gpu_publication_ms,gpu_transvoxel_cpu_publication_ms," + GpuPhase2BCsvHeader + ",stream_chunks_completed,stream_chunks_fresh,stream_chunks_cached,stream_batches_completed,stream_sdf_generation_avg_ms,stream_sdf_generation_p95_ms,stream_sdf_generation_max_ms,stream_mesh_queue_avg_ms,stream_mesh_queue_p95_ms,stream_mesh_queue_max_ms,stream_snapshot_avg_ms,stream_snapshot_p95_ms,stream_snapshot_max_ms,stream_worker_mesh_avg_ms,stream_worker_mesh_p95_ms,stream_worker_mesh_max_ms,stream_publication_wait_avg_ms,stream_publication_wait_p95_ms,stream_publication_wait_max_ms,stream_upload_avg_ms,stream_upload_p95_ms,stream_upload_max_ms,stream_chunk_ready_avg_ms,stream_chunk_ready_p95_ms,stream_chunk_ready_max_ms,stream_batch_avg_ms,stream_batch_p95_ms,stream_batch_max_ms,configuration_id,comparison_baseline_run_id,comparison_has_baseline,change_max_abs_pct,outlier_detected,outlier_metrics,reproduction_of_run_id,reproduction_status," + comparisonHeader + "," +
+		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,working_tree_dirty,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,visual_coherence_violation_frames,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,unaccounted_frame_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms,gpu_transvoxel_available,gpu_transvoxel_passed,gpu_transvoxel_failure,gpu_transvoxel_vertices,gpu_transvoxel_indices,gpu_transvoxel_active_cells,gpu_transvoxel_overflow_attempts,gpu_transvoxel_buffer_bytes,gpu_transvoxel_submission_ms,gpu_transvoxel_completion_ms,gpu_transvoxel_readback_ms,gpu_transvoxel_batch_size,gpu_transvoxel_surface_blocks,gpu_transvoxel_dispatches,gpu_transvoxel_gpu_publication_passed,gpu_transvoxel_gpu_publication_ms,gpu_transvoxel_cpu_publication_ms," + GpuPhase2BCsvHeader + ",stream_chunks_completed,stream_chunks_fresh,stream_chunks_cached,stream_batches_completed,stream_sdf_generation_avg_ms,stream_sdf_generation_p95_ms,stream_sdf_generation_max_ms,stream_mesh_queue_avg_ms,stream_mesh_queue_p95_ms,stream_mesh_queue_max_ms,stream_snapshot_avg_ms,stream_snapshot_p95_ms,stream_snapshot_max_ms,stream_worker_mesh_avg_ms,stream_worker_mesh_p95_ms,stream_worker_mesh_max_ms,stream_publication_wait_avg_ms,stream_publication_wait_p95_ms,stream_publication_wait_max_ms,stream_upload_avg_ms,stream_upload_p95_ms,stream_upload_max_ms,stream_chunk_ready_avg_ms,stream_chunk_ready_p95_ms,stream_chunk_ready_max_ms,stream_batch_avg_ms,stream_batch_p95_ms,stream_batch_max_ms,configuration_id,comparison_baseline_run_id,comparison_has_baseline,change_max_abs_pct,outlier_detected,outlier_metrics,reproduction_of_run_id,reproduction_status," + comparisonHeader + "," +
 			string.Join( ",", default(VoxelCallCountSnapshot).Enumerate().Select( entry => CallCountKey( entry.Name ) ) );
 		var builder = new System.Text.StringBuilder();
 		if ( FileSystem.Data.FileExists( HistoryCsvPath ) )
@@ -1268,15 +1270,16 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine( $"- Outlier rule: absolute change `>= {MajorOutlierThresholdPercent:F1}%` on stable comparison metrics triggers one complete-suite reproduction run" );
 		if ( _isReproductionRun ) builder.AppendLine( $"- Reproduction of run: `{_reproductionOfRunId}`" );
 		builder.AppendLine( $"- Worst frame p95/max: `{worstP95:F2} / {worstMax:F2} ms`" );
+		builder.AppendLine( $"- Worst unaccounted frame time: `{(_results.Count > 0 ? _results.Max( result => result.UnaccountedFrameMaximumMilliseconds ) : 0.0):F2} ms`" );
 		if ( failure is not null ) builder.AppendLine( $"- Failure: `{failure}`" );
 		builder.AppendLine();
 		builder.AppendLine( "## Scenario overview" );
 		builder.AppendLine();
-		builder.AppendLine( "| Scenario | Result | Average FPS | 1% low | 0.1% low | Frame p95 / max | Stutters | Edits | Rebuilt chunks | Coherence violations |" );
-		builder.AppendLine( "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|" );
+		builder.AppendLine( "| Scenario | Result | Average FPS | 1% low | 0.1% low | Frame p95 / max | Unaccounted max | Stutters | Edits | Rebuilt chunks | Coherence violations |" );
+		builder.AppendLine( "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" );
 		foreach ( var result in _results )
 		{
-			builder.AppendLine( $"| {result.Name} | {(result.Passed ? "PASS" : "FAIL")} | {result.AverageFramesPerSecond:F1} | {result.OnePercentLowFramesPerSecond:F1} | {result.PointOnePercentLowFramesPerSecond:F1} | {result.FrameP95Milliseconds:F2} / {result.FrameMaximumMilliseconds:F2} ms | {result.StutterEvents:N0} | {result.EditCount:N0} | {result.Diagnostics.VisualBatchBuiltChunks:N0} | {result.VisualCoherenceViolationFrames:N0} |" );
+			builder.AppendLine( $"| {result.Name} | {(result.Passed ? "PASS" : "FAIL")} | {result.AverageFramesPerSecond:F1} | {result.OnePercentLowFramesPerSecond:F1} | {result.PointOnePercentLowFramesPerSecond:F1} | {result.FrameP95Milliseconds:F2} / {result.FrameMaximumMilliseconds:F2} ms | {result.UnaccountedFrameMaximumMilliseconds:F2} ms | {result.StutterEvents:N0} | {result.EditCount:N0} | {result.Diagnostics.VisualBatchBuiltChunks:N0} | {result.VisualCoherenceViolationFrames:N0} |" );
 		}
 		builder.AppendLine();
 		builder.AppendLine( "## Persistent GPU terrain Phase 2B" );
@@ -1434,7 +1437,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		return "{" +
 			$"\"run_id\":\"{Json( _runId )}\",\"suite_version\":{SuiteVersion},\"suite_complete\":{IsSuiteComplete.ToString().ToLowerInvariant()},\"timestamp_utc\":\"{System.DateTime.UtcNow:O}\",\"revision\":\"{Json( Revision )}\",\"working_tree_dirty\":{WorkingTreeDirty.ToString().ToLowerInvariant()},\"engine_version\":\"{Json( Application.Version )}\"," +
 			$"\"cpu\":\"{Json( Sandbox.Engine.SystemInfo.ProcessorName )}\",\"gpu\":\"{Json( Sandbox.Engine.SystemInfo.Gpu )}\",\"scenario\":\"{Json( result.Name )}\",\"description\":\"{Json( result.Description )}\",\"passed\":{result.Passed.ToString().ToLowerInvariant()}," +
-			$"\"edits\":{result.EditCount},\"changed_chunk_events\":{result.ChangedChunkEvents},\"visual_coherence_violation_frames\":{result.VisualCoherenceViolationFrames},\"elapsed_ms\":{Number( result.ElapsedMilliseconds )},\"frames\":{result.FrameCount},\"avg_fps\":{Number( result.AverageFramesPerSecond )},\"one_percent_low_fps\":{Number( result.OnePercentLowFramesPerSecond )},\"point_one_percent_low_fps\":{Number( result.PointOnePercentLowFramesPerSecond )},\"min_fps\":{Number( result.MinimumFramesPerSecond )},\"frame_avg_ms\":{Number( result.FrameAverageMilliseconds )},\"frame_stddev_ms\":{Number( result.FrameStandardDeviationMilliseconds )},\"frame_p50_ms\":{Number( result.FrameP50Milliseconds )},\"frame_p95_ms\":{Number( result.FrameP95Milliseconds )},\"frame_p99_ms\":{Number( result.FrameP99Milliseconds )},\"frame_p999_ms\":{Number( result.FrameP999Milliseconds )},\"frame_max_ms\":{Number( result.FrameMaximumMilliseconds )},\"frames_over_16ms\":{result.FramesOver16Milliseconds},\"frames_over_33ms\":{result.FramesOver33Milliseconds},\"frames_over_50ms\":{result.FramesOver50Milliseconds},\"frames_over_100ms\":{result.FramesOver100Milliseconds},\"stutter_events\":{result.StutterEvents},\"longest_stutter_frames\":{result.LongestStutterFrames}," +
+			$"\"edits\":{result.EditCount},\"changed_chunk_events\":{result.ChangedChunkEvents},\"visual_coherence_violation_frames\":{result.VisualCoherenceViolationFrames},\"elapsed_ms\":{Number( result.ElapsedMilliseconds )},\"frames\":{result.FrameCount},\"avg_fps\":{Number( result.AverageFramesPerSecond )},\"one_percent_low_fps\":{Number( result.OnePercentLowFramesPerSecond )},\"point_one_percent_low_fps\":{Number( result.PointOnePercentLowFramesPerSecond )},\"min_fps\":{Number( result.MinimumFramesPerSecond )},\"frame_avg_ms\":{Number( result.FrameAverageMilliseconds )},\"frame_stddev_ms\":{Number( result.FrameStandardDeviationMilliseconds )},\"frame_p50_ms\":{Number( result.FrameP50Milliseconds )},\"frame_p95_ms\":{Number( result.FrameP95Milliseconds )},\"frame_p99_ms\":{Number( result.FrameP99Milliseconds )},\"frame_p999_ms\":{Number( result.FrameP999Milliseconds )},\"frame_max_ms\":{Number( result.FrameMaximumMilliseconds )},\"unaccounted_frame_ms\":{Number( result.UnaccountedFrameMaximumMilliseconds )},\"frames_over_16ms\":{result.FramesOver16Milliseconds},\"frames_over_33ms\":{result.FramesOver33Milliseconds},\"frames_over_50ms\":{result.FramesOver50Milliseconds},\"frames_over_100ms\":{result.FramesOver100Milliseconds},\"stutter_events\":{result.StutterEvents},\"longest_stutter_frames\":{result.LongestStutterFrames}," +
 			$"\"gpu_avg_ms\":{Number( result.GpuAverageMilliseconds )},\"gpu_p95_ms\":{Number( result.GpuP95Milliseconds )},\"gpu_max_ms\":{Number( result.GpuMaximumMilliseconds )},\"allocated_bytes\":{result.AllocatedBytes},\"gc_pause_ms\":{Number( result.GcPauseMilliseconds )},\"gen0_gc\":{result.Gen0Collections},\"gen1_gc\":{result.Gen1Collections},\"gen2_gc\":{result.Gen2Collections},\"exceptions\":{result.Exceptions},\"peak_memory_bytes\":{result.PeakMemoryBytes}," +
 			$"\"edit_call_avg_ms\":{Number( result.EditCallAverageMilliseconds )},\"edit_call_p95_ms\":{Number( result.EditCallP95Milliseconds )},\"edit_call_max_ms\":{Number( result.EditCallMaximumMilliseconds )},\"post_edit_settle_ms\":{Number( result.PostEditSettleMilliseconds )},\"edit_throughput_per_second\":{Number( result.EditThroughputPerSecond )}," +
 			$"\"update_avg_ms\":{Number( result.UpdateAverageMilliseconds )},\"update_max_ms\":{Number( result.UpdateMaximumMilliseconds )},\"render_avg_ms\":{Number( result.RenderAverageMilliseconds )},\"render_max_ms\":{Number( result.RenderMaximumMilliseconds )},\"physics_avg_ms\":{Number( result.PhysicsAverageMilliseconds )},\"physics_max_ms\":{Number( result.PhysicsMaximumMilliseconds )},\"network_avg_ms\":{Number( result.NetworkAverageMilliseconds )},\"network_max_ms\":{Number( result.NetworkMaximumMilliseconds )},\"network_out_bytes_per_second\":{Number( result.NetworkOutBytesPerSecondAverage )},\"network_in_bytes_per_second\":{Number( result.NetworkInBytesPerSecondAverage )},\"network_ping_ms\":{Number( result.NetworkPingMillisecondsAverage )},\"maximum_connections\":{result.MaximumConnections},\"messages_sent\":{result.MessagesSent},\"messages_received\":{result.MessagesReceived}," +
@@ -1459,7 +1462,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		var comparison = GetComparison( result );
 		var baseRow = string.Join( ",",
 			Csv( _runId ), SuiteVersion, IsSuiteComplete, Csv( System.DateTime.UtcNow.ToString( "O" ) ), Csv( Revision ), WorkingTreeDirty, Csv( Application.Version ), Csv( Sandbox.Engine.SystemInfo.ProcessorName ), Csv( Sandbox.Engine.SystemInfo.Gpu ), Csv( result.Name ), Csv( result.Description ), result.Passed, result.EditCount, result.ChangedChunkEvents, result.VisualCoherenceViolationFrames,
-			Number( result.ElapsedMilliseconds ), result.FrameCount, Number( result.AverageFramesPerSecond ), Number( result.OnePercentLowFramesPerSecond ), Number( result.PointOnePercentLowFramesPerSecond ), Number( result.MinimumFramesPerSecond ), Number( result.FrameAverageMilliseconds ), Number( result.FrameStandardDeviationMilliseconds ), Number( result.FrameP50Milliseconds ), Number( result.FrameP95Milliseconds ), Number( result.FrameP99Milliseconds ), Number( result.FrameP999Milliseconds ), Number( result.FrameMaximumMilliseconds ), result.FramesOver16Milliseconds, result.FramesOver33Milliseconds, result.FramesOver50Milliseconds, result.FramesOver100Milliseconds, result.StutterEvents, result.LongestStutterFrames,
+			Number( result.ElapsedMilliseconds ), result.FrameCount, Number( result.AverageFramesPerSecond ), Number( result.OnePercentLowFramesPerSecond ), Number( result.PointOnePercentLowFramesPerSecond ), Number( result.MinimumFramesPerSecond ), Number( result.FrameAverageMilliseconds ), Number( result.FrameStandardDeviationMilliseconds ), Number( result.FrameP50Milliseconds ), Number( result.FrameP95Milliseconds ), Number( result.FrameP99Milliseconds ), Number( result.FrameP999Milliseconds ), Number( result.FrameMaximumMilliseconds ), Number( result.UnaccountedFrameMaximumMilliseconds ), result.FramesOver16Milliseconds, result.FramesOver33Milliseconds, result.FramesOver50Milliseconds, result.FramesOver100Milliseconds, result.StutterEvents, result.LongestStutterFrames,
 			Number( result.GpuAverageMilliseconds ), Number( result.GpuP95Milliseconds ), Number( result.GpuMaximumMilliseconds ), Number( result.EditCallAverageMilliseconds ), Number( result.EditCallP95Milliseconds ), Number( result.EditCallMaximumMilliseconds ), Number( result.PostEditSettleMilliseconds ), Number( result.EditThroughputPerSecond ), Number( result.UpdateAverageMilliseconds ), Number( result.UpdateMaximumMilliseconds ), Number( result.RenderAverageMilliseconds ), Number( result.RenderMaximumMilliseconds ), Number( result.PhysicsAverageMilliseconds ), Number( result.PhysicsMaximumMilliseconds ), Number( result.NetworkAverageMilliseconds ), Number( result.NetworkMaximumMilliseconds ), Number( result.NetworkOutBytesPerSecondAverage ), Number( result.NetworkInBytesPerSecondAverage ), Number( result.NetworkPingMillisecondsAverage ), result.MaximumConnections, result.MessagesSent, result.MessagesReceived,
 			result.AllocatedBytes, Number( result.GcPauseMilliseconds ), result.Gen0Collections, result.Gen1Collections, result.Gen2Collections, result.Exceptions, result.PeakMemoryBytes, result.PeakTexturePoolUsedBytes, result.PeakTexturePoolNonEvictableBytes, result.MaximumPendingStreamingRequests, Number( result.DrawCallsAverage ), Number( result.TrianglesRenderedAverage ), Number( result.ObjectsRenderedAverage ), Number( result.MaterialChangesAverage ),
 			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, d.PlayerSafetyActive, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds ),
@@ -1686,6 +1689,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		private ulong _peakTexturePoolNonEvictableBytes;
 		private int _maximumPendingStreamingRequests;
 		private int _stutterDiagnosticCount;
+		private readonly List<double> _unaccountedFrameMilliseconds = new();
 
 		public string Name { get; }
 		public string Description { get; }
@@ -1729,6 +1733,13 @@ public sealed class VoxelTerrainBenchmark : Component
 			_framesOver100Milliseconds += frameMilliseconds >= 100.0 ? 1 : 0;
 			if ( frameMilliseconds >= 33.3333 )
 			{
+				var updateTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Update.GetMetric( 1 );
+				var renderTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Render.GetMetric( 1 );
+				var physicsTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Physics.GetMetric( 1 );
+				var idleTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Idle.GetMetric( 1 );
+				var asyncTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Async.GetMetric( 1 );
+				var gcTiming = Sandbox.Diagnostics.PerformanceStats.Timings.GcPause.GetMetric( 1 );
+				_unaccountedFrameMilliseconds.Add( VoxelManager.ComputeUnaccountedFrameMilliseconds( frameMilliseconds, updateTiming.Max, renderTiming.Max, physicsTiming.Max, idleTiming.Max, asyncTiming.Max, gcTiming.Max ) );
 				if ( _currentStutterFrames == 0 ) _stutterEvents++;
 				_currentStutterFrames++;
 				_longestStutterFrames = System.Math.Max( _longestStutterFrames, _currentStutterFrames );
@@ -1791,6 +1802,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			_frameTimes.Sort();
 			_gpuTimes.Sort();
 			_editCallTimes.Sort();
+			_unaccountedFrameMilliseconds.Sort();
 			var count = _frameTimes.Count;
 			var gpuCount = _gpuTimes.Count;
 			var timingFrames = System.Math.Clamp( count, 1, 4096 );
@@ -1802,6 +1814,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			var frameP99 = Percentile( _frameTimes, 0.99 );
 			var frameP999 = Percentile( _frameTimes, 0.999 );
 			var frameMaximum = count > 0 ? _frameTimes[^1] : 0.0;
+			var unaccountedFrameMaximum = _unaccountedFrameMilliseconds.Count > 0 ? _unaccountedFrameMilliseconds[^1] : 0.0;
 			var scenarioDiagnostics = diagnostics with
 			{
 				VisualBatchBuiltChunks = (int)System.Math.Clamp( diagnostics.TotalVisualBuildsCompleted - _startingDiagnostics.TotalVisualBuildsCompleted, 0, int.MaxValue ),
@@ -1827,6 +1840,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				FrameP99Milliseconds = frameP99,
 				FrameP999Milliseconds = frameP999,
 				FrameMaximumMilliseconds = frameMaximum,
+				UnaccountedFrameMaximumMilliseconds = unaccountedFrameMaximum,
 				FrameStandardDeviationMilliseconds = StandardDeviation( _frameTimes, frameAverage ),
 				AverageFramesPerSecond = ToFramesPerSecond( frameAverage ),
 				OnePercentLowFramesPerSecond = ToFramesPerSecond( frameP99 ),
@@ -1941,6 +1955,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		public double FrameP99Milliseconds { get; init; }
 		public double FrameP999Milliseconds { get; init; }
 		public double FrameMaximumMilliseconds { get; init; }
+		public double UnaccountedFrameMaximumMilliseconds { get; init; }
 		public double FrameStandardDeviationMilliseconds { get; init; }
 		public double AverageFramesPerSecond { get; init; }
 		public double OnePercentLowFramesPerSecond { get; init; }

@@ -1,9 +1,11 @@
-internal readonly record struct VoxelBenchmarkGitIdentity( string Revision, bool WorkingTreeDirty, string CapturedUtc )
+public readonly record struct VoxelBenchmarkGitIdentity( string Revision, bool WorkingTreeDirty, string CapturedUtc )
 {
 	internal const string DataPath = "voxel-terrain-benchmarks/git-identity.json";
+	public static event System.Action RefreshRequested;
 
 	internal static VoxelBenchmarkGitIdentity Load()
 	{
+		RefreshRequested?.Invoke();
 		if ( !FileSystem.Data.FileExists( DataPath ) )
 		{
 			return new VoxelBenchmarkGitIdentity( "unknown", true, string.Empty );
@@ -25,4 +27,5 @@ internal readonly record struct VoxelBenchmarkGitIdentity( string Revision, bool
 			return new VoxelBenchmarkGitIdentity( "unknown", true, string.Empty );
 		}
 	}
+
 }

@@ -1,35 +1,27 @@
 public static class VoxelBenchmarkGitIdentityWriter
 {
 	private const string DataPath = "voxel-terrain-benchmarks/git-identity.json";
-	private static System.DateTime _nextRefreshUtc;
-	private static string _lastIdentity;
 
 	[EditorEvent.Hotload]
-	public static void OnHotload() => Refresh();
-
-	[EditorEvent.Frame]
-	public static void OnFrame()
+	public static void OnHotload()
 	{
-		if ( System.DateTime.UtcNow < _nextRefreshUtc ) return;
-		Refresh();
+		VoxelBenchmarkGitIdentity.RefreshRequested -= RefreshNow;
+		VoxelBenchmarkGitIdentity.RefreshRequested += RefreshNow;
+		RefreshNow();
 	}
 
-	private static void Refresh()
+	private static void RefreshNow()
 	{
-		_nextRefreshUtc = System.DateTime.UtcNow.AddSeconds( 2.0 );
 		var root = Project.Current?.GetRootPath();
 		if ( string.IsNullOrWhiteSpace( root ) ) return;
 
 		var revision = RunGit( root, "rev-parse", "HEAD" ).Trim();
 		if ( revision.Length != 40 ) revision = "unknown";
 		var dirty = RunGit( root, "status", "--porcelain", "--untracked-files=normal" ).Length > 0;
-		var identity = $"{revision}:{dirty}";
-		if ( identity == _lastIdentity ) return;
 		var capturedUtc = System.DateTime.UtcNow.ToString( "O", System.Globalization.CultureInfo.InvariantCulture );
 		var payload = $"{{\"revision\":\"{revision}\",\"working_tree_dirty\":{dirty.ToString().ToLowerInvariant()},\"captured_utc\":\"{capturedUtc}\"}}";
 		Sandbox.FileSystem.Data.CreateDirectory( "voxel-terrain-benchmarks" );
 		Sandbox.FileSystem.Data.WriteAllText( DataPath, payload );
-		_lastIdentity = identity;
 	}
 
 	private static string RunGit( string root, params string[] arguments )

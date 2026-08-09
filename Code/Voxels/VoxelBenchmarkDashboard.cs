@@ -84,6 +84,7 @@ public static class VoxelBenchmarkDashboard
 		{key:'frame_p95_ms',label:'Frame p95',unit:'ms',category:'Frame rate & pacing',direction:'lower',about:'95 percent of frames completed within this duration.'},
 		{key:'frame_p99_ms',label:'Frame p99',unit:'ms',category:'Frame rate & pacing',direction:'lower',about:'99 percent of frames completed within this duration.'},
 		{key:'frame_max_ms',label:'Worst frame',unit:'ms',category:'Frame rate & pacing',direction:'lower',about:'Longest sampled frame; useful for locating severe hitches.'},
+		{key:'unaccounted_frame_ms',label:'Unaccounted frame time',unit:'ms',category:'Frame rate & pacing',direction:'lower',about:'Maximum residual frame time after subtracting measured update, render, physics, idle, async, and GC timing groups from hitch frames.'},
 		{key:'stutter_events',label:'Stutter events',unit:'count',category:'Frame rate & pacing',direction:'lower',about:'Detected clusters of abnormally slow frames.'},
 		{key:'frames_over_33ms',label:'Frames over 33 ms',unit:'frames',category:'Frame rate & pacing',direction:'lower',about:'Frames falling below approximately 30 FPS.'},
 		{key:'gpu_p95_ms',label:'GPU p95',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'95th percentile GPU frame duration.'},

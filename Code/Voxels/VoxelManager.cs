@@ -58,6 +58,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private bool _gpuStreamingObserversInitialized;
 	private int _slowGpuStreamingLogCount;
 	private int _idleStutterDiagnosticCount;
+	private string _gpuTerrainLiveDiagnostics = "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=";
 	private long _worldGenerationStartTimestamp;
 	private bool _worldGenerationPending;
 	private double _lastWorldGenerationElapsedMilliseconds;
@@ -190,14 +191,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public bool CaptureFrameStutterDiagnostics { get; set; }
 
 	[Property, ReadOnly, Group( "Diagnostics" )]
-	public string GpuTerrainLiveDiagnostics
-	{
-		get
-		{
-			var diagnostics = CaptureGpuTerrainDiagnostics();
-			return $"available={diagnostics.Available}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
-		}
-	}
+	public string GpuTerrainLiveDiagnostics => _gpuTerrainLiveDiagnostics;
 
 	[Property, Group( "Diagnostics" ), Range( 0, MaximumDetailedChunkLogs )]
 	public int DetailedChunkLogLimit { get; set; } = 64;
@@ -300,8 +294,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_idleStutterDiagnosticCount++;
 			var updateTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Update.GetMetric( 1 );
 			var renderTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Render.GetMetric( 1 );
+			var physicsTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Physics.GetMetric( 1 );
+			var idleTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Idle.GetMetric( 1 );
 			var asyncTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Async.GetMetric( 1 );
-			Log.Info( $"Voxel idle stutter diagnostic: frameMs={Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
+			var gcTiming = Sandbox.Diagnostics.PerformanceStats.Timings.GcPause.GetMetric( 1 );
+			var frameMilliseconds = Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0;
+			var unaccountedFrameMilliseconds = ComputeUnaccountedFrameMilliseconds( frameMilliseconds, updateTiming.Max, renderTiming.Max, physicsTiming.Max, idleTiming.Max, asyncTiming.Max, gcTiming.Max );
+			Log.Info( $"Voxel idle stutter diagnostic: frameMs={frameMilliseconds:F2}, unaccountedFrameMs={unaccountedFrameMilliseconds:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
 		}
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
@@ -652,10 +651,23 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal VoxelGpuTerrainDiagnostics CaptureGpuTerrainDiagnostics() =>
 		_gpuTerrainBackend?.CaptureDiagnostics() ?? default;
 
+	private void RefreshGpuTerrainLiveDiagnostics( VoxelGpuTerrainDiagnostics diagnostics )
+	{
+		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
+	}
+
+	internal static double ComputeUnaccountedFrameMilliseconds( double frameMilliseconds, params double[] timingMilliseconds )
+	{
+		double accountedMilliseconds = 0.0;
+		foreach ( var timing in timingMilliseconds ) accountedMilliseconds += System.Math.Max( 0.0, timing );
+		return System.Math.Max( 0.0, frameMilliseconds - accountedMilliseconds );
+	}
+
 	[Button]
 	public void LogGpuTerrainDiagnostics()
 	{
 		var diagnostics = CaptureGpuTerrainDiagnostics();
+		RefreshGpuTerrainLiveDiagnostics( diagnostics );
 		Log.Info( $"Voxel GPU terrain diagnostics: backend={diagnostics.Backend}, available={diagnostics.Available}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, staleRejected={diagnostics.StalePublicationsRejected:N0}, scratch={FormatBytes( diagnostics.ScratchBytes )}, poolUsed/peak/capacity={FormatBytes( diagnostics.PoolUsedBytes )}/{FormatBytes( diagnostics.PeakPoolUsedBytes )}/{FormatBytes( diagnostics.PoolCapacityBytes )}, countSubmit={diagnostics.CountSubmissionMilliseconds:F3}ms total/{diagnostics.CountSubmissionPerBlockMilliseconds:F4}ms per block, countReadback={diagnostics.CountReadbackCount:N0} batches at {diagnostics.CountReadbackAverageMilliseconds:F3}ms avg, emitSubmit={diagnostics.EmitSubmissionMilliseconds:F3}ms total/{diagnostics.EmitSubmissionPerBlockMilliseconds:F4}ms per block, requestToVisible(avg/p95/max)={diagnostics.RequestToVisible.AverageMilliseconds:F2}/{diagnostics.RequestToVisible.P95Milliseconds:F2}/{diagnostics.RequestToVisible.MaximumMilliseconds:F2}ms, batchComplete(avg/p95/max)={diagnostics.BatchCompletion.AverageMilliseconds:F2}/{diagnostics.BatchCompletion.P95Milliseconds:F2}/{diagnostics.BatchCompletion.MaximumMilliseconds:F2}ms, geometryReadback={diagnostics.GeometryReadbackBytes:N0}B, failure={diagnostics.Failure}." );
 	}
 
@@ -663,6 +675,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		_gpuTerrainBackend?.Dispose();
 		_gpuTerrainBackend = null;
+		_gpuTerrainLiveDiagnostics = "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=";
 	}
 
 	[Button]
