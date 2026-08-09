@@ -30,6 +30,7 @@ CS
 	int GeometryOffset < Attribute( "GeometryOffset" ); >;
 	int TriangleOffset < Attribute( "TriangleOffset" ); >;
 	int VertexOffset < Attribute( "VertexOffset" ); >;
+	int TransitionCellsPerAxis < Attribute( "TransitionCellsPerAxis" ); >;
 	float VoxelSize < Attribute( "VoxelSize" ); >;
 	float SdfClampDistance < Attribute( "SdfClampDistance" ); >;
 	float SimplexFrequency < Attribute( "SimplexFrequency" ); >;
@@ -46,7 +47,7 @@ CS
 	float3 FacePosition( uint sample, uint face, uint cellIndex )
 	{
 		int3 c=sample<9?SampleCoordinates[sample]:sample==9?int3(0,0,0):sample==10?int3(2,0,0):sample==11?int3(0,2,0):int3(2,2,0);
-		c.xy += int2((cellIndex%16)*2,(cellIndex/16)*2);
+		c.xy += int2((cellIndex%(uint)TransitionCellsPerAxis)*2,(cellIndex/(uint)TransitionCellsPerAxis)*2);
 		int extent=ChunkSize;if(face==0)return float3(0,c.x,c.y);if(face==1)return float3(extent,c.y,c.x);if(face==2)return float3(c.y,0,c.x);if(face==3)return float3(c.x,extent,c.y);if(face==4)return float3(c.x,c.y,0);return float3(c.y,c.x,extent);
 	}
 	float3 FineSample( TransitionRequest request, uint sample, uint cellIndex ) { return request.FineOrigin.xyz + FacePosition(sample,request.Face,cellIndex) * (float)request.FineStep; }

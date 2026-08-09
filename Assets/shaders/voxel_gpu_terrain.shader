@@ -26,6 +26,7 @@ COMMON
 		uint VertexOffset;
 		uint IndexOffset;
 		uint IndexCount;
+		uint TransitionFaceMask;
 	};
 	StructuredBuffer<ResidentDescriptor> TerrainResidents < Attribute( "TerrainResidents" ); >;
 }

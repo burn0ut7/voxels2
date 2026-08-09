@@ -1,7 +1,6 @@
 internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 {
 	public const int MaximumBatchSize = 128;
-	private const int TransitionCellCount = 16 * 16;
 	private const int SampleCount = 13;
 	private readonly object _stateLock = new();
 	private readonly ComputeShader _count;
@@ -12,6 +11,8 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	private readonly GpuBuffer<VoxelGpuCountResult> _countResults;
 	private readonly GpuBuffer<VoxelGpuAllocationDescriptor> _allocations;
 	private readonly int _chunkSize;
+	private readonly int _transitionCellsPerAxis;
+	private readonly int _transitionCellCount;
 	private readonly float _voxelSize;
 	private readonly float _sdfClampDistance;
 	private readonly float _simplexFrequency;
@@ -35,6 +36,9 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	public VoxelGpuTransitionScratchArena( int chunkSize, float voxelSize, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
 	{
 		_chunkSize = chunkSize;
+		if ( chunkSize < 2 || (chunkSize & 1) != 0 ) throw new System.ArgumentOutOfRangeException( nameof( chunkSize ), chunkSize, "GPU transitions require an even chunk size of at least two." );
+		_transitionCellsPerAxis = chunkSize / 2;
+		_transitionCellCount = checked( _transitionCellsPerAxis * _transitionCellsPerAxis );
 		_voxelSize = voxelSize;
 		_sdfClampDistance = sdfClampDistance;
 		_simplexFrequency = simplexFrequency;
@@ -45,14 +49,14 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		_triangleOffset = _geometryOffset + VoxelTransvoxelTransitionTables.GeometryCounts.Length;
 		_vertexOffset = _triangleOffset + VoxelTransvoxelTransitionTables.TriangleIndices.Length;
 		_requests = new GpuBuffer<VoxelGpuTransitionRequest>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Requests" );
-		_samples = new GpuBuffer<float>( MaximumBatchSize * TransitionCellCount * SampleCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Samples" );
+		_samples = new GpuBuffer<float>( MaximumBatchSize * _transitionCellCount * SampleCount, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Samples" );
 		_lookup = CreateLookupBuffer();
 		_countResults = new GpuBuffer<VoxelGpuCountResult>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Count Results" );
 		_allocations = new GpuBuffer<VoxelGpuAllocationDescriptor>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Allocations" );
 		_count = new ComputeShader( "shaders/voxel_gpu_transition_count_v1_cs.shader" );
 		_emit = new ComputeShader( "shaders/voxel_gpu_transition_emit_v1_cs.shader" );
 		BindAttributes();
-		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * TransitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64);
+		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64);
 	}
 
 	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, out double submissionMilliseconds )
@@ -140,7 +144,8 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "Allocations", _allocations );
 			shader.Attributes.Set( "ChunkSize", _chunkSize );
 			shader.Attributes.Set( "SampleCount", SampleCount );
-			shader.Attributes.Set( "TransitionCellCount", TransitionCellCount );
+			shader.Attributes.Set( "TransitionCellCount", _transitionCellCount );
+			shader.Attributes.Set( "TransitionCellsPerAxis", _transitionCellsPerAxis );
 			shader.Attributes.Set( "BatchSize", 0 );
 			shader.Attributes.Set( "GeometryOffset", _geometryOffset );
 			shader.Attributes.Set( "TriangleOffset", _triangleOffset );

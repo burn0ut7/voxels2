@@ -1439,7 +1439,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				if ( !ShouldDrawClipboxDebugBlock( block ) ) continue;
 				drawCount++;
 				var scale = 1 << block.Lod;
-				var minimum = new Vector3( block.Coordinate.x * ChunkSize * scale * VoxelSize, block.Coordinate.y * ChunkSize * scale * VoxelSize, (block.Coordinate.z - 1) * ChunkSize * scale * VoxelSize );
+				var minimum = VoxelGpuCanonicalCoordinates.WorldFromCanonicalSamples( new Vector3( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( block.Coordinate, block.Lod, ChunkSize ) ), VoxelSize );
 				var extent = ChunkSize * scale * VoxelSize;
 				var bounds = new BBox( minimum, minimum + Vector3.One * extent );
 				Gizmo.Draw.Color = GetClipboxDebugColor( block, editorPreview );
@@ -1449,7 +1449,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 					if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Lod ) Gizmo.Draw.Text( $"L{block.Lod}", new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
 					continue;
 				}
-				var label = $"L{block.Lod} slot={block.StableSlotId} {block.State}";
+				var label = $"L{block.Lod} slot={block.StableSlotId} mask=0x{block.TransitionFaceMask:X2} {block.State}";
 				if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full ) label += $"\ncoord={block.Coordinate} gen={block.Generation} mesh=V{block.VertexOffset}+{block.VertexCapacity}/I{block.IndexOffset}+{block.IndexCapacity} idx={block.IndexCount}";
 				if ( editorPreview ) label += "\neditor preview: not resident";
 				Gizmo.Draw.Text( label, new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
@@ -1464,7 +1464,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				{
 					var transition = _gpuClipboxTransitionDebugScratch[index];
 					var scale = 1 << transition.FineLod;
-					var minimum = new Vector3( transition.FineCoordinate.x * ChunkSize * scale * VoxelSize, transition.FineCoordinate.y * ChunkSize * scale * VoxelSize, (transition.FineCoordinate.z - 1) * ChunkSize * scale * VoxelSize );
+					var minimum = VoxelGpuCanonicalCoordinates.WorldFromCanonicalSamples( new Vector3( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( transition.FineCoordinate, transition.FineLod, ChunkSize ) ), VoxelSize );
 					var extent = ChunkSize * scale * VoxelSize;
 					var thickness = System.MathF.Max( VoxelSize, extent * 0.025f );
 					var bounds = GetTransitionDebugBounds( minimum, extent, thickness, transition.Face );
@@ -1524,6 +1524,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_gpuClipboxDebugScratch.Add( new VoxelGpuClipboxDebugBlock(
 				assignment.Coordinate,
 				assignment.Lod,
+				assignment.Key.TransitionFaceMask,
 				assignment.StableSlotId,
 				VoxelGpuDebugBlockState.Missing,
 				0,

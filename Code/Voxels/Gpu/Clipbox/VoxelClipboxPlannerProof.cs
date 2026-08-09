@@ -346,7 +346,8 @@ internal static class VoxelClipboxPlannerProof
 				if ( expectedSlot != slot ) throw new InvalidOperationException( $"Slot {slot} does not match its toroidal coordinate." );
 				var expectedActive = state.IsActive( assignment.Coordinate );
 				if ( assignment.Active != expectedActive ) throw new InvalidOperationException( $"Slot {slot} has an incorrect active mask." );
-				if ( assignment.Key != new VoxelVisualBlockKey( assignment.Coordinate, level, config.RuleVersion, config.EditRevision ) ) throw new InvalidOperationException( $"Slot {slot} has an incorrect GPU identity." );
+				var expectedMask = VoxelClipboxTransitionPlanner.GetCoarseFaceMask( config, levels, assignment.Coordinate, level );
+				if ( assignment.Key != new VoxelVisualBlockKey( assignment.Coordinate, level, config.RuleVersion, config.EditRevision, TransitionFaceMask: expectedMask ) ) throw new InvalidOperationException( $"Slot {slot} has an incorrect GPU identity or transition mask." );
 				if ( assignment.Active )
 				{
 					levelActiveCount++;

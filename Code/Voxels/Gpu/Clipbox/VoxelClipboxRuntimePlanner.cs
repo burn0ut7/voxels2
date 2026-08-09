@@ -49,7 +49,7 @@ internal sealed class VoxelClipboxRuntimePlanner
 	{
 		ObserverBaseBlock = VoxelClipboxCoordinates.GetObserverBaseBlock( observerCanonicalSample );
 		ActiveRegularCount = VoxelClipboxReferencePlanner.Populate( ObserverBaseBlock, _config, _desiredLevels, _desiredSlots );
-		ActiveTransitionCount = VoxelClipboxTransitionPlanner.Populate( _config, _desiredLevels, _desiredTransitions );
+		ActiveTransitionCount = VoxelClipboxTransitionPlanner.Populate( _config, _desiredLevels, _desiredSlots, _desiredTransitions );
 		_changedSlotCount = 0;
 		_changedTransitionSlotCount = 0;
 		for ( var index = 0; index < _desiredSlots.Length; index++ )

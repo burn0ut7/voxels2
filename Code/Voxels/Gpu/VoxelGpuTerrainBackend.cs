@@ -132,6 +132,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_levelLastUpdateFrame = new long[levelCount];
 		_levelUpdateCount = new long[levelCount];
 		VoxelGpuContractValidation.AssertLayouts();
+		VoxelGpuCanonicalCoordinates.AssertContract( chunkSize );
 		_chunkSize = chunkSize;
 		_voxelSize = voxelSize;
 		_scheduler = new VoxelGpuBatchScheduler( System.Math.Max( 1, residentCapacity * 2 ) );
@@ -385,7 +386,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 			else if ( IsPending( assignment.Key ) ) state = VoxelGpuDebugBlockState.Pending;
 			else if ( IsBlocked( assignment.Key ) ) state = VoxelGpuDebugBlockState.Deferred;
-			destination.Add( new VoxelGpuClipboxDebugBlock( assignment.Coordinate, assignment.Lod, assignment.StableSlotId, state, generation, vertexOffset, vertexCapacity, indexOffset, indexCapacity, indexCount, drawOrigin, boundsMin, boundsMax ) );
+			destination.Add( new VoxelGpuClipboxDebugBlock( assignment.Coordinate, assignment.Lod, assignment.Key.TransitionFaceMask, assignment.StableSlotId, state, generation, vertexOffset, vertexCapacity, indexOffset, indexCapacity, indexCount, drawOrigin, boundsMin, boundsMax ) );
 		}
 		return destination.Count;
 	}
@@ -710,7 +711,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				}
 				slots[index] = slot;
 				var sampleScale = 1 << item.Key.Lod;
-				var sampleOrigin = new Vector3( item.Key.Coordinate.x * _chunkSize * sampleScale, item.Key.Coordinate.y * _chunkSize * sampleScale, (item.Key.Coordinate.z - 1) * _chunkSize * sampleScale );
+				var sampleOrigin = VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( item.Key.Coordinate, item.Key.Lod, _chunkSize );
 				requests[index] = new VoxelGpuBlockRequest
 				{
 					SampleOrigin = new Vector4( sampleOrigin, 0.0f ),
@@ -721,7 +722,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					Lod = item.Key.Lod,
 					RuleVersion = (uint)item.Key.RuleVersion,
 					Generation = item.Generation,
-					ResidentSlot = (uint)slot
+					ResidentSlot = (uint)slot,
+					TransitionFaceMask = item.Key.TransitionFaceMask
 				};
 			}
 
@@ -761,8 +763,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_transitionSlotScratch[acceptedCount] = slot;
 			_transitionRequestScratch[acceptedCount] = new VoxelGpuTransitionRequest
 			{
-				FineOrigin = new Vector4( entry.FineCoordinate.x * _chunkSize * fineStep, entry.FineCoordinate.y * _chunkSize * fineStep, (entry.FineCoordinate.z - 1) * _chunkSize * fineStep, 0.0f ),
-				CoarseOrigin = new Vector4( entry.CoarseCoordinate.x * _chunkSize * coarseStep, entry.CoarseCoordinate.y * _chunkSize * coarseStep, (entry.CoarseCoordinate.z - 1) * _chunkSize * coarseStep, 0.0f ),
+				FineOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize ), 0.0f ),
+				CoarseOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.CoarseCoordinate, entry.CoarseLevel, _chunkSize ), 0.0f ),
 				FineStep = (uint)fineStep,
 				CoarseStep = (uint)coarseStep,
 				Face = (uint)entry.Face,
@@ -831,7 +833,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 			var entry = _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId];
 			var scale = 1 << entry.FineLevel;
-			var drawOrigin = new Vector3( entry.FineCoordinate.x * _chunkSize * scale * _voxelSize, entry.FineCoordinate.y * _chunkSize * scale * _voxelSize, (entry.FineCoordinate.z - 1) * _chunkSize * scale * _voxelSize );
+			var drawOrigin = VoxelGpuCanonicalCoordinates.WorldFromCanonicalSamples( new Vector3( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize ) ), _voxelSize );
 			var extent = _chunkSize * scale * _voxelSize;
 			allocations[index] = new VoxelGpuAllocationDescriptor
 			{
@@ -928,10 +930,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 
 			var drawScale = 1 << scheduled.Key.Lod;
-			var drawOrigin = new Vector3(
-				scheduled.Key.Coordinate.x * _chunkSize * drawScale * _voxelSize,
-				scheduled.Key.Coordinate.y * _chunkSize * drawScale * _voxelSize,
-				(scheduled.Key.Coordinate.z - 1) * _chunkSize * drawScale * _voxelSize );
+			var drawOrigin = VoxelGpuCanonicalCoordinates.WorldFromCanonicalSamples( new Vector3( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( scheduled.Key.Coordinate, scheduled.Key.Lod, _chunkSize ) ), _voxelSize );
 			allocations[index] = new VoxelGpuAllocationDescriptor
 			{
 				VertexOffset = (uint)handle.Vertices.Offset,
@@ -954,7 +953,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				Generation = scheduled.Generation,
 				VertexOffset = (uint)handle.Vertices.Offset,
 				IndexOffset = (uint)handle.Indices.Offset,
-				IndexCount = countResult.IndexCount
+				IndexCount = countResult.IndexCount,
+				TransitionFaceMask = scheduled.Key.TransitionFaceMask
 			};
 			pending[pendingCount++] = new PendingResident( activeBatch.Slots[index], scheduled.Key, scheduled.Generation, scheduled.RequestedTimestamp, handle, descriptor );
 		}

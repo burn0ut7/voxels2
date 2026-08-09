@@ -30,14 +30,17 @@ internal static class VoxelClipboxTransitionPlanner
 	public static VoxelVisualBlockKey GetVisualKey( VoxelClipboxTransitionSlotAssignment assignment ) =>
 		new( assignment.FineCoordinate, assignment.FineLevel, assignment.RuleVersion, assignment.EditRevision, assignment.StableSlotId );
 
+	public static uint FaceMaskBit( VoxelClipboxFaceDirection face ) => 1u << (int)face;
+
 	public static int GetStableSlotId( VoxelClipboxConfig config, int fineLevel, VoxelClipboxFaceDirection face, int u, int v ) =>
 		checked( fineLevel * 6 * config.BlocksPerAxis * config.BlocksPerAxis + (int)face * config.BlocksPerAxis * config.BlocksPerAxis + u + config.BlocksPerAxis * v );
 
-	public static int Populate( VoxelClipboxConfig config, VoxelClipboxLevelState[] levels, VoxelClipboxTransitionSlotAssignment[] destination )
+	public static int Populate( VoxelClipboxConfig config, VoxelClipboxLevelState[] levels, VoxelClipboxRegularSlotAssignment[] regularSlots, VoxelClipboxTransitionSlotAssignment[] destination )
 	{
 		var faceCellCount = checked( config.BlocksPerAxis * config.BlocksPerAxis );
 		var expectedCapacity = config.StableTransitionSlotCount;
 		if ( levels.Length != config.LevelCount ) throw new System.ArgumentException( "Level storage does not match the clipbox configuration.", nameof( levels ) );
+		if ( regularSlots.Length != config.StableRegularSlotCount ) throw new System.ArgumentException( "Regular slot storage does not match the clipbox configuration.", nameof( regularSlots ) );
 		if ( destination.Length != expectedCapacity ) throw new System.ArgumentException( "Transition storage does not match the clipbox configuration.", nameof( destination ) );
 
 		var activeCount = 0;
@@ -55,12 +58,14 @@ internal static class VoxelClipboxTransitionPlanner
 				var coarseCoordinate = VoxelClipboxCoordinates.FloorDiv( neighborCoordinate, 2 );
 				var active = fine.IsActive( fineCoordinate ) && !fine.IsActive( neighborCoordinate ) && coarse.IsActive( coarseCoordinate );
 				var stableSlotId = GetStableSlotId( config, fineLevel, face, u, v );
+				var fineSlotId = VoxelClipboxCoordinates.GetSlotIndex( fineLevel, fineCoordinate, config.BlocksPerAxis );
+				var coarseSlotId = VoxelClipboxCoordinates.GetSlotIndex( fineLevel + 1, coarseCoordinate, config.BlocksPerAxis );
 				destination[stableSlotId] = new VoxelClipboxTransitionSlotAssignment(
 					stableSlotId,
 					fineLevel,
 					fineLevel + 1,
-					VoxelClipboxCoordinates.GetSlotIndex( fineLevel, fineCoordinate, config.BlocksPerAxis ),
-					VoxelClipboxCoordinates.GetSlotIndex( fineLevel + 1, coarseCoordinate, config.BlocksPerAxis ),
+					fineSlotId,
+					coarseSlotId,
 					fineCoordinate,
 					coarseCoordinate,
 					face,
@@ -69,13 +74,57 @@ internal static class VoxelClipboxTransitionPlanner
 					active,
 					config.RuleVersion,
 					config.EditRevision,
-					new VoxelVisualBlockKey( fineCoordinate, fineLevel, config.RuleVersion, config.EditRevision ),
-					new VoxelVisualBlockKey( coarseCoordinate, fineLevel + 1, config.RuleVersion, config.EditRevision ) );
+					regularSlots[fineSlotId].Key,
+					regularSlots[coarseSlotId].Key );
 				if ( active ) activeCount++;
 			}
 		}
 
 		return activeCount;
+	}
+
+	internal static void ApplyCoarseFaceMasks( VoxelClipboxConfig config, VoxelClipboxLevelState[] levels, VoxelClipboxRegularSlotAssignment[] regularSlots )
+	{
+		if ( levels.Length != config.LevelCount ) throw new System.ArgumentException( "Level storage does not match the clipbox configuration.", nameof( levels ) );
+		if ( regularSlots.Length != config.StableRegularSlotCount ) throw new System.ArgumentException( "Regular slot storage does not match the clipbox configuration.", nameof( regularSlots ) );
+
+		for ( var fineLevel = 0; fineLevel < config.LevelCount - 1; fineLevel++ )
+		{
+			var fine = levels[fineLevel];
+			var coarse = levels[fineLevel + 1];
+			for ( var faceIndex = 0; faceIndex < 6; faceIndex++ )
+			for ( var v = 0; v < config.BlocksPerAxis; v++ )
+			for ( var u = 0; u < config.BlocksPerAxis; u++ )
+			{
+				var face = (VoxelClipboxFaceDirection)faceIndex;
+				var fineCoordinate = GetFaceCoordinate( fine.Outer, face, u, v );
+				var neighborCoordinate = fineCoordinate + GetFaceDelta( face );
+				var coarseCoordinate = VoxelClipboxCoordinates.FloorDiv( neighborCoordinate, 2 );
+				if ( !fine.IsActive( fineCoordinate ) || fine.IsActive( neighborCoordinate ) || !coarse.IsActive( coarseCoordinate ) ) continue;
+				var coarseSlot = VoxelClipboxCoordinates.GetSlotIndex( fineLevel + 1, coarseCoordinate, config.BlocksPerAxis );
+				var assignment = regularSlots[coarseSlot];
+				regularSlots[coarseSlot] = assignment with { Key = assignment.Key with { TransitionFaceMask = assignment.Key.TransitionFaceMask | FaceMaskBit( face ) } };
+			}
+		}
+	}
+
+	internal static uint GetCoarseFaceMask( VoxelClipboxConfig config, VoxelClipboxLevelState[] levels, Vector3Int coarseCoordinate, int coarseLevel )
+	{
+		if ( coarseLevel <= 0 || coarseLevel >= config.LevelCount ) return 0;
+		var fine = levels[coarseLevel - 1];
+		var coarse = levels[coarseLevel];
+		var mask = 0u;
+		for ( var faceIndex = 0; faceIndex < 6; faceIndex++ )
+		for ( var v = 0; v < config.BlocksPerAxis; v++ )
+		for ( var u = 0; u < config.BlocksPerAxis; u++ )
+		{
+			var face = (VoxelClipboxFaceDirection)faceIndex;
+			var fineCoordinate = GetFaceCoordinate( fine.Outer, face, u, v );
+			var neighborCoordinate = fineCoordinate + GetFaceDelta( face );
+			var candidateCoarseCoordinate = VoxelClipboxCoordinates.FloorDiv( neighborCoordinate, 2 );
+			if ( candidateCoarseCoordinate == coarseCoordinate && fine.IsActive( fineCoordinate ) && !fine.IsActive( neighborCoordinate ) && coarse.IsActive( coarseCoordinate ) ) mask |= FaceMaskBit( face );
+		}
+		return mask;
 	}
 
 	private static Vector3Int GetFaceCoordinate( VoxelClipboxBounds outer, VoxelClipboxFaceDirection face, int u, int v ) => face switch

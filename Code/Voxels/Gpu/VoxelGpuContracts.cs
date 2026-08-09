@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int Lod, int RuleVersion, uint EditRevision = 0, int TransitionSlotId = -1 )
+internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int Lod, int RuleVersion, uint EditRevision = 0, int TransitionSlotId = -1, uint TransitionFaceMask = 0 )
 {
 	public bool IsTransition => TransitionSlotId >= 0;
 }
@@ -32,7 +32,7 @@ internal struct VoxelGpuBlockRequest
 	public uint RuleVersion;
 	public uint Generation;
 	public uint ResidentSlot;
-	public uint Reserved;
+	public uint TransitionFaceMask;
 }
 
 [StructLayout( LayoutKind.Sequential, Pack = 4, Size = 32 )]
@@ -63,7 +63,7 @@ internal struct VoxelGpuAllocationDescriptor
 	public Vector4 DrawScale;
 }
 
-[StructLayout( LayoutKind.Sequential, Pack = 4, Size = 64 )]
+[StructLayout( LayoutKind.Sequential, Pack = 4, Size = 80 )]
 internal struct VoxelGpuResidentDescriptor
 {
 	public Vector4 DrawOrigin;
@@ -73,6 +73,7 @@ internal struct VoxelGpuResidentDescriptor
 	public uint VertexOffset;
 	public uint IndexOffset;
 	public uint IndexCount;
+	public uint TransitionFaceMask;
 }
 
 internal readonly record struct VoxelGpuPoolRange( int Offset, int Count )
@@ -97,7 +98,7 @@ internal static class VoxelGpuContractValidation
 		AssertGpuStride<VoxelGpuTransitionRequest>( 64 );
 		AssertGpuStride<VoxelGpuCountResult>( 32 );
 		AssertGpuStride<VoxelGpuAllocationDescriptor>( 64 );
-		AssertGpuStride<VoxelGpuResidentDescriptor>( 64 );
+		AssertGpuStride<VoxelGpuResidentDescriptor>( 80 );
 	}
 
 	private static void AssertGpuStride<T>( int expected ) where T : unmanaged

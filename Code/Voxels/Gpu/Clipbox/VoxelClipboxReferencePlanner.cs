@@ -51,6 +51,8 @@ internal static class VoxelClipboxReferencePlanner
 			levels[level] = state with { ActiveCount = levelActiveCount };
 		}
 
+		VoxelClipboxTransitionPlanner.ApplyCoarseFaceMasks( config, levels, slots );
+
 		return activeCount;
 	}
 }

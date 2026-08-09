@@ -17,7 +17,7 @@ CS
 		uint RuleVersion;
 		uint Generation;
 		uint ResidentSlot;
-		uint Reserved;
+		uint TransitionFaceMask;
 	};
 	StructuredBuffer<BlockRequest> BlockRequests < Attribute( "BlockRequests" ); >;
 	RWStructuredBuffer<float> DensitySamples < Attribute( "DensitySamples" ); >;

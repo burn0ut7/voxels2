@@ -19,6 +19,7 @@ internal enum VoxelGpuDebugBlockState
 internal readonly record struct VoxelGpuClipboxDebugBlock(
 	Vector3Int Coordinate,
 	int Lod,
+	uint TransitionFaceMask,
 	int StableSlotId,
 	VoxelGpuDebugBlockState State,
 	uint Generation,
