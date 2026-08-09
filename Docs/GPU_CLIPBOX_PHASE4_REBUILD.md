@@ -65,11 +65,11 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 | 4R-2 renderer-capacity proof | Implemented; standalone proof passed, live editor gate pending |
 | 4R-3 regular two-level clipbox | Implemented; static integration and live compiler gates passed, runtime benchmark gate pending |
 | 4R-4 four-level toroidal streaming | Implemented; planner/runtime integration, bounded revision diagnostics, and editor visualization added; clean runtime benchmark gate passed in suite v17 |
-| 4R-5 transition ownership and residency | Implemented; stable seam slots, fine-side ownership, generation dependency metadata, diagnostics, proof, and editor visualization added; suite v18 runtime gate pending |
-| 4R-6 Transvoxel golden reference and GPU proof | Implemented proof path; pinned official transition tables, CPU reference, six orientations, all 512 cases, winding, scale, fixtures, gradient normals, boundary checks, and live GPU case proof pass; production transition pipeline pending |
-| 4R-7 production GPU transition pipeline | In progress; bounded GPU transition count/emission arena integrated with exact persistent-pool allocation and shared indirect rendering; live shader/runtime gate pending |
-| 4R-8 coherent publication and stability | In progress; clipbox revisions retain current and desired residents until regular and seam publication completes, with stale generation rejection; runtime oscillation gate pending |
-| 4R-9 performance/adoption campaign | Not started |
+| 4R-5 transition ownership and residency | Verified; stable seam slots, fine-side ownership, generation dependency metadata, diagnostics, proof, editor visualization, and clean suite v20 runtime gate passed |
+| 4R-6 Transvoxel golden reference and GPU proof | Verified; pinned official transition tables, CPU reference, six orientations, all 512 cases, winding, scale, fixtures, gradient normals, boundary checks, live GPU case proof, and production transition runtime passed |
+| 4R-7 production GPU transition pipeline | Verified on the RTX 5090 reference machine in clean suite v20 run `20260809-101717`; bounded GPU count/emission, exact persistent allocation, shared indirect rendering, zero production geometry readback, and zero CPU transition SDF evaluations |
+| 4R-8 coherent publication and stability | Verified in clean suite v20; exact desired-resident settlement, stale publication rejection, bounded queues, regular LOD gates, and actual-player clipbox oscillation passed |
+| 4R-9 performance/adoption campaign | Not started; requires the complete suite on the RTX 5090 and a representative mid-range GPU |
 
 Do not begin Phase 5 editing until every Phase 4 gate passes.
 
@@ -1796,7 +1796,7 @@ true 3D non-overlapping clipbox shells
 Until then, report:
 
 ```text
-Phase 4 rebuild in progress
+Phase 4 rebuild is awaiting the 4R-9 mid-range GPU campaign.
 ```
 
 Do not report Phase 4 complete merely because lookup-table proofs pass or because a small static scene looks correct.
