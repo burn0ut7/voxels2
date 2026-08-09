@@ -88,6 +88,8 @@ public sealed class VoxelTerrainBenchmark : Component
 	private readonly List<EditCommand> _variedEdits = new();
 	private readonly Dictionary<string, ScenarioComparison> _comparisons = new();
 	private VoxelManager _manager;
+	private bool _initializationComplete;
+	private int _initializationAttempts;
 	private FrameSampler _sampler;
 	private BenchmarkPhase _phase;
 	private long _phaseStartTimestamp;
@@ -255,26 +257,13 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	protected override void OnStart()
 	{
-		_manager = GameObject.Components.Get<VoxelManager>();
-		if ( _manager is null )
-		{
-			Log.Error( "Voxel terrain benchmark requires a VoxelManager on the same GameObject." );
-			_phase = BenchmarkPhase.Failed;
-			return;
-		}
-
-		EnsurePlayerSafetyFixture();
-		_originalCaptureCallCounts = _manager.CaptureCallCounts;
-		_callCountSettingCaptured = true;
-		BuildVariedEditFixture();
-		if ( RunOnStart )
-		{
-			BeginRun( false );
-		}
+		TryInitialize();
 	}
 
 	protected override void OnDisabled()
 	{
+		_initializationComplete = false;
+		_manager = null;
 		RestoreWorldSettings();
 		RestoreCallCountSetting();
 		RestorePlayerProtectionSetting();
@@ -312,6 +301,14 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	protected override void OnUpdate()
 	{
+		if ( !_initializationComplete )
+		{
+			if ( !TryInitialize() )
+			{
+				if ( ++_initializationAttempts == 120 ) Log.Error( "Voxel terrain benchmark requires a VoxelManager on the same GameObject." );
+				return;
+			}
+		}
 		if ( _runRequested && _phase == BenchmarkPhase.Idle )
 		{
 			BeginRun( true );
@@ -1788,6 +1785,20 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		var p = proof ?? default;
 		return $"\"gpu_phase3b_available\":{proof.HasValue.ToString().ToLowerInvariant()},\"gpu_phase3b_passed\":{p.Passed.ToString().ToLowerInvariant()},\"gpu_phase3b_test\":\"{Json( p.Test )}\",\"gpu_phase3b_failure\":\"{Json( p.Failure )}\"";
+	}
+
+	private bool TryInitialize()
+	{
+		_manager = GameObject.Components.Get<VoxelManager>();
+		if ( _manager is null ) return false;
+		_initializationComplete = true;
+		_initializationAttempts = 0;
+		EnsurePlayerSafetyFixture();
+		_originalCaptureCallCounts = _manager.CaptureCallCounts;
+		_callCountSettingCaptured = true;
+		BuildVariedEditFixture();
+		if ( RunOnStart && _phase == BenchmarkPhase.Idle ) BeginRun( false );
+		return true;
 	}
 
 	private static string SerializeClipboxPlannerProofJson( VoxelClipboxPlannerProofReport? proof )
