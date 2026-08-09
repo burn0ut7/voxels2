@@ -9,6 +9,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly float _cullingPaddingWorld;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
 	private readonly VoxelGpuResidentTable.ResidentEntry[] _residentSnapshot;
+	private readonly Dictionary<RenderIdentity, VoxelGpuResidentTable.ResidentEntry> _renderableByIdentity = new();
 	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _argumentData;
 	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _uploadedArgumentData;
 	private readonly Sandbox.Rendering.CommandList[] _depthCommandLists;
@@ -120,15 +121,25 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		var rebuildStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		_cullingRebuildCount++;
 		var publishedCount = _residents.CopyPublishedEntries( _residentSnapshot );
+		_renderableByIdentity.Clear();
+		for ( var index = 0; index < publishedCount; index++ )
+		{
+			var entry = _residentSnapshot[index];
+			if ( !entry.Renderable || entry.Descriptor.IndexCount == 0 ) continue;
+			var identity = RenderIdentity.From( entry.Key );
+			if ( _renderableByIdentity.TryGetValue( identity, out var existing ) )
+			{
+				if ( entry.Generation <= existing.Generation ) continue;
+			}
+			_renderableByIdentity[identity] = entry;
+		}
 		var frustum = _camera.GetFrustum();
 		var visibleCommandCount = 0;
 		var transitionVisibleCommandCount = 0;
 		var publishedRenderableRegularCount = 0;
 		var publishedRenderableTransitionCount = 0;
-		for ( var index = 0; index < publishedCount; index++ )
+		foreach ( var entry in _renderableByIdentity.Values )
 		{
-			var entry = _residentSnapshot[index];
-			if ( !entry.Renderable || entry.Descriptor.IndexCount == 0 ) continue;
 			if ( entry.Key.IsTransition ) publishedRenderableTransitionCount++;
 			else publishedRenderableRegularCount++;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );
@@ -176,6 +187,11 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			}
 		}
 		UpdateCommandLists( visibleUploadCount / _commandsPerSubmission );
+	}
+
+	private readonly record struct RenderIdentity( bool IsTransition, Vector3Int Coordinate, int Lod, int TransitionSlotId )
+	{
+		public static RenderIdentity From( VoxelVisualBlockKey key ) => new( key.IsTransition, key.Coordinate, key.Lod, key.IsTransition ? key.TransitionSlotId : -1 );
 	}
 
 	private bool ArgumentsChanged( int uploadCount )
