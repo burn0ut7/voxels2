@@ -195,7 +195,7 @@ If the current code already contains part of a later phase, preserve working cod
 | Phase 2B — Persistent fixed-LOD GPU backend | Complete. Persistent pools, asynchronous count readback, transactional allocation, generation-safe publication, and bounded multi-draw are live. |
 | **Phase 3A — Production render integration** | **Complete for the current s&box renderer.** Standard lit Forward/Depth terrain rendering is live; the engine's generic indirect path reports `IndirectFirstInstance=false`, so the bounded world-space vertex fallback is retained and explicitly reported. |
 | **Phase 3B — Fixed-LOD movement streaming** | **Complete.** Actual player observers drive same-frame desired-set deltas, bounded queues, persistent residents, CPU frustum culling, and the required GPU traversal scenarios. |
-| **Phase 4 — 3D clipbox LOD and transitions** | **In progress.** Opt-in 3D clipbox residency, direct canonical-field sampling for LOD1–3, toroidal slab deltas, transition ownership, and coherent seam-set publication are implemented; GPU transition-cell emission and the exhaustive seam fixtures remain before the pass gate. |
+| **Phase 4 — 3D clipbox LOD and transitions** | **In progress.** Opt-in 3D clipbox residency and direct canonical-field sampling for LOD1–3 are implemented; toroidal slab reuse and GPU transition-cell emission remain before the pass gate. |
 | Phase 5 — Sparse edits and CPU collision integration | After LOD correctness. |
 | Phase 6 — Final adoption campaign | After all mandatory behavior exists. |
 
@@ -1270,7 +1270,7 @@ dimension derived from `GpuClipboxRadius` (kept separate from the potentially
 large fixed-LOD benchmark radius). LOD requests retain their logical block
 coordinate and sample spacing in the existing request ABI; the density and vertex
 passes evaluate the canonical field directly at that spacing. The fixed-LOD path
-remains the default until transition-cell emission and seam fixtures are validated.
+remains the default until slab reuse and transition publication are validated.
 
 ## 11.1 LOD model
 

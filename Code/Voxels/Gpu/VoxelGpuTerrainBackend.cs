@@ -40,13 +40,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		if ( keys is null ) return false;
 		lock ( _desiredSync ) return _desiredKeys.SetEquals( keys );
 	}
-	public bool AreKeysPublished( IEnumerable<VoxelVisualBlockKey> keys )
-	{
-		if ( keys is null ) return false;
-		foreach ( var key in keys )
-			if ( !_residents.ContainsPublished( key ) ) return false;
-		return true;
-	}
 	public bool IsAvailable => _capabilities.Available;
 	public bool IsTerrainRenderingEnabled => _renderer.IsTerrainRenderingEnabled;
 	public bool IsProcessingEnabled => _processingEnabled;
@@ -157,43 +150,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
 		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowDesiredSetLogCount ) <= 32 )
 			Log.Info( $"Voxel GPU desired-set hitch trace: {updateMilliseconds:F2}ms, desired={desiredCount:N0}, pending={PendingRequestCount:N0}, scheduler={_scheduler.PendingCount:N0}." );
-	}
-
-	public void UpdateDesiredDelta( IEnumerable<VoxelVisualBlockKey> entering, IEnumerable<VoxelVisualBlockKey> leaving )
-	{
-		if ( entering is null ) throw new System.ArgumentNullException( nameof( entering ) );
-		if ( leaving is null ) throw new System.ArgumentNullException( nameof( leaving ) );
-		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		var enteringCount = 0;
-		var leavingCount = 0;
-		lock ( _desiredSync )
-		{
-			foreach ( var key in leaving )
-			{
-				if ( !_desiredKeys.Remove( key ) ) continue;
-				_scheduler.Cancel( key );
-				_pendingRequests.Remove( key );
-				_residents.CancelUnpublishedReservation( key );
-				leavingCount++;
-			}
-			foreach ( var key in entering )
-			{
-				_diagnostics.RuleVersion = key.RuleVersion;
-				if ( !_desiredKeys.Add( key ) || _residents.ContainsKey( key ) || !_pendingRequests.Add( key ) ) continue;
-				if ( !_scheduler.TryEnqueue( key, out _ ) )
-				{
-					_pendingRequests.Remove( key );
-					_diagnostics.BackpressureEvents++;
-					continue;
-				}
-				enteringCount++;
-			}
-			UpdateQueueDiagnostics();
-			UpdatePendingCountBatches();
-		}
-		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
-		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowDesiredSetLogCount ) <= 32 )
-			Log.Info( $"Voxel GPU desired-delta hitch trace: {updateMilliseconds:F2}ms, entering={enteringCount}, leaving={leavingCount}, desired={DesiredCount}, pending={PendingRequestCount}." );
 	}
 
 	public VoxelGpuTerrainDiagnostics CaptureDiagnostics()
