@@ -801,6 +801,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		var coordinate = Vector3Int.Zero;
+		if ( !TryGetChunk( coordinate, out _ ) )
+		{
+			GenerateChunk( coordinate );
+			Log.Info( "Voxel GPU Transvoxel proof generated its origin chunk for the proof-only CPU reference." );
+		}
 		VoxelChunk chunk;
 		float[] halo;
 		lock ( _sdfLock )
