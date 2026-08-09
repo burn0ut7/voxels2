@@ -58,7 +58,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		UpdatePendingCountBatches();
 	}
 
-	public VoxelGpuTerrainDiagnostics CaptureDiagnostics() => _diagnostics.Snapshot( _capabilities, _residents, _pool );
+	public VoxelGpuTerrainDiagnostics CaptureDiagnostics() => _diagnostics.Snapshot( _capabilities, _residents, _pool, _renderer );
 
 	public override void RenderSceneObject()
 	{

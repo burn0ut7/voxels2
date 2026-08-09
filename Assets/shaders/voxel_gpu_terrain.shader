@@ -1,6 +1,6 @@
 HEADER
 {
-	Description = "Persistent fixed-LOD GPU voxel terrain";
+	Description = "Production GPU voxel terrain material";
 }
 
 FEATURES
@@ -11,6 +11,7 @@ FEATURES
 MODES
 {
 	Forward();
+	Depth();
 }
 
 COMMON
@@ -63,19 +64,19 @@ VS
 PS
 {
 	#include "common/pixel.hlsl"
-	RenderState( BlendEnable, false );
-	RenderState( DepthEnable, true );
-	RenderState( DepthWriteEnable, true );
-	RenderState( CullMode, BACK );
 
 	float4 MainPs( PixelInput input ) : SV_Target0
 	{
-		float3 normal = normalize( input.vNormalWs );
-		float3 sunDirection = normalize( float3( -0.35f, -0.45f, 0.82f ) );
-		float directLight = saturate( dot( normal, sunDirection ) );
-		float skyLight = saturate( normal.z * 0.5f + 0.5f );
-		float lighting = 0.22f + directLight * 0.63f + skyLight * 0.15f;
-		float3 grass = SrgbGammaToLinear( float3( 0.13f, 0.46f, 0.055f ) );
-		return float4( grass * lighting, 1.0f );
+		Material material = Material::Init( input );
+		float3 worldPosition = material.WorldPosition;
+		float broadVariation = frac( sin( dot( floor( worldPosition / 128.0f ), float3( 12.9898f, 78.233f, 37.719f ) ) ) * 43758.5453f );
+		float fineVariation = frac( sin( dot( floor( worldPosition / 32.0f ), float3( 39.3468f, 11.135f, 83.155f ) ) ) * 24634.6345f );
+		float colorBlend = saturate( broadVariation * 0.7f + fineVariation * 0.3f );
+		float3 darkTerrain = float3( 0.12f, 0.22f, 0.13f );
+		float3 lightTerrain = float3( 0.34f, 0.43f, 0.31f );
+		material.Albedo = SrgbGammaToLinear( lerp( darkTerrain, lightTerrain, colorBlend ) );
+		material.Roughness = 0.95f;
+		material.Metalness = 0.0f;
+		return ShadingModelStandard::Shade( input, material );
 	}
 }

@@ -6,13 +6,14 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 10;
+	private const int SuiteVersion = 11;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] RequiredScenarios => new[]
 	{
 		"cold_generation",
 		"gpu_transvoxel_regular_proof",
 		"gpu_persistent_static_set",
+		"gpu_production_render_integration",
 		"gpu_allocator_churn",
 		"gpu_replacement_failure",
 		"gpu_pool_exhaustion",
@@ -178,7 +179,10 @@ public sealed class VoxelTerrainBenchmark : Component
 		_playerSafetyFixture = new GameObject( true, "Voxel Benchmark Player Safety Fixture" );
 		_playerSafetyFixture.WorldPosition = Vector3.Zero;
 		var body = _playerSafetyFixture.AddComponent<Rigidbody>();
-		body.Gravity = true;
+		// The fixture exists only to exercise the player-facing streaming path. A
+		// gravity-driven body would fall between manager updates and continually
+		// move the streaming center, preventing the initial world from settling.
+		body.Gravity = false;
 		body.MotionEnabled = true;
 		_playerSafetyFixture.AddComponent<PlayerController>();
 	}
@@ -216,7 +220,11 @@ public sealed class VoxelTerrainBenchmark : Component
 			switch ( _phase )
 		{
 			case BenchmarkPhase.WaitInitialGeneration:
-				if ( _manager.IsTerrainSettled ) CompleteScenarioAndWarmup( BenchmarkPhase.StartGpuTransvoxelProof );
+				// A freshly enabled manager has an empty desired set for one frame before
+				// its first world-generation request is processed. Treating that empty
+				// state as settled lets the GPU proof run without an origin chunk.
+				if ( _manager.DesiredChunkCount == _manager.ConfiguredChunkCount && _manager.IsTerrainSettled )
+					CompleteScenarioAndWarmup( BenchmarkPhase.StartGpuTransvoxelProof );
 				break;
 			case BenchmarkPhase.Warmup:
 				if ( --_warmupFramesRemaining <= 0 ) AdvanceAfterWarmup();
@@ -257,6 +265,21 @@ public sealed class VoxelTerrainBenchmark : Component
 					CompleteScenario( gpuTerrain: diagnostics, gpuPhase2BProof: proof );
 					if ( !proof.Passed ) { FailRun( $"Phase 2B static backend failed: {proof.Failure}" ); break; }
 					_gpuLifecycleScenarioIndex = 0;
+					_phase = BenchmarkPhase.StartGpuProductionRender;
+				}
+				break;
+			case BenchmarkPhase.StartGpuProductionRender:
+				BeginScenario( "gpu_production_render_integration", "Standard lit GPU terrain material is attached to depth-prepass and opaque bounded multi-draw command lists" );
+				_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+				_phase = BenchmarkPhase.WaitGpuProductionRender;
+				break;
+			case BenchmarkPhase.WaitGpuProductionRender:
+				if ( _manager.IsTerrainSettled && System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalSeconds >= 0.5 )
+				{
+					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
+					var proof = VoxelGpuPhase3AProof.ValidateProductionRender( "production_render_integration", diagnostics );
+					CompleteScenario( gpuTerrain: diagnostics, gpuPhase3AProof: proof );
+					if ( !proof.Passed ) { FailRun( $"Phase 3A production render integration failed: {proof.Failure}" ); break; }
 					_phase = BenchmarkPhase.StartGpuLifecycleScenario;
 				}
 				break;
@@ -472,11 +495,11 @@ public sealed class VoxelTerrainBenchmark : Component
 		_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
-	private void CompleteScenario( VoxelGpuTransvoxelProofResult? gpuProof = null, VoxelGpuTerrainDiagnostics? gpuTerrain = null, VoxelGpuPhase2BProofResult? gpuPhase2BProof = null )
+	private void CompleteScenario( VoxelGpuTransvoxelProofResult? gpuProof = null, VoxelGpuTerrainDiagnostics? gpuTerrain = null, VoxelGpuPhase2BProofResult? gpuPhase2BProof = null, VoxelGpuPhase3AProofResult? gpuPhase3AProof = null )
 	{
 		if ( _sampler is null ) return;
 		var streaming = _manager.CaptureChunkStreamingDiagnostics( _sampler.StartingChunkTimingSequence, _sampler.StartingBatchTimingSequence );
-		var result = _sampler.Complete( _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), streaming, System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalMilliseconds, gpuProof, gpuTerrain, gpuPhase2BProof );
+		var result = _sampler.Complete( _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), streaming, System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalMilliseconds, gpuProof, gpuTerrain, gpuPhase2BProof, gpuPhase3AProof );
 		_results.Add( result );
 		var hottest = result.CallCounts.Enumerate().OrderByDescending( entry => entry.Count ).First();
 		Log.Info( $"Voxel terrain benchmark scenario {result.Name}: result={(result.Passed ? "PASS" : "FAIL")}, elapsed={result.ElapsedMilliseconds:F2}ms, FPS(avg/1%-low/0.1%-low)={result.AverageFramesPerSecond:F1}/{result.OnePercentLowFramesPerSecond:F1}/{result.PointOnePercentLowFramesPerSecond:F1}, frameMs(p95/max)={result.FrameP95Milliseconds:F2}/{result.FrameMaximumMilliseconds:F2}, stutters={result.StutterEvents:N0}, editLatency(p95/settle)={result.EditCallP95Milliseconds:F3}/{result.PostEditSettleMilliseconds:F2}ms, GPU-p95={result.GpuP95Milliseconds:F2}ms, hottest={hottest.Name}:{hottest.Count:N0}, allocated={FormatBytes( result.AllocatedBytes )}." );
@@ -927,7 +950,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		Log.Error( $"Voxel terrain benchmark {_runId} failed: {reason}." );
 		if ( _sampler is not null )
 		{
-			if ( _sampler.Name is "gpu_persistent_static_set" or "gpu_async_readback_saturation" or "gpu_resource_recreation" )
+			if ( _sampler.Name is "gpu_persistent_static_set" or "gpu_production_render_integration" or "gpu_async_readback_saturation" or "gpu_resource_recreation" )
 			{
 				var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
 				var proof = VoxelGpuPhase2BProof.ValidateStatic( _sampler.Name, diagnostics, _manager.ConfiguredChunkCount );
@@ -1147,6 +1170,17 @@ public sealed class VoxelTerrainBenchmark : Component
 			builder.AppendLine( $"| {result.Name} | {(result.Passed ? "PASS" : "FAIL")} | {terrain.ResidentBlocks:N0} / {terrain.RequestedBlocks:N0} | {terrain.CountReadbackCount:N0} at {terrain.CountReadbackAverageMilliseconds:F3} ms avg | {Timing( terrain.RequestToVisible )} | {Timing( terrain.BatchCompletion )} | {terrain.CountSubmissionPerBlockMilliseconds:F4} / {terrain.EmitSubmissionPerBlockMilliseconds:F4} ms | {terrain.VisibleDrawCommands:N0} | {FormatBytes( terrain.PoolUsedBytes )} / {FormatBytes( terrain.PeakPoolUsedBytes )} / {FormatBytes( terrain.PoolCapacityBytes )} | {FormatBytes( terrain.ScratchBytes )} | {terrain.GeometryReadbackBytes:N0} B | {terrain.BackpressureEvents:N0} / {terrain.AllocationFailures:N0} | {(proof.Failure ?? terrain.Failure ?? string.Empty).Replace( "|", "\\|" )} |" );
 		}
 		builder.AppendLine();
+		builder.AppendLine( "## Production GPU render integration Phase 3A" );
+		builder.AppendLine();
+		builder.AppendLine( "| Scenario | Result | Shader | Standard lighting | Depth prepass | Depth lists | Opaque lists | Failure |" );
+		builder.AppendLine( "|---|---|---|---|---|---:|---:|---|" );
+		foreach ( var result in _results.Where( result => result.GpuPhase3AProof.HasValue ) )
+		{
+			var terrain = result.GpuTerrain ?? default;
+			var proof = result.GpuPhase3AProof.Value;
+			builder.AppendLine( $"| {result.Name} | {(result.Passed ? "PASS" : "FAIL")} | `{terrain.RenderShader}` | {terrain.ProductionLighting} | {terrain.DepthPrepass} | {terrain.DepthPrepassCommandLists} | {terrain.OpaqueCommandLists} | {(proof.Failure ?? terrain.Failure ?? string.Empty).Replace( "|", "\\|" )} |" );
+		}
+		builder.AppendLine();
 		builder.AppendLine( "## Frame pacing and edit latency" );
 		builder.AppendLine();
 		builder.AppendLine( "| Scenario | Frame standard deviation | Frames >16 / 33 / 50 / 100 ms | Longest stutter | Brush call avg / p95 / max | Post-edit settle | Edit throughput |" );
@@ -1276,6 +1310,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"\"generation_ms\":{Number( d.GenerationElapsedMilliseconds )},\"visual_batch_ms\":{Number( d.VisualBatchElapsedMilliseconds )},\"snapshot_wait_ms\":{Number( d.SnapshotWaitMilliseconds )},\"snapshot_copy_ms\":{Number( d.SnapshotCopyMilliseconds )},\"worker_mesh_ms\":{Number( d.WorkerMeshMilliseconds )},\"upload_ms\":{Number( d.MainThreadUploadMilliseconds )}," +
 			SerializeGpuTransvoxelProofJson( result.GpuTransvoxelProof ) + "," +
 			SerializeGpuPhase2BJson( result.GpuTerrain, result.GpuPhase2BProof ) + "," +
+			SerializeGpuPhase3AJson( result.GpuPhase3AProof ) + "," +
 			SerializeStreamingJson( result.Streaming ) + "," +
 			$"\"configuration_id\":\"{Json( ConfigurationId )}\",\"comparison_baseline_run_id\":{(comparison.HasBaseline ? "\"" + Json( comparison.BaselineRunId ) + "\"" : "null")},\"comparison_has_baseline\":{comparison.HasBaseline.ToString().ToLowerInvariant()},\"change_max_abs_pct\":{(comparison.HasBaseline ? Number( comparison.MaximumAbsolutePercent ) : "null")},\"outlier_detected\":{comparison.MajorOutlier.ToString().ToLowerInvariant()},\"outlier_metrics\":\"{Json( comparison.OutlierMetrics )}\",\"reproduction_of_run_id\":{(_reproductionOfRunId is null ? "null" : "\"" + Json( _reproductionOfRunId ) + "\"")},\"reproduction_status\":\"{Json( comparison.ReproductionStatus )}\"," +
 			SerializePercentChangesJson( comparison ) + "," +
@@ -1294,7 +1329,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			result.AllocatedBytes, Number( result.GcPauseMilliseconds ), result.Gen0Collections, result.Gen1Collections, result.Gen2Collections, result.Exceptions, result.PeakMemoryBytes, result.PeakTexturePoolUsedBytes, result.PeakTexturePoolNonEvictableBytes, result.MaximumPendingStreamingRequests, Number( result.DrawCallsAverage ), Number( result.TrianglesRenderedAverage ), Number( result.ObjectsRenderedAverage ), Number( result.MaterialChangesAverage ),
 			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, d.PlayerSafetyActive, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds ),
 			GpuTransvoxelProofCsv( result.GpuTransvoxelProof ),
-			GpuPhase2BCsv( result.GpuTerrain, result.GpuPhase2BProof ),
+			GpuPhase2BCsv( result.GpuTerrain, result.GpuPhase2BProof, result.GpuPhase3AProof ),
 			StreamingCsv( result.Streaming ),
 			Csv( ConfigurationId ), Csv( comparison.BaselineRunId ), comparison.HasBaseline, comparison.HasBaseline ? Number( comparison.MaximumAbsolutePercent ) : string.Empty, comparison.MajorOutlier, Csv( comparison.OutlierMetrics ), Csv( _reproductionOfRunId ), Csv( comparison.ReproductionStatus )
 		);
@@ -1317,22 +1352,29 @@ public sealed class VoxelTerrainBenchmark : Component
 		? string.Join( ",", true, proof.Value.Passed, Csv( proof.Value.Failure ), proof.Value.VertexCount, proof.Value.IndexCount, proof.Value.ActiveCells, proof.Value.OverflowAttempts, proof.Value.GpuBufferBytes, Number( proof.Value.SubmissionMilliseconds ), Number( proof.Value.CompletionMilliseconds ), Number( proof.Value.GeometryReadbackMilliseconds ), proof.Value.BatchSize, proof.Value.SurfaceBlockCount, proof.Value.DispatchCount, proof.Value.GpuCountPublicationPassed, Number( proof.Value.GpuCountPublicationMilliseconds ), Number( proof.Value.CpuCountPublicationMilliseconds ) )
 		: "False,False,\"\",0,0,0,0,0,0,0,0,0,0,0,False,0,0";
 
-	private const string GpuPhase2BCsvHeader = "gpu_terrain_available,gpu_terrain_backend,gpu_terrain_requested_blocks,gpu_terrain_resident_blocks,gpu_terrain_pending_count_batches,gpu_terrain_pending_emit_batches,gpu_terrain_backpressure_events,gpu_terrain_allocation_failures,gpu_terrain_stale_publications_rejected,gpu_terrain_visible_draw_commands,gpu_terrain_scratch_bytes,gpu_terrain_pool_capacity_bytes,gpu_terrain_pool_used_bytes,gpu_terrain_pool_peak_bytes,gpu_terrain_geometry_readback_bytes,gpu_terrain_count_submission_ms,gpu_terrain_count_readback_avg_ms,gpu_terrain_count_readback_count,gpu_terrain_emit_submission_ms,gpu_terrain_count_submission_per_block_ms,gpu_terrain_emit_submission_per_block_ms,gpu_terrain_request_to_visible_avg_ms,gpu_terrain_request_to_visible_p95_ms,gpu_terrain_request_to_visible_max_ms,gpu_terrain_batch_completion_avg_ms,gpu_terrain_batch_completion_p95_ms,gpu_terrain_batch_completion_max_ms,gpu_terrain_failure,gpu_phase2b_available,gpu_phase2b_passed,gpu_phase2b_test,gpu_phase2b_failure,gpu_lifecycle_budget_bytes,gpu_lifecycle_peak_used_bytes,gpu_lifecycle_churn_operations,gpu_lifecycle_allocation_failures,gpu_lifecycle_backpressure_events,gpu_lifecycle_stale_publications_rejected,gpu_lifecycle_retained_delta_percent";
+	private const string GpuPhase2BCsvHeader = "gpu_terrain_available,gpu_terrain_backend,gpu_terrain_requested_blocks,gpu_terrain_resident_blocks,gpu_terrain_pending_count_batches,gpu_terrain_pending_emit_batches,gpu_terrain_backpressure_events,gpu_terrain_allocation_failures,gpu_terrain_stale_publications_rejected,gpu_terrain_visible_draw_commands,gpu_terrain_scratch_bytes,gpu_terrain_pool_capacity_bytes,gpu_terrain_pool_used_bytes,gpu_terrain_pool_peak_bytes,gpu_terrain_geometry_readback_bytes,gpu_terrain_count_submission_ms,gpu_terrain_count_readback_avg_ms,gpu_terrain_count_readback_count,gpu_terrain_emit_submission_ms,gpu_terrain_count_submission_per_block_ms,gpu_terrain_emit_submission_per_block_ms,gpu_terrain_request_to_visible_avg_ms,gpu_terrain_request_to_visible_p95_ms,gpu_terrain_request_to_visible_max_ms,gpu_terrain_batch_completion_avg_ms,gpu_terrain_batch_completion_p95_ms,gpu_terrain_batch_completion_max_ms,gpu_terrain_failure,gpu_phase2b_available,gpu_phase2b_passed,gpu_phase2b_test,gpu_phase2b_failure,gpu_lifecycle_budget_bytes,gpu_lifecycle_peak_used_bytes,gpu_lifecycle_churn_operations,gpu_lifecycle_allocation_failures,gpu_lifecycle_backpressure_events,gpu_lifecycle_stale_publications_rejected,gpu_lifecycle_retained_delta_percent,gpu_terrain_render_shader,gpu_terrain_production_lighting,gpu_terrain_depth_prepass,gpu_terrain_depth_command_lists,gpu_terrain_opaque_command_lists,gpu_phase3a_available,gpu_phase3a_passed,gpu_phase3a_test,gpu_phase3a_failure";
 
 	private static string SerializeGpuPhase2BJson( VoxelGpuTerrainDiagnostics? terrain, VoxelGpuPhase2BProofResult? proof )
 	{
 		var t = terrain ?? default;
 		var p = proof ?? default;
 		var lifecycle = p.Lifecycle ?? default;
-		return $"\"gpu_terrain_available\":{terrain.HasValue.ToString().ToLowerInvariant()},\"gpu_terrain_backend\":\"{Json( t.Backend )}\",\"gpu_terrain_requested_blocks\":{t.RequestedBlocks},\"gpu_terrain_resident_blocks\":{t.ResidentBlocks},\"gpu_terrain_pending_count_batches\":{t.PendingCountBatches},\"gpu_terrain_pending_emit_batches\":{t.PendingEmitBatches},\"gpu_terrain_backpressure_events\":{t.BackpressureEvents},\"gpu_terrain_allocation_failures\":{t.AllocationFailures},\"gpu_terrain_stale_publications_rejected\":{t.StalePublicationsRejected},\"gpu_terrain_visible_draw_commands\":{t.VisibleDrawCommands},\"gpu_terrain_scratch_bytes\":{t.ScratchBytes},\"gpu_terrain_pool_capacity_bytes\":{t.PoolCapacityBytes},\"gpu_terrain_pool_used_bytes\":{t.PoolUsedBytes},\"gpu_terrain_pool_peak_bytes\":{t.PeakPoolUsedBytes},\"gpu_terrain_geometry_readback_bytes\":{t.GeometryReadbackBytes},\"gpu_terrain_count_submission_ms\":{Number( t.CountSubmissionMilliseconds )},\"gpu_terrain_count_readback_avg_ms\":{Number( t.CountReadbackAverageMilliseconds )},\"gpu_terrain_count_readback_count\":{t.CountReadbackCount},\"gpu_terrain_emit_submission_ms\":{Number( t.EmitSubmissionMilliseconds )},\"gpu_terrain_count_submission_per_block_ms\":{Number( t.CountSubmissionPerBlockMilliseconds )},\"gpu_terrain_emit_submission_per_block_ms\":{Number( t.EmitSubmissionPerBlockMilliseconds )},\"gpu_terrain_request_to_visible_avg_ms\":{Number( t.RequestToVisible.AverageMilliseconds )},\"gpu_terrain_request_to_visible_p95_ms\":{Number( t.RequestToVisible.P95Milliseconds )},\"gpu_terrain_request_to_visible_max_ms\":{Number( t.RequestToVisible.MaximumMilliseconds )},\"gpu_terrain_batch_completion_avg_ms\":{Number( t.BatchCompletion.AverageMilliseconds )},\"gpu_terrain_batch_completion_p95_ms\":{Number( t.BatchCompletion.P95Milliseconds )},\"gpu_terrain_batch_completion_max_ms\":{Number( t.BatchCompletion.MaximumMilliseconds )},\"gpu_terrain_failure\":\"{Json( t.Failure )}\",\"gpu_phase2b_available\":{proof.HasValue.ToString().ToLowerInvariant()},\"gpu_phase2b_passed\":{p.Passed.ToString().ToLowerInvariant()},\"gpu_phase2b_test\":\"{Json( p.Test )}\",\"gpu_phase2b_failure\":\"{Json( p.Failure )}\",\"gpu_lifecycle_budget_bytes\":{lifecycle.BudgetBytes},\"gpu_lifecycle_peak_used_bytes\":{lifecycle.PeakUsedBytes},\"gpu_lifecycle_churn_operations\":{lifecycle.ChurnOperations},\"gpu_lifecycle_allocation_failures\":{lifecycle.AllocationFailures},\"gpu_lifecycle_backpressure_events\":{lifecycle.BackpressureEvents},\"gpu_lifecycle_stale_publications_rejected\":{lifecycle.StalePublicationsRejected},\"gpu_lifecycle_retained_delta_percent\":{Number( lifecycle.RetainedMemoryDeltaPercent )}";
+		return $"\"gpu_terrain_available\":{terrain.HasValue.ToString().ToLowerInvariant()},\"gpu_terrain_backend\":\"{Json( t.Backend )}\",\"gpu_terrain_render_shader\":\"{Json( t.RenderShader )}\",\"gpu_terrain_production_lighting\":{t.ProductionLighting.ToString().ToLowerInvariant()},\"gpu_terrain_depth_prepass\":{t.DepthPrepass.ToString().ToLowerInvariant()},\"gpu_terrain_depth_command_lists\":{t.DepthPrepassCommandLists},\"gpu_terrain_opaque_command_lists\":{t.OpaqueCommandLists},\"gpu_terrain_requested_blocks\":{t.RequestedBlocks},\"gpu_terrain_resident_blocks\":{t.ResidentBlocks},\"gpu_terrain_pending_count_batches\":{t.PendingCountBatches},\"gpu_terrain_pending_emit_batches\":{t.PendingEmitBatches},\"gpu_terrain_backpressure_events\":{t.BackpressureEvents},\"gpu_terrain_allocation_failures\":{t.AllocationFailures},\"gpu_terrain_stale_publications_rejected\":{t.StalePublicationsRejected},\"gpu_terrain_visible_draw_commands\":{t.VisibleDrawCommands},\"gpu_terrain_scratch_bytes\":{t.ScratchBytes},\"gpu_terrain_pool_capacity_bytes\":{t.PoolCapacityBytes},\"gpu_terrain_pool_used_bytes\":{t.PoolUsedBytes},\"gpu_terrain_pool_peak_bytes\":{t.PeakPoolUsedBytes},\"gpu_terrain_geometry_readback_bytes\":{t.GeometryReadbackBytes},\"gpu_terrain_count_submission_ms\":{Number( t.CountSubmissionMilliseconds )},\"gpu_terrain_count_readback_avg_ms\":{Number( t.CountReadbackAverageMilliseconds )},\"gpu_terrain_count_readback_count\":{t.CountReadbackCount},\"gpu_terrain_emit_submission_ms\":{Number( t.EmitSubmissionMilliseconds )},\"gpu_terrain_count_submission_per_block_ms\":{Number( t.CountSubmissionPerBlockMilliseconds )},\"gpu_terrain_emit_submission_per_block_ms\":{Number( t.EmitSubmissionPerBlockMilliseconds )},\"gpu_terrain_request_to_visible_avg_ms\":{Number( t.RequestToVisible.AverageMilliseconds )},\"gpu_terrain_request_to_visible_p95_ms\":{Number( t.RequestToVisible.P95Milliseconds )},\"gpu_terrain_request_to_visible_max_ms\":{Number( t.RequestToVisible.MaximumMilliseconds )},\"gpu_terrain_batch_completion_avg_ms\":{Number( t.BatchCompletion.AverageMilliseconds )},\"gpu_terrain_batch_completion_p95_ms\":{Number( t.BatchCompletion.P95Milliseconds )},\"gpu_terrain_batch_completion_max_ms\":{Number( t.BatchCompletion.MaximumMilliseconds )},\"gpu_terrain_failure\":\"{Json( t.Failure )}\",\"gpu_phase2b_available\":{proof.HasValue.ToString().ToLowerInvariant()},\"gpu_phase2b_passed\":{p.Passed.ToString().ToLowerInvariant()},\"gpu_phase2b_test\":\"{Json( p.Test )}\",\"gpu_phase2b_failure\":\"{Json( p.Failure )}\",\"gpu_lifecycle_budget_bytes\":{lifecycle.BudgetBytes},\"gpu_lifecycle_peak_used_bytes\":{lifecycle.PeakUsedBytes},\"gpu_lifecycle_churn_operations\":{lifecycle.ChurnOperations},\"gpu_lifecycle_backpressure_events\":{lifecycle.BackpressureEvents},\"gpu_lifecycle_stale_publications_rejected\":{lifecycle.StalePublicationsRejected},\"gpu_lifecycle_retained_delta_percent\":{Number( lifecycle.RetainedMemoryDeltaPercent )}";
 	}
 
-	private static string GpuPhase2BCsv( VoxelGpuTerrainDiagnostics? terrain, VoxelGpuPhase2BProofResult? proof )
+	private static string SerializeGpuPhase3AJson( VoxelGpuPhase3AProofResult? proof )
+	{
+		var p = proof ?? default;
+		return $"\"gpu_phase3a_available\":{proof.HasValue.ToString().ToLowerInvariant()},\"gpu_phase3a_passed\":{p.Passed.ToString().ToLowerInvariant()},\"gpu_phase3a_test\":\"{Json( p.Test )}\",\"gpu_phase3a_failure\":\"{Json( p.Failure )}\"";
+	}
+
+	private static string GpuPhase2BCsv( VoxelGpuTerrainDiagnostics? terrain, VoxelGpuPhase2BProofResult? proof, VoxelGpuPhase3AProofResult? phase3Proof )
 	{
 		var t = terrain ?? default;
 		var p = proof ?? default;
+		var p3 = phase3Proof ?? default;
 		var lifecycle = p.Lifecycle ?? default;
-		return string.Join( ",", terrain.HasValue, Csv( t.Backend ), t.RequestedBlocks, t.ResidentBlocks, t.PendingCountBatches, t.PendingEmitBatches, t.BackpressureEvents, t.AllocationFailures, t.StalePublicationsRejected, t.VisibleDrawCommands, t.ScratchBytes, t.PoolCapacityBytes, t.PoolUsedBytes, t.PeakPoolUsedBytes, t.GeometryReadbackBytes, Number( t.CountSubmissionMilliseconds ), Number( t.CountReadbackAverageMilliseconds ), t.CountReadbackCount, Number( t.EmitSubmissionMilliseconds ), Number( t.CountSubmissionPerBlockMilliseconds ), Number( t.EmitSubmissionPerBlockMilliseconds ), Number( t.RequestToVisible.AverageMilliseconds ), Number( t.RequestToVisible.P95Milliseconds ), Number( t.RequestToVisible.MaximumMilliseconds ), Number( t.BatchCompletion.AverageMilliseconds ), Number( t.BatchCompletion.P95Milliseconds ), Number( t.BatchCompletion.MaximumMilliseconds ), Csv( t.Failure ), proof.HasValue, p.Passed, Csv( p.Test ), Csv( p.Failure ), lifecycle.BudgetBytes, lifecycle.PeakUsedBytes, lifecycle.ChurnOperations, lifecycle.AllocationFailures, lifecycle.BackpressureEvents, lifecycle.StalePublicationsRejected, Number( lifecycle.RetainedMemoryDeltaPercent ) );
+		return string.Join( ",", terrain.HasValue, Csv( t.Backend ), t.RequestedBlocks, t.ResidentBlocks, t.PendingCountBatches, t.PendingEmitBatches, t.BackpressureEvents, t.AllocationFailures, t.StalePublicationsRejected, t.VisibleDrawCommands, t.ScratchBytes, t.PoolCapacityBytes, t.PoolUsedBytes, t.PeakPoolUsedBytes, t.GeometryReadbackBytes, Number( t.CountSubmissionMilliseconds ), Number( t.CountReadbackAverageMilliseconds ), t.CountReadbackCount, Number( t.EmitSubmissionMilliseconds ), Number( t.CountSubmissionPerBlockMilliseconds ), Number( t.EmitSubmissionPerBlockMilliseconds ), Number( t.RequestToVisible.AverageMilliseconds ), Number( t.RequestToVisible.P95Milliseconds ), Number( t.RequestToVisible.MaximumMilliseconds ), Number( t.BatchCompletion.AverageMilliseconds ), Number( t.BatchCompletion.P95Milliseconds ), Number( t.BatchCompletion.MaximumMilliseconds ), Csv( t.Failure ), proof.HasValue, p.Passed, Csv( p.Test ), Csv( p.Failure ), lifecycle.BudgetBytes, lifecycle.PeakUsedBytes, lifecycle.ChurnOperations, lifecycle.AllocationFailures, lifecycle.BackpressureEvents, lifecycle.StalePublicationsRejected, Number( lifecycle.RetainedMemoryDeltaPercent ), Csv( t.RenderShader ), t.ProductionLighting, t.DepthPrepass, t.DepthPrepassCommandLists, t.OpaqueCommandLists, phase3Proof.HasValue, p3.Passed, Csv( p3.Test ), Csv( p3.Failure ) );
 	}
 
 	private static string CallCountKey( string name ) => "calls_" + name.Replace( '.', '_' );
@@ -1400,6 +1442,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		WaitGpuTransvoxelProof,
 		StartGpuPersistentStatic,
 		WaitGpuPersistentStatic,
+		StartGpuProductionRender,
+		WaitGpuProductionRender,
 		StartGpuLifecycleScenario,
 		WaitGpuLifecycleScenario,
 		StartGpuAsyncReadbackSaturation,
@@ -1581,7 +1625,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			}
 		}
 
-		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, VoxelChunkStreamingDiagnostics streaming, double elapsedMilliseconds, VoxelGpuTransvoxelProofResult? gpuProof, VoxelGpuTerrainDiagnostics? gpuTerrain, VoxelGpuPhase2BProofResult? gpuPhase2BProof )
+		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, VoxelChunkStreamingDiagnostics streaming, double elapsedMilliseconds, VoxelGpuTransvoxelProofResult? gpuProof, VoxelGpuTerrainDiagnostics? gpuTerrain, VoxelGpuPhase2BProofResult? gpuPhase2BProof, VoxelGpuPhase3AProofResult? gpuPhase3AProof )
 		{
 			_frameTimes.Sort();
 			_gpuTimes.Sort();
@@ -1610,7 +1654,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			{
 				Name = Name,
 				Description = Description,
-				Passed = diagnostics.FailedVisualChunks == 0 && diagnostics.PendingVisualBuilds == 0 && diagnostics.PendingCollisionBuilds == 0 && !diagnostics.PlayerSafetyActive && _exceptions == 0 && _visualCoherenceViolationFrames == 0 && (!gpuProof.HasValue || gpuProof.Value.Passed) && (!gpuPhase2BProof.HasValue || gpuPhase2BProof.Value.Passed),
+				Passed = diagnostics.FailedVisualChunks == 0 && diagnostics.PendingVisualBuilds == 0 && diagnostics.PendingCollisionBuilds == 0 && !diagnostics.PlayerSafetyActive && _exceptions == 0 && _visualCoherenceViolationFrames == 0 && (!gpuProof.HasValue || gpuProof.Value.Passed) && (!gpuPhase2BProof.HasValue || gpuPhase2BProof.Value.Passed) && (!gpuPhase3AProof.HasValue || gpuPhase3AProof.Value.Passed),
 				EditCount = EditCount,
 				ChangedChunkEvents = ChangedChunkEvents,
 				VisualCoherenceViolationFrames = _visualCoherenceViolationFrames,
@@ -1674,7 +1718,8 @@ public sealed class VoxelTerrainBenchmark : Component
 				CallCounts = callCounts.Subtract( _startingCallCounts ),
 				GpuTransvoxelProof = gpuProof,
 				GpuTerrain = gpuTerrain,
-				GpuPhase2BProof = gpuPhase2BProof
+				GpuPhase2BProof = gpuPhase2BProof,
+				GpuPhase3AProof = gpuPhase3AProof
 			};
 		}
 
@@ -1787,5 +1832,6 @@ public sealed class VoxelTerrainBenchmark : Component
 		public VoxelGpuTransvoxelProofResult? GpuTransvoxelProof { get; init; }
 		public VoxelGpuTerrainDiagnostics? GpuTerrain { get; init; }
 		public VoxelGpuPhase2BProofResult? GpuPhase2BProof { get; init; }
+		public VoxelGpuPhase3AProofResult? GpuPhase3AProof { get; init; }
 	}
 }

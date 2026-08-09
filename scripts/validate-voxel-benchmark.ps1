@@ -11,6 +11,7 @@ $requiredScenarios = @(
 	'cold_generation',
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
+	'gpu_production_render_integration',
 	'gpu_allocator_churn',
 	'gpu_replacement_failure',
 	'gpu_pool_exhaustion',
@@ -42,6 +43,8 @@ $requiredMetrics = @(
 	'gpu_transvoxel_batch_size', 'gpu_transvoxel_surface_blocks', 'gpu_transvoxel_dispatches',
 	'gpu_transvoxel_gpu_publication_passed', 'gpu_transvoxel_gpu_publication_ms', 'gpu_transvoxel_cpu_publication_ms',
 	'gpu_terrain_available', 'gpu_terrain_backend', 'gpu_terrain_requested_blocks', 'gpu_terrain_resident_blocks',
+	'gpu_terrain_render_shader', 'gpu_terrain_production_lighting', 'gpu_terrain_depth_prepass',
+	'gpu_terrain_depth_command_lists', 'gpu_terrain_opaque_command_lists',
 	'gpu_terrain_pending_count_batches', 'gpu_terrain_pending_emit_batches', 'gpu_terrain_backpressure_events',
 	'gpu_terrain_allocation_failures', 'gpu_terrain_stale_publications_rejected', 'gpu_terrain_visible_draw_commands',
 	'gpu_terrain_scratch_bytes', 'gpu_terrain_pool_capacity_bytes', 'gpu_terrain_pool_used_bytes', 'gpu_terrain_pool_peak_bytes',
@@ -54,6 +57,7 @@ $requiredMetrics = @(
 	'gpu_lifecycle_budget_bytes', 'gpu_lifecycle_peak_used_bytes', 'gpu_lifecycle_churn_operations',
 	'gpu_lifecycle_allocation_failures', 'gpu_lifecycle_backpressure_events',
 	'gpu_lifecycle_stale_publications_rejected', 'gpu_lifecycle_retained_delta_percent',
+	'gpu_phase3a_available', 'gpu_phase3a_passed', 'gpu_phase3a_test', 'gpu_phase3a_failure',
 	'stream_chunks_completed', 'stream_chunks_fresh', 'stream_chunks_cached', 'stream_batches_completed',
 	'stream_sdf_generation_avg_ms', 'stream_sdf_generation_p95_ms', 'stream_sdf_generation_max_ms',
 	'stream_mesh_queue_avg_ms', 'stream_mesh_queue_p95_ms', 'stream_mesh_queue_max_ms',
@@ -117,7 +121,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 10 ) { Add-Failure "Expected suite version 10, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 11 ) { Add-Failure "Expected suite version 11, found '$($report.suite_version)'" }
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 foreach ( $property in @(
 	'configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id',
@@ -178,6 +182,17 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.gpu_transvoxel_batch_size -ne 128 ) { Add-Failure "$context did not validate the required 128-block batch" }
 		if ( $scenario.gpu_transvoxel_gpu_publication_passed -ne $true ) { Add-Failure "$context did not publish GPU-authored indirect arguments" }
 		if ( [int]$scenario.gpu_transvoxel_dispatches -ge 128 ) { Add-Failure "$context dispatch count did not demonstrate batching" }
+	}
+	elseif ( $scenario.scenario -eq 'gpu_production_render_integration' )
+	{
+		if ( $scenario.gpu_phase3a_available -ne $true ) { Add-Failure "$context has no Phase 3A proof result" }
+		if ( $scenario.gpu_phase3a_passed -ne $true ) { Add-Failure "$context Phase 3A proof failed: $($scenario.gpu_phase3a_failure)" }
+		if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no production GPU terrain diagnostics" }
+		if ( [string]::IsNullOrWhiteSpace( [string]$scenario.gpu_terrain_render_shader ) ) { Add-Failure "$context has no production render shader" }
+		if ( $scenario.gpu_terrain_production_lighting -ne $true ) { Add-Failure "$context did not use standard production lighting" }
+		if ( $scenario.gpu_terrain_depth_prepass -ne $true ) { Add-Failure "$context did not attach a depth prepass" }
+		if ( [int]$scenario.gpu_terrain_depth_command_lists -le 0 -or [int]$scenario.gpu_terrain_opaque_command_lists -le 0 ) { Add-Failure "$context did not attach bounded depth and opaque command lists" }
+		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
 	}
 	elseif ( $scenario.scenario -like 'gpu_*' )
 	{

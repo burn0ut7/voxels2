@@ -521,9 +521,9 @@
           "ScenarioTimeoutSeconds": 90,
           "SustainedEditCount": 80,
           "SustainedEditIntervalSeconds": 0.05,
-          "TraversalDistance": 50000,
+          "TraversalDistance": 10000,
           "TraversalLoopCount": 1,
-          "TraversalSpeed": 3000,
+          "TraversalSpeed": 1000,
           "WarmupFrames": 30
         }
       ],

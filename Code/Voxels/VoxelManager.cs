@@ -272,7 +272,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	protected override void OnUpdate()
 	{
-		if ( Application.IsEditor && !GenerateInEditor ) return;
+		if ( Scene?.IsEditor == true && !GenerateInEditor ) return;
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
 		if ( RequestGpuTransvoxelProof )

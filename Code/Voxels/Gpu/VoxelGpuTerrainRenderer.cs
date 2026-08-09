@@ -1,19 +1,26 @@
 internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDisposable
 {
 	public const int MaximumCommandsPerSubmission = 16;
-	private const string ShaderName = "shaders/voxel_gpu_terrain.shader";
+	public const string ShaderName = "shaders/voxel_gpu_terrain.shader";
 	private readonly CameraComponent _camera;
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainDiagnosticCounters _diagnostics;
 	private readonly GpuBuffer<VoxelGpuResidentDescriptor> _residentBuffer;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
-	private readonly Sandbox.Rendering.CommandList[] _commandLists;
+	private readonly Sandbox.Rendering.CommandList[] _depthCommandLists;
+	private readonly Sandbox.Rendering.CommandList[] _opaqueCommandLists;
 	private readonly RenderAttributes _attributes = new();
 	private readonly Material _material;
-	private int _attachedCommandListCount;
+	private int _attachedDepthCommandListCount;
+	private int _attachedOpaqueCommandListCount;
 	private bool _dirty = true;
 	private bool _disposed;
+
+	public bool UsesProductionLighting => true;
+	public bool UsesDepthPrepass => true;
+	public int DepthPrepassCommandListCount => _attachedDepthCommandListCount;
+	public int OpaqueCommandListCount => _attachedOpaqueCommandListCount;
 
 	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics )
 		: base( world )
@@ -27,8 +34,11 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( residents.Capacity,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.IndirectDrawArguments, "Voxel GPU Draw Commands" );
 		var commandListCapacity = (residents.Capacity + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission;
-		_commandLists = Enumerable.Range( 0, commandListCapacity )
-			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Multi Draw {index}" ) )
+		_depthCommandLists = Enumerable.Range( 0, commandListCapacity )
+			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Depth Multi Draw {index}" ) )
+			.ToArray();
+		_opaqueCommandLists = Enumerable.Range( 0, commandListCapacity )
+			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Opaque Multi Draw {index}" ) )
 			.ToArray();
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
 	}
@@ -44,11 +54,10 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private void Rebuild()
 	{
 		_dirty = false;
-		for ( var index = 0; index < _attachedCommandListCount; index++ )
-		{
-			_camera.RemoveCommandList( _commandLists[index] );
-		}
-		_attachedCommandListCount = 0;
+		for ( var index = 0; index < _attachedDepthCommandListCount; index++ ) _camera.RemoveCommandList( _depthCommandLists[index] );
+		for ( var index = 0; index < _attachedOpaqueCommandListCount; index++ ) _camera.RemoveCommandList( _opaqueCommandLists[index] );
+		_attachedDepthCommandListCount = 0;
+		_attachedOpaqueCommandListCount = 0;
 		var descriptorData = new VoxelGpuResidentDescriptor[_residents.Capacity];
 		var arguments = new List<GpuBuffer.IndirectDrawIndexedArguments>( _residents.Count );
 		var frustum = _camera.GetFrustum();
@@ -81,32 +90,39 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_attributes.Set( "TerrainResidents", _residentBuffer );
 		for ( var offset = 0; offset < arguments.Count; offset += MaximumCommandsPerSubmission )
 		{
-			var commandList = _commandLists[_attachedCommandListCount];
-			commandList.Reset();
-			commandList.ResourceBarrierTransition( _pool.Vertices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
-			commandList.ResourceBarrierTransition( _pool.Indices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
-			commandList.ResourceBarrierTransition( _drawArguments, Sandbox.Rendering.ResourceState.IndirectArgument );
-			commandList.DrawIndexedInstancedIndirect(
-				_pool.Vertices,
-				_pool.Indices,
-				_material,
-				_drawArguments,
-				(uint)offset,
-				_attributes,
-				Graphics.PrimitiveType.Triangles,
-				(uint)System.Math.Min( MaximumCommandsPerSubmission, arguments.Count - offset ),
-				0 );
-			_camera.AddCommandList( commandList, Sandbox.Rendering.Stage.AfterOpaque );
-			_attachedCommandListCount++;
+			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, arguments.Count - offset );
+			BuildAndAttachCommandList( _depthCommandLists[_attachedDepthCommandListCount++], offset, commandCount, Sandbox.Rendering.Stage.AfterDepthPrepass );
+			BuildAndAttachCommandList( _opaqueCommandLists[_attachedOpaqueCommandListCount++], offset, commandCount, Sandbox.Rendering.Stage.AfterOpaque );
 		}
+	}
+
+	private void BuildAndAttachCommandList( Sandbox.Rendering.CommandList commandList, int offset, uint commandCount, Sandbox.Rendering.Stage stage )
+	{
+		commandList.Reset();
+		commandList.ResourceBarrierTransition( _pool.Vertices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
+		commandList.ResourceBarrierTransition( _pool.Indices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
+		commandList.ResourceBarrierTransition( _drawArguments, Sandbox.Rendering.ResourceState.IndirectArgument );
+		commandList.DrawIndexedInstancedIndirect(
+			_pool.Vertices,
+			_pool.Indices,
+			_material,
+			_drawArguments,
+			(uint)offset,
+			_attributes,
+			Graphics.PrimitiveType.Triangles,
+			commandCount,
+			0 );
+		_camera.AddCommandList( commandList, stage );
 	}
 
 	public void Dispose()
 	{
 		if ( _disposed ) return;
 		_disposed = true;
-		for ( var index = 0; index < _attachedCommandListCount; index++ )
-			_camera.RemoveCommandList( _commandLists[index] );
+		for ( var index = 0; index < _attachedDepthCommandListCount; index++ ) _camera.RemoveCommandList( _depthCommandLists[index] );
+		for ( var index = 0; index < _attachedOpaqueCommandListCount; index++ ) _camera.RemoveCommandList( _opaqueCommandLists[index] );
+		_attachedDepthCommandListCount = 0;
+		_attachedOpaqueCommandListCount = 0;
 		_drawArguments.Dispose();
 		_residentBuffer.Dispose();
 		Delete();

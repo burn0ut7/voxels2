@@ -31,6 +31,11 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	double EmitSubmissionPerBlockMilliseconds,
 	VoxelTimingDistribution RequestToVisible,
 	VoxelTimingDistribution BatchCompletion,
+	string RenderShader,
+	bool ProductionLighting,
+	bool DepthPrepass,
+	int DepthPrepassCommandLists,
+	int OpaqueCommandLists,
 	string Failure );
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
@@ -61,7 +66,7 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	public void RecordRequestToVisible( double milliseconds ) => _requestToVisibleMilliseconds.Add( milliseconds );
 	public void RecordBatchCompletion( double milliseconds ) => _batchCompletionMilliseconds.Add( milliseconds );
 
-	public VoxelGpuTerrainDiagnostics Snapshot( VoxelGpuCapabilityReport capabilities, VoxelGpuResidentTable residents, VoxelGpuMeshPool pool )
+	public VoxelGpuTerrainDiagnostics Snapshot( VoxelGpuCapabilityReport capabilities, VoxelGpuResidentTable residents, VoxelGpuMeshPool pool, VoxelGpuTerrainRenderer renderer )
 	{
 		var usedBytes = pool is null ? 0 : (long)pool.UsedVertices * 44 + (long)pool.UsedIndices * sizeof( uint );
 		var peakBytes = pool is null ? 0 : (long)pool.PeakUsedVertices * 44 + (long)pool.PeakUsedIndices * sizeof( uint );
@@ -98,6 +103,11 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			RequestedBlocks == 0 ? 0.0 : EmitSubmissionMilliseconds / RequestedBlocks,
 			Summarize( _requestToVisibleMilliseconds ),
 			Summarize( _batchCompletionMilliseconds ),
+			VoxelGpuTerrainRenderer.ShaderName,
+			renderer?.UsesProductionLighting == true,
+			renderer?.UsesDepthPrepass == true,
+			renderer?.DepthPrepassCommandListCount ?? 0,
+			renderer?.OpaqueCommandListCount ?? 0,
 			Failure.Length > 0 ? Failure : capabilities.Failure );
 	}
 
