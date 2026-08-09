@@ -22,8 +22,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<Vector3Int> _gpuPreviousStreamingObservers = new( 4 );
 	private readonly HashSet<Vector3Int> _gpuDesiredScratch = new();
 	private readonly List<Vector3Int> _gpuOrderedScratch = new();
-	private readonly HashSet<VoxelVisualBlockKey> _gpuDesiredKeyScratch = new();
-	private readonly List<VoxelVisualBlockKey> _gpuOrderedKeyScratch = new();
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
@@ -45,7 +43,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Dictionary<Vector3Int, double> _initialSdfGenerationMilliseconds = new();
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
 	private VoxelGpuTerrainBackend _gpuTerrainBackend;
-	private VoxelClipboxLodPlanner _gpuClipboxLodPlanner;
 	private bool _gpuEditUnavailableWarningLogged;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
@@ -159,15 +156,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	[Property, Group( "Rendering" ), Range( 0, 4 )]
 	public int GpuFrustumPaddingChunks { get; set; } = 1;
-
-	[Property, Group( "Rendering" )]
-	public bool GpuClipboxLodEnabled { get; set; }
-
-	[Property, Group( "Rendering" ), Range( 1, 4 )]
-	public int GpuClipboxLodLevels { get; set; } = 1;
-
-	[Property, Group( "Rendering" ), Range( 1, 16 )]
-	public int GpuClipboxRadius { get; set; } = 4;
 
 	[Property, Group( "Meshing" ), Range( 1, MaximumConcurrentCpuChunkBuilds )]
 	public int CpuChunkBuildConcurrency { get; set; } = 4;
@@ -287,8 +275,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuIndexPoolCapacity = System.Math.Clamp( GpuIndexPoolCapacity, 196608, 50331648 );
 		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
-		GpuClipboxLodLevels = System.Math.Clamp( GpuClipboxLodLevels, 1, 4 );
-		GpuClipboxRadius = System.Math.Clamp( GpuClipboxRadius, 1, 16 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
 		CollisionBuildConcurrency = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
@@ -471,15 +457,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_gpuStreamingObserversInitialized = false;
 		_gpuStreamingObservers.Clear();
 		_gpuPreviousStreamingObservers.Clear();
-		var observers = GpuClipboxLodEnabled ? GetGpuStreamingObserverChunks() : GetStreamingObserverChunks();
+		var observers = GetStreamingObserverChunks();
 		PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
-		if ( GpuClipboxLodEnabled )
-		{
-			_gpuClipboxLodPlanner = new VoxelClipboxLodPlanner( GpuClipboxRadius, GpuClipboxLodLevels );
-			_gpuClipboxLodPlanner.Plan( observers[0], GpuTerrainRuleVersion, _gpuDesiredKeyScratch );
-			var phase4Proof = VoxelGpuPhase4Proof.ValidateClipbox( GpuClipboxRadius, GpuClipboxLodLevels, GpuTerrainRuleVersion );
-			Log.Info( $"Voxel GPU Phase 4 clipbox proof: result={(phase4Proof.Passed ? "PASS" : "FAIL")}, levels={phase4Proof.Levels}, residents={phase4Proof.Residents:N0}, transitions={phase4Proof.Transitions:N0}, failure={phase4Proof.Failure}." );
-		}
 		StartGpuTerrainWorld();
 	}
 
@@ -642,8 +621,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		try
 		{
-			var requestedResidentCount = GpuClipboxLodEnabled ? _gpuDesiredKeyScratch.Count : DesiredChunkCount;
-			var residentCapacity = checked( requestedResidentCount + GpuStreamingStagingResidentCapacity );
+			var residentCapacity = checked( DesiredChunkCount + GpuStreamingStagingResidentCapacity );
 			_gpuTerrainBackend = new VoxelGpuTerrainBackend(
 				Scene.SceneWorld,
 				Scene.Camera,
@@ -654,11 +632,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				System.Math.Max( 1, residentCapacity ),
 				GpuVertexPoolCapacity,
 				GpuIndexPoolCapacity );
-			if ( GpuClipboxLodEnabled ) _gpuTerrainBackend.UpdateDesiredKeys( _gpuDesiredKeyScratch );
-			else _gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
+			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
-			Log.Info( $"Voxel persistent GPU world scheduled: chunks={requestedResidentCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), clipboxLod={GpuClipboxLodEnabled}, levels={GpuClipboxLodLevels}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
@@ -1658,21 +1635,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_gpuStreamingObserversInitialized = true;
 		_gpuPreviousStreamingObservers.Clear();
 		_gpuPreviousStreamingObservers.AddRange( _gpuStreamingObservers );
-		if ( GpuClipboxLodEnabled )
-		{
-			_gpuClipboxLodPlanner ??= new VoxelClipboxLodPlanner( GpuClipboxRadius, GpuClipboxLodLevels );
-			_gpuClipboxLodPlanner.Plan( _gpuStreamingObservers[0], GpuTerrainRuleVersion, _gpuDesiredKeyScratch );
-			var desiredKeyChanged = _gpuDesiredKeyScratch.Count != _gpuTerrainBackend.DesiredKeyCount ||
-				!_gpuTerrainBackend.DesiredKeysEqual( _gpuDesiredKeyScratch );
-			if ( !desiredKeyChanged ) return;
-			_gpuOrderedKeyScratch.Clear();
-			_gpuOrderedKeyScratch.AddRange( _gpuDesiredKeyScratch );
-			_gpuOrderedKeyScratch.Sort( (left, right) => GetStreamingKeyPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingKeyPriority( right, _gpuStreamingObservers ) ) );
-			_gpuTerrainBackend.UpdateDesiredKeys( _gpuOrderedKeyScratch );
-			_desiredChunkCoordinates.Clear();
-			foreach ( var key in _gpuDesiredKeyScratch ) _desiredChunkCoordinates.Add( key.Coordinate );
-			return;
-		}
 		PopulateDesiredChunkCoordinates( _gpuStreamingObservers, _gpuDesiredScratch );
 		var desiredChanged = !_desiredChunkCoordinates.SetEquals( _gpuDesiredScratch );
 		if ( !desiredChanged ) return;
@@ -1698,29 +1660,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		destination.Clear();
 		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
 		{
-			var coordinate = GetGpuObserverChunk( controller.WorldPosition );
+			var coordinate = GetCollisionObserverChunk( controller.WorldPosition );
 			if ( !destination.Contains( coordinate ) ) destination.Add( coordinate );
 		}
 
 		if ( destination.Count == 0 && Scene.Camera is not null )
-			destination.Add( GetGpuObserverChunk( Scene.Camera.WorldPosition ) );
+			destination.Add( GetCollisionObserverChunk( Scene.Camera.WorldPosition ) );
 		if ( destination.Count == 0 ) destination.Add( Vector3Int.Zero );
-	}
-
-	private List<Vector3Int> GetGpuStreamingObserverChunks()
-	{
-		var observers = new List<Vector3Int>( 1 );
-		PopulateStreamingObserverChunks( observers );
-		return observers;
-	}
-
-	private Vector3Int GetGpuObserverChunk( Vector3 worldPosition )
-	{
-		var localVoxelPosition = GameObject.WorldTransform.PointToLocal( worldPosition ) / VoxelSize;
-		return new Vector3Int(
-			(int)System.MathF.Floor( localVoxelPosition.x / ChunkSize ),
-			(int)System.MathF.Floor( localVoxelPosition.y / ChunkSize ),
-			(int)System.MathF.Ceiling( localVoxelPosition.z / ChunkSize ) );
 	}
 
 	private bool AreObserverChunksEqual( List<Vector3Int> observers )
@@ -1850,20 +1796,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			best = System.Math.Min( best, x * x + y * y );
 		}
 		return best == long.MaxValue ? GetChunkBuildPriority( coordinate ) : best;
-	}
-
-	private static long GetStreamingKeyPriority( VoxelVisualBlockKey key, List<Vector3Int> observers )
-	{
-		var spacing = 1 << key.Lod;
-		var best = long.MaxValue;
-		foreach ( var observer in observers )
-		{
-			var x = (long)key.Coordinate.x * spacing - observer.x;
-			var y = (long)key.Coordinate.y * spacing - observer.y;
-			var z = (long)key.Coordinate.z * spacing - observer.z;
-			best = System.Math.Min( best, x * x + y * y + z * z );
-		}
-		return best == long.MaxValue ? GetChunkBuildPriority( key.Coordinate ) : best;
 	}
 
 	private void PumpChunkStreamingGenerationQueue()
@@ -2579,7 +2511,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private WorldConfiguration CaptureWorldConfiguration()
 	{
-		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, TerrainMaterial, VisualBackend, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion, GpuClipboxLodEnabled, GpuClipboxLodLevels, GpuClipboxRadius );
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, TerrainMaterial, VisualBackend, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
 	}
 
 	private void ResetWorldGeneration()
@@ -2627,7 +2559,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
-	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion, bool GpuClipboxLodEnabled, int GpuClipboxLodLevels, int GpuClipboxRadius );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
 
 	private sealed class WorldGenerationWorkerResult
 	{
