@@ -72,6 +72,13 @@ internal static class VoxelGpuPhase4Proof
 			}
 			if ( planner.Levels.Count > 1 && transitionFaces.Count != 6 )
 				return new( false, planner.Levels.Count, count, planner.Transitions.Count, "clipbox did not exercise all six transition orientations" );
+			foreach ( var key in desired )
+			{
+				if ( key.Lod == 0 ) continue;
+				var level = planner.Levels[key.Lod];
+				if ( VoxelClipboxLodPlanner.IsCoveredByFinerLevel( key.Coordinate, Vector3Int.Zero, level ) )
+					return new( false, planner.Levels.Count, count, planner.Transitions.Count, $"LOD{key.Lod} resident overlaps its finer clipbox shell at {key.Coordinate}" );
+			}
 
 			var entering = new System.Collections.Generic.List<VoxelVisualBlockKey>();
 			var leaving = new System.Collections.Generic.List<VoxelVisualBlockKey>();

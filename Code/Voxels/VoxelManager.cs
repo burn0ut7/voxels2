@@ -670,6 +670,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				VoxelSize,
 				SdfClampDistance,
 				GpuFrustumPaddingChunks,
+				GpuClipboxLodEnabled ? 1 : 0,
 				System.Math.Max( 1, residentCapacity ),
 				GpuVertexPoolCapacity,
 				GpuIndexPoolCapacity );
@@ -1718,8 +1719,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		PopulateStreamingObserverChunks( _gpuStreamingObservers );
 		var observersChanged = !_gpuStreamingObserversInitialized || !AreObserverChunksEqual( _gpuStreamingObservers );
 		if ( !observersChanged && GpuClipboxLodEnabled && _gpuTerrainBackend.AreKeysPublished( _gpuDesiredKeyScratch ) &&
-			_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch ) )
-			_gpuTerrainBackend.UpdateTransitions( _gpuTransitionResidency.Published, GpuTerrainRuleVersion );
+			_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch, _gpuTerrainBackend.PublishedDependencyGeneration ) )
+			_gpuTerrainBackend.UpdateTransitions( _gpuTransitionResidency.Published, GpuTerrainRuleVersion, _gpuTerrainBackend.PublishedDependencyGeneration );
 		// The observer is already quantized to chunk coordinates, so unchanged
 		// observers need no desired-set work. When a boundary is crossed, update
 		// in this frame rather than introducing a fixed streaming polling delay.
@@ -1736,8 +1737,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			// actually published into the resident table. Desired keys alone are
 			// insufficient because count/emit work is asynchronous.
 			if ( _gpuTerrainBackend.AreKeysPublished( _gpuDesiredKeyScratch ) &&
-				_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch ) )
-				_gpuTerrainBackend.UpdateTransitions( _gpuTransitionResidency.Published, GpuTerrainRuleVersion );
+				_gpuTransitionResidency.TryPublishCoherent( _gpuDesiredKeyScratch, _gpuTerrainBackend.PublishedDependencyGeneration ) )
+				_gpuTerrainBackend.UpdateTransitions( _gpuTransitionResidency.Published, GpuTerrainRuleVersion, _gpuTerrainBackend.PublishedDependencyGeneration );
 			if ( _gpuEnteringKeyScratch.Count == 0 && _gpuLeavingKeyScratch.Count == 0 ) return;
 			_gpuEnteringKeyScratch.Sort( (left, right) => GetStreamingKeyPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingKeyPriority( right, _gpuStreamingObservers ) ) );
 			_gpuTerrainBackend.UpdateDesiredDelta( _gpuEnteringKeyScratch, _gpuLeavingKeyScratch );
