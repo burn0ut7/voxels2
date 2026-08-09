@@ -22,6 +22,9 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly float _cullingDirectionThresholdSquared;
 	private int _attachedDepthCommandListCount;
 	private int _attachedOpaqueCommandListCount;
+	private long _cullingRebuildCount;
+	private long _argumentUploadCount;
+	private int _slowUploadLogCount;
 	private int _dirty = 1;
 	private bool _hasCameraCullingState;
 	private Vector3 _lastCameraPosition;
@@ -30,12 +33,16 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private long _nextCullingRefreshTimestamp;
 	private bool _hasUploadedArguments;
 	private int _uploadedArgumentCount;
+	private bool _renderingEnabled = true;
 	private bool _disposed;
 
 	public bool UsesProductionLighting => true;
 	public bool UsesDepthPrepass => true;
 	public int DepthPrepassCommandListCount => _attachedDepthCommandListCount;
 	public int OpaqueCommandListCount => _attachedOpaqueCommandListCount;
+	public long CullingRebuildCount => _cullingRebuildCount;
+	public long ArgumentUploadCount => _argumentUploadCount;
+	public bool IsTerrainRenderingEnabled => _renderingEnabled;
 
 	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, float cullingPaddingWorld )
 		: base( world )
@@ -79,6 +86,22 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 
 	public void MarkDirty() => System.Threading.Interlocked.Exchange( ref _dirty, 1 );
 
+	public void SetRenderingEnabled( bool enabled )
+	{
+		if ( _disposed || _renderingEnabled == enabled ) return;
+		_renderingEnabled = enabled;
+		for ( var index = 0; index < _attachedDepthCommandListCount; index++ )
+		{
+			if ( enabled ) _camera.AddCommandList( _depthCommandLists[index], Sandbox.Rendering.Stage.AfterDepthPrepass );
+			else _camera.RemoveCommandList( _depthCommandLists[index] );
+		}
+		for ( var index = 0; index < _attachedOpaqueCommandListCount; index++ )
+		{
+			if ( enabled ) _camera.AddCommandList( _opaqueCommandLists[index], Sandbox.Rendering.Stage.AfterOpaque );
+			else _camera.RemoveCommandList( _opaqueCommandLists[index] );
+		}
+	}
+
 	public override void RenderSceneObject()
 	{
 		if ( _disposed ) return;
@@ -107,6 +130,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 
 	private void Rebuild( bool uploadResidents )
 	{
+		_cullingRebuildCount++;
 		_residents.CopyEntries( _residentSnapshot );
 		var frustum = _camera.GetFrustum();
 		var visibleCommandCount = 0;
@@ -118,7 +142,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			if ( entry.Descriptor.IndexCount == 0 ) continue;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );
 			var boundsMax = new Vector3( entry.Descriptor.BoundsMax.x, entry.Descriptor.BoundsMax.y, entry.Descriptor.BoundsMax.z );
-			var padding = Vector3.One * _cullingPaddingWorld;
+			var padding = Vector3.One * (_cullingPaddingWorld * 0.25f);
 			var bounds = new BBox( boundsMin - padding, boundsMax + padding );
 			if ( !frustum.IsInside( bounds, true ) ) continue;
 			_argumentData[visibleCommandCount++] = new GpuBuffer.IndirectDrawIndexedArguments
@@ -132,14 +156,26 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		}
 
 		System.Array.Clear( _argumentData, visibleCommandCount, _argumentData.Length - visibleCommandCount );
-		if ( uploadResidents ) _residentBuffer.SetData( _descriptorData );
+		if ( uploadResidents )
+		{
+			var residentUploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
+			_residentBuffer.SetData( _descriptorData );
+			var residentUploadMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( residentUploadStart ).TotalMilliseconds;
+			if ( residentUploadMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowUploadLogCount ) <= 32 )
+				Log.Info( $"Voxel GPU resident buffer upload: {residentUploadMilliseconds:F2}ms, capacity={_descriptorData.Length:N0}." );
+		}
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
 		if ( ArgumentsChanged( visibleCommandCount ) )
 		{
+			_argumentUploadCount++;
 			System.Array.Copy( _argumentData, _uploadedArgumentData, _argumentData.Length );
 			_uploadedArgumentCount = visibleCommandCount;
 			_hasUploadedArguments = true;
+			var argumentUploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
 			_drawArguments.SetData( _argumentData, 0 );
+			var argumentUploadMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( argumentUploadStart ).TotalMilliseconds;
+			if ( argumentUploadMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowUploadLogCount ) <= 32 )
+				Log.Info( $"Voxel GPU indirect argument upload: {argumentUploadMilliseconds:F2}ms, commands={visibleCommandCount:N0}, capacity={_argumentData.Length:N0}." );
 		}
 	}
 

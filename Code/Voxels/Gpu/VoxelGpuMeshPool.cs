@@ -3,6 +3,8 @@ internal sealed class VoxelGpuMeshPool : System.IDisposable
 	private readonly VoxelGpuRangeAllocator _vertexAllocator;
 	private readonly VoxelGpuRangeAllocator _indexAllocator;
 	private readonly List<RetiredAllocation> _retired = new();
+	private readonly List<VoxelGpuPoolRange> _reclaimVertices = new();
+	private readonly List<VoxelGpuPoolRange> _reclaimIndices = new();
 
 	public GpuBuffer<SimpleVertex> Vertices { get; }
 	public GpuBuffer<uint> Indices { get; }
@@ -53,14 +55,23 @@ internal sealed class VoxelGpuMeshPool : System.IDisposable
 
 	public void Reclaim( ulong completedEpoch )
 	{
-		for ( var index = _retired.Count - 1; index >= 0; index-- )
+		_reclaimVertices.Clear();
+		_reclaimIndices.Clear();
+		var writeIndex = 0;
+		for ( var index = 0; index < _retired.Count; index++ )
 		{
-			if ( _retired[index].ReleaseEpoch > completedEpoch ) continue;
-			var handle = _retired[index].Handle;
-			_vertexAllocator.Release( handle.Vertices );
-			_indexAllocator.Release( handle.Indices );
-			_retired.RemoveAt( index );
+			var retired = _retired[index];
+			if ( retired.ReleaseEpoch > completedEpoch )
+			{
+				_retired[writeIndex++] = retired;
+				continue;
+			}
+			_reclaimVertices.Add( retired.Handle.Vertices );
+			_reclaimIndices.Add( retired.Handle.Indices );
 		}
+		if ( writeIndex < _retired.Count ) _retired.RemoveRange( writeIndex, _retired.Count - writeIndex );
+		_vertexAllocator.ReleaseBatch( _reclaimVertices );
+		_indexAllocator.ReleaseBatch( _reclaimIndices );
 	}
 
 	public void ReleaseImmediately( VoxelGpuAllocationHandle handle )

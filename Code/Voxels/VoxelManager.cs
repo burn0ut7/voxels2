@@ -18,6 +18,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
 	private readonly Dictionary<Vector3Int, GameObject> _chunkGameObjects = new();
 	private readonly HashSet<Vector3Int> _desiredChunkCoordinates = new();
+	private readonly List<Vector3Int> _gpuStreamingObservers = new( 4 );
+	private readonly List<Vector3Int> _gpuPreviousStreamingObservers = new( 4 );
+	private readonly HashSet<Vector3Int> _gpuDesiredScratch = new();
+	private readonly List<Vector3Int> _gpuOrderedScratch = new();
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
@@ -50,6 +54,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private bool _cpuBatchSummaryPending;
 	private long _lastCollisionInterestTimestamp;
 	private long _lastChunkStreamingInterestTimestamp;
+	private long _lastGpuStreamingLogTimestamp;
+	private bool _gpuStreamingObserversInitialized;
+	private int _slowGpuStreamingLogCount;
+	private int _idleStutterDiagnosticCount;
 	private long _worldGenerationStartTimestamp;
 	private bool _worldGenerationPending;
 	private double _lastWorldGenerationElapsedMilliseconds;
@@ -139,6 +147,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Rendering" ), Range( 0, 1 )]
 	public int GpuTerrainRuleVersion { get; set; }
 
+	[Property, Group( "Rendering" )]
+	public bool GpuTerrainRenderingEnabled { get; set; } = true;
+
+	[Property, Group( "Diagnostics" )]
+	public bool GpuTerrainProcessingEnabled { get; set; } = true;
+
 	[Property, Group( "Rendering" ), Range( 0, 4 )]
 	public int GpuFrustumPaddingChunks { get; set; } = 1;
 
@@ -171,6 +185,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	[Property, Group( "Diagnostics" )]
 	public bool RequestGpuTerrainDiagnosticsLog { get; set; }
+
+	[Property, Group( "Diagnostics" )]
+	public bool CaptureFrameStutterDiagnostics { get; set; }
 
 	[Property, ReadOnly, Group( "Diagnostics" )]
 	public string GpuTerrainLiveDiagnostics
@@ -278,6 +295,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	protected override void OnUpdate()
 	{
 		if ( Scene?.IsEditor == true && !GenerateInEditor ) return;
+		if ( CaptureFrameStutterDiagnostics && Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0 >= 33.3333 && _idleStutterDiagnosticCount < 16 )
+		{
+			_idleStutterDiagnosticCount++;
+			var updateTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Update.GetMetric( 1 );
+			var renderTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Render.GetMetric( 1 );
+			var asyncTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Async.GetMetric( 1 );
+			Log.Info( $"Voxel idle stutter diagnostic: frameMs={Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
+		}
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
 		if ( RequestGpuTransvoxelProof )
@@ -430,6 +455,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_chunkStreamingRequestTimestamps.Clear();
 		_lastChunkStreamingInterestTimestamp = 0;
 		_desiredChunkCoordinates.Clear();
+		_gpuStreamingObserversInitialized = false;
+		_gpuStreamingObservers.Clear();
+		_gpuPreviousStreamingObservers.Clear();
 		var observers = GetStreamingObserverChunks();
 		PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
 		StartGpuTerrainWorld();
@@ -606,6 +634,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				GpuVertexPoolCapacity,
 				GpuIndexPoolCapacity );
 			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
+			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
+			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
 			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
@@ -613,6 +643,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			DisposeGpuTerrainBackend();
 			Log.Error( $"Voxel persistent GPU terrain failed to start: {exception.Message}" );
 		}
+		if ( _gpuTerrainBackend is not null && _gpuTerrainBackend.IsTerrainRenderingEnabled != GpuTerrainRenderingEnabled )
+			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
+		if ( _gpuTerrainBackend is not null && _gpuTerrainBackend.IsProcessingEnabled != GpuTerrainProcessingEnabled )
+			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
 	}
 
 	internal VoxelGpuTerrainDiagnostics CaptureGpuTerrainDiagnostics() =>
@@ -1576,21 +1610,60 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void UpdateGpuChunkStreaming()
 	{
 		if ( _gpuTerrainBackend is null ) return;
+		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( _lastChunkStreamingInterestTimestamp != 0 &&
 			System.Diagnostics.Stopwatch.GetElapsedTime( _lastChunkStreamingInterestTimestamp ).TotalSeconds < 0.1 ) return;
 
 		_lastChunkStreamingInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-		var observers = GetStreamingObserverChunks();
-		var desired = new HashSet<Vector3Int>();
-		PopulateDesiredChunkCoordinates( observers, desired );
-		var desiredChanged = !_desiredChunkCoordinates.SetEquals( desired );
+		_gpuStreamingObservers.Clear();
+		PopulateStreamingObserverChunks( _gpuStreamingObservers );
+		var observersChanged = !_gpuStreamingObserversInitialized || !AreObserverChunksEqual( _gpuStreamingObservers );
+		if ( !observersChanged ) return;
+		_gpuStreamingObserversInitialized = true;
+		_gpuPreviousStreamingObservers.Clear();
+		_gpuPreviousStreamingObservers.AddRange( _gpuStreamingObservers );
+		PopulateDesiredChunkCoordinates( _gpuStreamingObservers, _gpuDesiredScratch );
+		var desiredChanged = !_desiredChunkCoordinates.SetEquals( _gpuDesiredScratch );
+		if ( !desiredChanged ) return;
 		var previousDesiredCount = _desiredChunkCoordinates.Count;
 		_desiredChunkCoordinates.Clear();
-		_desiredChunkCoordinates.UnionWith( desired );
-		var ordered = desired.ToList();
-		ordered.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
-		_gpuTerrainBackend.UpdateDesiredSet( ordered, GpuTerrainRuleVersion );
-		if ( desiredChanged ) Log.Info( $"Voxel GPU fixed-LOD streaming updated: observers={observers.Count:N0}, desired={desired.Count:N0}, previous={previousDesiredCount:N0}, boundedResidentCapacity=backend." );
+		_desiredChunkCoordinates.UnionWith( _gpuDesiredScratch );
+		_gpuOrderedScratch.Clear();
+		_gpuOrderedScratch.AddRange( _gpuDesiredScratch );
+		_gpuOrderedScratch.Sort( (left, right) => GetStreamingPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingPriority( right, _gpuStreamingObservers ) ) );
+		_gpuTerrainBackend.UpdateDesiredSet( _gpuOrderedScratch, GpuTerrainRuleVersion );
+		if ( desiredChanged && ( _lastGpuStreamingLogTimestamp == 0 || System.Diagnostics.Stopwatch.GetElapsedTime( _lastGpuStreamingLogTimestamp ).TotalSeconds >= 5.0 ) )
+		{
+			_lastGpuStreamingLogTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+			Log.Info( $"Voxel GPU fixed-LOD streaming updated: observers={_gpuStreamingObservers.Count:N0}, desired={_gpuDesiredScratch.Count:N0}, previous={previousDesiredCount:N0}, boundedResidentCapacity=backend." );
+		}
+		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
+		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowGpuStreamingLogCount ) <= 32 )
+			Log.Info( $"Voxel GPU streaming hitch trace: {updateMilliseconds:F2}ms, observers={_gpuStreamingObservers.Count:N0}, desired={_gpuDesiredScratch.Count:N0}, changed={desiredChanged}." );
+	}
+
+	private void PopulateStreamingObserverChunks( List<Vector3Int> destination )
+	{
+		destination.Clear();
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			var coordinate = GetCollisionObserverChunk( controller.WorldPosition );
+			if ( !destination.Contains( coordinate ) ) destination.Add( coordinate );
+		}
+
+		if ( destination.Count == 0 && Scene.Camera is not null )
+			destination.Add( GetCollisionObserverChunk( Scene.Camera.WorldPosition ) );
+		if ( destination.Count == 0 ) destination.Add( Vector3Int.Zero );
+	}
+
+	private bool AreObserverChunksEqual( List<Vector3Int> observers )
+	{
+		if ( observers.Count != _gpuPreviousStreamingObservers.Count ) return false;
+		for ( var index = 0; index < observers.Count; index++ )
+		{
+			if ( observers[index] != _gpuPreviousStreamingObservers[index] ) return false;
+		}
+		return true;
 	}
 
 	private void RefreshChunkStreamingInterests()

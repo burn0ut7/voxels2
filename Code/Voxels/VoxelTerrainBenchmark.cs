@@ -233,7 +233,20 @@ public sealed class VoxelTerrainBenchmark : Component
 			BeginRun( true );
 		}
 
-		_sampler?.Sample();
+		if ( _sampler?.Sample() == true )
+		{
+			var terrain = _manager.CaptureGpuTerrainDiagnostics();
+			if ( _sampler.TryConsumeStutterDiagnostic() )
+			{
+				var updateTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Update.GetMetric( 1 );
+				var renderTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Render.GetMetric( 1 );
+				var physicsTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Physics.GetMetric( 1 );
+				var idleTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Idle.GetMetric( 1 );
+				var asyncTiming = Sandbox.Diagnostics.PerformanceStats.Timings.Async.GetMetric( 1 );
+				var gcTiming = Sandbox.Diagnostics.PerformanceStats.Timings.GcPause.GetMetric( 1 );
+				Log.Info( $"Voxel terrain stutter diagnostic: frameMs={Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, gpuPendingCount={terrain.PendingCountBatches}, gpuPendingEmit={terrain.PendingEmitBatches}, gpuResidents={terrain.ResidentBlocks}/{terrain.DesiredBlocks}, gpuVisible={terrain.VisibleDrawCommands}, gpuReadbackMs={terrain.CountReadbackAverageMilliseconds:F2}, gpuBatchP95Ms={terrain.BatchCompletion.P95Milliseconds:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
+			}
+		}
 		if ( _manager?.HasPartialVisualEditPublication == true ||
 			(_phase == BenchmarkPhase.WaitSeamEdit && _manager?.HasVisualCollisionMismatch == true) )
 		{
@@ -1672,6 +1685,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		private ulong _peakTexturePoolUsedBytes;
 		private ulong _peakTexturePoolNonEvictableBytes;
 		private int _maximumPendingStreamingRequests;
+		private int _stutterDiagnosticCount;
 
 		public string Name { get; }
 		public string Description { get; }
@@ -1705,7 +1719,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			_visualCoherenceViolationFrames++;
 		}
 
-		public void Sample()
+		public bool Sample()
 		{
 			var frameMilliseconds = Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0;
 			_frameTimes.Add( frameMilliseconds );
@@ -1767,7 +1781,10 @@ public sealed class VoxelTerrainBenchmark : Component
 				_networkPingMilliseconds += connections.Count > 0 ? pingTotal / connections.Count : 0.0;
 				_networkSampleCount++;
 			}
+			return frameMilliseconds >= 33.3333;
 		}
+
+		public bool TryConsumeStutterDiagnostic() => _stutterDiagnosticCount++ < 2;
 
 		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, VoxelChunkStreamingDiagnostics streaming, double elapsedMilliseconds, VoxelGpuTransvoxelProofResult? gpuProof, VoxelGpuTerrainDiagnostics? gpuTerrain, VoxelGpuPhase2BProofResult? gpuPhase2BProof, VoxelGpuPhase3AProofResult? gpuPhase3AProof, VoxelGpuPhase3BProofResult? gpuPhase3BProof )
 		{

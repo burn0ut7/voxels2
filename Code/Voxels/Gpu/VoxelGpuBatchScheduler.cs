@@ -49,6 +49,17 @@ internal sealed class VoxelGpuBatchScheduler
 		}
 	}
 
+	public int TakeBatch( int maximumCount, ScheduledRequest[] destination )
+	{
+		if ( destination is null || destination.Length < maximumCount ) throw new System.ArgumentException( "Destination is smaller than the requested batch.", nameof( destination ) );
+		lock ( _sync )
+		{
+			var count = System.Math.Min( maximumCount, _requests.Count );
+			for ( var index = 0; index < count; index++ ) destination[index] = _requests.Dequeue();
+			return count;
+		}
+	}
+
 	public bool IsCurrent( VoxelVisualBlockKey key, uint generation )
 	{
 		lock ( _sync ) return _latestGenerations.TryGetValue( key, out var current ) && current == generation;

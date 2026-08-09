@@ -38,6 +38,8 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	private readonly float _voxelSize;
 	private readonly float _sdfClampDistance;
 	private VoxelGpuCountResult[] _completedCounts;
+	private readonly VoxelGpuCountResult[] _completedCountBuffer = new VoxelGpuCountResult[MaximumBatchSize];
+	private int _completedCount;
 	private long _readbackTimestamp;
 	private int _batchSize;
 	private ArenaState _state;
@@ -95,11 +97,11 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			(long)_regularLookup.ElementCount * sizeof( uint );
 	}
 
-	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, out double submissionMilliseconds )
+	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, out double submissionMilliseconds )
 	{
 		lock ( _stateLock )
 		{
-			if ( _disposed || _state != ArenaState.Idle || requests is null || requests.Length is < 1 or > MaximumBatchSize )
+			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count )
 			{
 				submissionMilliseconds = 0.0;
 				return false;
@@ -109,61 +111,64 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		}
 
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
-		_requests.SetData( requests );
-		SetBatchSize( requests.Length );
+		_requests.SetData( new System.Span<VoxelGpuBlockRequest>( requests, 0, count ) );
+		SetBatchSize( count );
 		_statistics.Clear();
 		Graphics.ResourceBarrierTransition( _densitySamples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		foreach ( var buffer in new GpuBuffer[] { _cells, _edgeFlags, _edgeVertexIds, _statistics, _edgeGroupSums, _cellGroupSums, _blockCounts, _countResults } )
 			Graphics.ResourceBarrierTransition( buffer, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_clear.Attributes.Set( "AllocationPass", 0 );
-		_clear.Dispatch( System.Math.Max( _cellCount, _edgeSlotCount ) * requests.Length, 1, 1 );
+		_clear.Dispatch( System.Math.Max( _cellCount, _edgeSlotCount ) * count, 1, 1 );
 		Barrier( _cells, _edgeFlags, _edgeVertexIds );
-		_density.Dispatch( _haloSampleCount * requests.Length, 1, 1 );
+		_density.Dispatch( _haloSampleCount * count, 1, 1 );
 		Barrier( _densitySamples );
 		_classify.Attributes.Set( "PublicationPass", 0 );
-		_classify.Dispatch( _cellCount * requests.Length, 1, 1 );
+		_classify.Dispatch( _cellCount * count, 1, 1 );
 		Barrier( _cells, _edgeFlags, _statistics );
 		_scan.Attributes.Set( "ScanPass", 0 );
-		_scan.Dispatch( _edgeGroupCount * 256 * requests.Length, 1, 1 );
+		_scan.Dispatch( _edgeGroupCount * 256 * count, 1, 1 );
 		Barrier( _edgeVertexIds, _edgeGroupSums );
 		_scan.Attributes.Set( "ScanPass", 1 );
-		_scan.Dispatch( _cellGroupCount * 256 * requests.Length, 1, 1 );
+		_scan.Dispatch( _cellGroupCount * 256 * count, 1, 1 );
 		Barrier( _cells, _cellGroupSums );
 		_scan.Attributes.Set( "ScanPass", 2 );
-		_scan.Dispatch( 256 * requests.Length, 1, 1 );
+		_scan.Dispatch( 256 * count, 1, 1 );
 		Barrier( _edgeGroupSums, _cellGroupSums, _blockCounts );
-		_totals.Dispatch( requests.Length, 1, 1 );
+		_totals.Dispatch( count, 1, 1 );
 		Barrier( _countResults );
 		_readbackTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-		_countResults.GetDataAsync( OnCountsRead, 0, requests.Length );
+		_countResults.GetDataAsync( OnCountsRead, 0, count );
 		submissionMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds;
 		return true;
 	}
 
-	public bool TryTakeCounts( out VoxelGpuCountResult[] counts, out double readbackMilliseconds )
+	public bool TryTakeCounts( out VoxelGpuCountResult[] counts, out int count, out double readbackMilliseconds )
 	{
 		lock ( _stateLock )
 		{
 			if ( _state != ArenaState.CountReady )
 			{
 				counts = null;
+				count = 0;
 				readbackMilliseconds = 0.0;
 				return false;
 			}
 			counts = _completedCounts;
+			count = _completedCount;
 			_completedCounts = null;
+			_completedCount = 0;
 			readbackMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( _readbackTimestamp ).TotalMilliseconds;
 			_state = ArenaState.EmitReady;
 			return true;
 		}
 	}
 
-	public bool TrySubmitEmit( VoxelGpuAllocationDescriptor[] allocations, VoxelGpuMeshPool pool, out double submissionMilliseconds )
+	public bool TrySubmitEmit( VoxelGpuAllocationDescriptor[] allocations, int count, VoxelGpuMeshPool pool, out double submissionMilliseconds )
 	{
 		lock ( _stateLock )
 		{
-			if ( _disposed || _state != ArenaState.EmitReady || allocations is null || allocations.Length != _batchSize )
+			if ( _disposed || _state != ArenaState.EmitReady || allocations is null || count < 1 || count > _batchSize || allocations.Length < _batchSize )
 			{
 				submissionMilliseconds = 0.0;
 				return false;
@@ -172,15 +177,15 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		}
 
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
-		_allocations.SetData( allocations );
+		_allocations.SetData( new System.Span<VoxelGpuAllocationDescriptor>( allocations, 0, _batchSize ) );
 		Graphics.ResourceBarrierTransition( pool.Vertices, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( pool.Indices, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_emitVertices.Attributes.Set( "OutputVertices", pool.Vertices );
 		_emitIndices.Attributes.Set( "OutputVertices", pool.Vertices );
 		_emitIndices.Attributes.Set( "OutputIndices", pool.Indices );
-		_emitVertices.Dispatch( _edgeSlotCount * allocations.Length, 1, 1 );
+		_emitVertices.Dispatch( _edgeSlotCount * _batchSize, 1, 1 );
 		Barrier( pool.Vertices );
-		_emitIndices.Dispatch( _cellCount * allocations.Length, 1, 1 );
+		_emitIndices.Dispatch( _cellCount * _batchSize, 1, 1 );
 		Barrier( pool.Indices );
 		submissionMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds;
 		return true;
@@ -191,7 +196,9 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		lock ( _stateLock )
 		{
 			if ( _disposed || _state != ArenaState.CountSubmitted ) return;
-			_completedCounts = counts.ToArray();
+			counts.CopyTo( _completedCountBuffer );
+			_completedCounts = _completedCountBuffer;
+			_completedCount = counts.Length;
 			_state = ArenaState.CountReady;
 		}
 	}

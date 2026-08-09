@@ -42,6 +42,23 @@ internal sealed class VoxelGpuRangeAllocator
 		if ( range.IsEmpty ) return;
 		if ( range.Offset < 0 || range.End > Capacity ) throw new System.ArgumentOutOfRangeException( nameof( range ) );
 		_free.Add( range );
+		CoalesceFreeRanges();
+	}
+
+	public void ReleaseBatch( List<VoxelGpuPoolRange> ranges )
+	{
+		if ( ranges is null || ranges.Count == 0 ) return;
+		foreach ( var range in ranges )
+		{
+			if ( range.IsEmpty ) continue;
+			if ( range.Offset < 0 || range.End > Capacity ) throw new System.ArgumentOutOfRangeException( nameof( ranges ) );
+			_free.Add( range );
+		}
+		CoalesceFreeRanges();
+	}
+
+	private void CoalesceFreeRanges()
+	{
 		_free.Sort( (left, right) => left.Offset.CompareTo( right.Offset ) );
 		for ( var index = _free.Count - 1; index > 0; index-- )
 		{
