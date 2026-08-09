@@ -250,6 +250,9 @@ public sealed class VoxelTerrainBenchmark : Component
 	public string LastReportPath { get; private set; }
 	public bool IsRunning => _phase is not BenchmarkPhase.Idle and not BenchmarkPhase.Complete and not BenchmarkPhase.Failed;
 
+	[Property, ReadOnly, Group( "Run" )]
+	public string Status => $"phase={_phase}; initialized={_initializationComplete}; requested={_runRequested}; scenarios={_results.Count}/{SelectedRequiredScenarios.Length}";
+
 	protected override void OnValidate()
 	{
 		WarmupFrames = System.Math.Clamp( WarmupFrames, 0, 240 );
@@ -784,8 +787,15 @@ public sealed class VoxelTerrainBenchmark : Component
 			Log.Warning( "Voxel terrain benchmark is already running." );
 			return;
 		}
+		if ( _initializationComplete )
+		{
+			BeginRun( true );
+			return;
+		}
+
 		_runRequested = true;
 		_phase = BenchmarkPhase.Idle;
+		Log.Info( "Voxel terrain benchmark queued until the benchmark component initializes." );
 	}
 
 	private void BeginRun( bool regenerate, bool automaticReproduction = false )
@@ -1891,7 +1901,8 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private bool TryInitialize()
 	{
-		_manager = GameObject.Components.Get<VoxelManager>();
+		_manager = GameObject is null ? null : GameObject.Components.Get<VoxelManager>();
+		_manager ??= Scene.GetAllComponents<VoxelManager>().FirstOrDefault();
 		if ( _manager is null ) return false;
 		_initializationComplete = true;
 		_initializationAttempts = 0;
