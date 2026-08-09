@@ -61,6 +61,15 @@ internal static class VoxelClipboxPlannerProof
 				case "phase4_neighbor_difference":
 					ValidateConfigurations( true, ref cases, ref configurations, ref activeRegularCount, ref stableRegularSlots );
 					break;
+				case "phase4_four_level_b4_movement":
+					ValidateFourLevelStreaming( 4, ref cases, ref activeRegularCount, ref stableRegularSlots );
+					break;
+				case "phase4_four_level_b8_movement":
+					ValidateFourLevelStreaming( 8, ref cases, ref activeRegularCount, ref stableRegularSlots );
+					break;
+				case "phase4_four_level_stationary_soak":
+					ValidateFourLevelStationarySoak( ref cases );
+					break;
 				default:
 					throw new ArgumentException( $"Unknown clipbox planner scenario '{scenario}'.", nameof( scenario ) );
 			}
@@ -140,6 +149,60 @@ internal static class VoxelClipboxPlannerProof
 			planner.Commit();
 		}
 
+		cases++;
+	}
+
+	private static void ValidateFourLevelStreaming( int blocksPerAxis, ref int cases, ref int activeRegularCount, ref int stableRegularSlots )
+	{
+		var config = new VoxelClipboxConfig( blocksPerAxis, 4, 17, 23 );
+		var planner = new VoxelClipboxRuntimePlanner( config );
+		var positions = new[]
+		{
+			new Vector3Int( 7 * VoxelClipboxConfig.CellsPerBlock + 7, 11 * VoxelClipboxConfig.CellsPerBlock + 11, 19 * VoxelClipboxConfig.CellsPerBlock + 19 ),
+			new Vector3Int( 128 + 7, -96 + 11, 64 + 19 ),
+			new Vector3Int( -257, 193, -129 ),
+			new Vector3Int( -2049, 1027, 3075 ),
+			new Vector3Int( 0, 0, 0 )
+		};
+
+		if ( !planner.Update( positions[0] ) ) throw new InvalidOperationException( $"B{blocksPerAxis} L4 did not produce its initial plan." );
+		if ( planner.ActiveRegularCount != config.ExpectedActiveRegularCount || planner.CurrentSlots.Length != config.StableRegularSlotCount ) throw new InvalidOperationException( $"B{blocksPerAxis} L4 reported incorrect active or stable counts." );
+		ValidateChangedSlots( planner );
+		planner.Commit();
+		for ( var index = 1; index < positions.Length; index++ )
+		{
+			planner.Update( positions[index] );
+			if ( planner.ActiveRegularCount != config.ExpectedActiveRegularCount ) throw new InvalidOperationException( $"B{blocksPerAxis} L4 changed active count during movement." );
+			ValidateChangedSlots( planner );
+			planner.Commit();
+		}
+		planner.Update( positions[0] );
+		if ( planner.ChangedSlotCount == 0 ) throw new InvalidOperationException( $"B{blocksPerAxis} L4 return-to-origin did not reassign exposed slots." );
+		ValidateChangedSlots( planner );
+		planner.Commit();
+		planner.Update( positions[0] );
+		if ( planner.ChangedSlotCount != 0 ) throw new InvalidOperationException( $"B{blocksPerAxis} L4 return-to-origin remained unstable." );
+		planner.Commit();
+		activeRegularCount = config.ExpectedActiveRegularCount;
+		stableRegularSlots = config.StableRegularSlotCount;
+		cases++;
+	}
+
+	private static void ValidateFourLevelStationarySoak( ref int cases )
+	{
+		foreach ( var blocksPerAxis in new[] { 4, 8 } )
+		{
+			var config = new VoxelClipboxConfig( blocksPerAxis, 4 );
+			var planner = new VoxelClipboxRuntimePlanner( config );
+			var observer = new Vector3Int( 7, 11, 19 );
+			planner.Update( observer );
+			planner.Commit();
+			for ( var frame = 0; frame < 3600; frame++ )
+			{
+				if ( planner.Update( observer ) || planner.ChangedSlotCount != 0 ) throw new InvalidOperationException( $"B{blocksPerAxis} L4 stationary soak produced residency work at frame {frame}." );
+				planner.Commit();
+			}
+		}
 		cases++;
 	}
 

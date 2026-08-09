@@ -10,6 +10,19 @@ internal sealed class VoxelGpuResidentTable
 	public int Count { get { lock ( _sync ) return _slotsByKey.Count; } }
 	public int PublishedCount { get { lock ( _sync ) return _publishedCount; } }
 	public bool ContainsKey( VoxelVisualBlockKey key ) { lock ( _sync ) return _slotsByKey.ContainsKey( key ); }
+	public bool TryGetPublished( VoxelVisualBlockKey key, out ResidentEntry entry )
+	{
+		lock ( _sync )
+		{
+			if ( !_slotsByKey.TryGetValue( key, out var slot ) || !_entries[slot].Published )
+			{
+				entry = default;
+				return false;
+			}
+			entry = _entries[slot];
+			return true;
+		}
+	}
 
 	public VoxelGpuResidentTable( int capacity )
 	{

@@ -106,6 +106,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_clipboxPlanner = new VoxelClipboxRuntimePlanner( clipboxConfig.Value );
 			_clipboxKeyScratch = new List<VoxelVisualBlockKey>( clipboxConfig.Value.ExpectedActiveRegularCount );
 			_diagnostics.LodPolicy = $"regular_clipbox_b{clipboxConfig.Value.BlocksPerAxis}_l{clipboxConfig.Value.LevelCount}";
+			_diagnostics.ClipboxStableSlotCount = clipboxConfig.Value.StableRegularSlotCount;
 		}
 		_publishedScratch = new VoxelGpuResidentTable.ResidentEntry[residentCapacity];
 		_evictionCandidates = new List<EvictionCandidate>( residentCapacity );
@@ -122,11 +123,24 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )
 	{
 		if ( _clipboxPlanner is null ) throw new System.InvalidOperationException( "Regular clipbox residency was not enabled for this GPU backend." );
-		if ( !_clipboxPlanner.Update( observerCanonicalSample ) ) return false;
+		if ( !_clipboxPlanner.Update( observerCanonicalSample ) )
+		{
+			_diagnostics.ClipboxStationaryUpdates++;
+			_diagnostics.ClipboxRevision = _clipboxPlanner.Revision;
+			return false;
+		}
+		_diagnostics.ClipboxRevision = _clipboxPlanner.Revision;
+		_diagnostics.ClipboxChangedSlots = _clipboxPlanner.ChangedSlotCount;
+		_diagnostics.ClipboxActiveSlotCount = _clipboxPlanner.ActiveRegularCount;
 		_clipboxKeyScratch.Clear();
 		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
 			if ( assignment.Active ) _clipboxKeyScratch.Add( assignment.Key );
-		UpdateDesiredKeys( _clipboxKeyScratch );
+		var desiredCount = UpdateDesiredKeys( _clipboxKeyScratch );
+		if ( desiredCount != _clipboxPlanner.ActiveRegularCount )
+		{
+			_diagnostics.ClipboxDroppedWork += _clipboxPlanner.ActiveRegularCount - desiredCount;
+			_diagnostics.Failure = $"GPU regular clipbox admitted {desiredCount} of {_clipboxPlanner.ActiveRegularCount} active slots.";
+		}
 		_clipboxPlanner.Commit();
 		return true;
 	}
@@ -141,7 +155,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		UpdateDesiredKeys( _desiredKeyInputScratch );
 	}
 
-	private void UpdateDesiredKeys( IEnumerable<VoxelVisualBlockKey> keys )
+	private int UpdateDesiredKeys( IEnumerable<VoxelVisualBlockKey> keys )
 	{
 		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		var desiredCount = 0;
@@ -190,6 +204,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					_diagnostics.BackpressureEvents++;
 				}
 			}
+			_scheduler.PruneToDesired( _desiredKeys );
 			UpdateQueueDiagnostics();
 			UpdatePendingCountBatches();
 			_settledLogged = false;
@@ -198,7 +213,49 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
 		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowDesiredSetLogCount ) <= 32 )
 			Log.Info( $"Voxel GPU desired-set hitch trace: {updateMilliseconds:F2}ms, desired={desiredCount:N0}, pending={PendingRequestCount:N0}, scheduler={_scheduler.PendingCount:N0}." );
+		return desiredCount;
 	}
+
+	public int CopyClipboxDebugBlocks( List<VoxelGpuClipboxDebugBlock> destination )
+	{
+		if ( destination is null ) throw new System.ArgumentNullException( nameof( destination ) );
+		destination.Clear();
+		if ( _clipboxPlanner is null ) return 0;
+		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
+		{
+			if ( !assignment.Active ) continue;
+			var state = VoxelGpuDebugBlockState.Missing;
+			var generation = 0u;
+			var vertexOffset = 0;
+			var vertexCapacity = 0;
+			var indexOffset = 0;
+			var indexCapacity = 0;
+			var indexCount = 0u;
+			var drawOrigin = Vector3.Zero;
+			var boundsMin = Vector3.Zero;
+			var boundsMax = Vector3.Zero;
+			if ( _residents.TryGetPublished( assignment.Key, out var resident ) )
+			{
+				state = VoxelGpuDebugBlockState.Resident;
+				generation = resident.Generation;
+				vertexOffset = checked( (int)resident.Descriptor.VertexOffset );
+				vertexCapacity = resident.Allocation.Vertices.Count;
+				indexOffset = checked( (int)resident.Descriptor.IndexOffset );
+				indexCapacity = resident.Allocation.Indices.Count;
+				indexCount = resident.Descriptor.IndexCount;
+				drawOrigin = new Vector3( resident.Descriptor.DrawOrigin.x, resident.Descriptor.DrawOrigin.y, resident.Descriptor.DrawOrigin.z );
+				boundsMin = new Vector3( resident.Descriptor.BoundsMin.x, resident.Descriptor.BoundsMin.y, resident.Descriptor.BoundsMin.z );
+				boundsMax = new Vector3( resident.Descriptor.BoundsMax.x, resident.Descriptor.BoundsMax.y, resident.Descriptor.BoundsMax.z );
+			}
+			else if ( IsPending( assignment.Key ) ) state = VoxelGpuDebugBlockState.Pending;
+			else if ( IsBlocked( assignment.Key ) ) state = VoxelGpuDebugBlockState.Deferred;
+			destination.Add( new VoxelGpuClipboxDebugBlock( assignment.Coordinate, assignment.Lod, assignment.StableSlotId, state, generation, vertexOffset, vertexCapacity, indexOffset, indexCapacity, indexCount, drawOrigin, boundsMin, boundsMax ) );
+		}
+		return destination.Count;
+	}
+
+	private bool IsPending( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _pendingRequests.Contains( key ); }
+	private bool IsBlocked( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _blockedRequests.Contains( key ); }
 
 	public VoxelGpuTerrainDiagnostics CaptureDiagnostics()
 	{
@@ -447,6 +504,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.BlockedRequests = BlockedRequestCount;
 		_diagnostics.CapacityLimited = BlockedRequestCount > 0;
 		_diagnostics.QueuesBounded = _scheduler.PendingCount <= _scheduler.MaximumPendingRequests && _publications.Count <= VoxelGpuScratchArena.RingSize;
+		if ( _clipboxPlanner is not null )
+		{
+			_diagnostics.ClipboxPendingRevisionCount = IsSettled ? 0 : 1;
+			_diagnostics.ClipboxMaximumPendingRevisionCount = System.Math.Max( _diagnostics.ClipboxMaximumPendingRevisionCount, _diagnostics.ClipboxPendingRevisionCount );
+		}
 	}
 
 	private void RetireUndesiredResidents()

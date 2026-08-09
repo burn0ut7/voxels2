@@ -53,7 +53,15 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	int VertexLargestFree,
 	int IndexLargestFree,
 	int VertexFreeRangeCount,
-	int IndexFreeRangeCount );
+	int IndexFreeRangeCount,
+	ulong ClipboxRevision,
+	int ClipboxChangedSlots,
+	int ClipboxPendingRevisionCount,
+	int ClipboxMaximumPendingRevisionCount,
+	int ClipboxStableSlotCount,
+	int ClipboxActiveSlotCount,
+	int ClipboxDroppedWork,
+	int ClipboxStationaryUpdates );
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
 {
@@ -84,6 +92,14 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	public int BlockedRequests;
 	public int CapacityEvictions;
 	public int CapacityDeferrals;
+	public ulong ClipboxRevision;
+	public int ClipboxChangedSlots;
+	public int ClipboxPendingRevisionCount;
+	public int ClipboxMaximumPendingRevisionCount;
+	public int ClipboxStableSlotCount;
+	public int ClipboxActiveSlotCount;
+	public int ClipboxDroppedWork;
+	public int ClipboxStationaryUpdates;
 
 	public void RecordCountReadback( double milliseconds )
 	{
@@ -153,7 +169,15 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			pool?.VertexLargestFree ?? 0,
 			pool?.IndexLargestFree ?? 0,
 			pool?.VertexFreeRangeCount ?? 0,
-			pool?.IndexFreeRangeCount ?? 0 );
+			pool?.IndexFreeRangeCount ?? 0,
+			ClipboxRevision,
+			ClipboxChangedSlots,
+			ClipboxPendingRevisionCount,
+			ClipboxMaximumPendingRevisionCount,
+			ClipboxStableSlotCount,
+			ClipboxActiveSlotCount,
+			ClipboxDroppedWork,
+			ClipboxStationaryUpdates );
 	}
 
 	private static VoxelTimingDistribution Summarize( List<double> values )

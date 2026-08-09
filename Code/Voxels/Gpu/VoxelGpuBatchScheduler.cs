@@ -1,6 +1,7 @@
 internal sealed class VoxelGpuBatchScheduler
 {
 	private readonly Queue<ScheduledRequest> _requests = new();
+	private readonly Queue<ScheduledRequest> _retainedScratch = new();
 	private readonly Dictionary<VoxelVisualBlockKey, uint> _latestGenerations = new();
 	private readonly object _sync = new();
 	private readonly int _maximumPendingRequests;
@@ -57,6 +58,23 @@ internal sealed class VoxelGpuBatchScheduler
 			var count = System.Math.Min( maximumCount, _requests.Count );
 			for ( var index = 0; index < count; index++ ) destination[index] = _requests.Dequeue();
 			return count;
+		}
+	}
+
+	public int PruneToDesired( HashSet<VoxelVisualBlockKey> desiredKeys )
+	{
+		if ( desiredKeys is null ) throw new System.ArgumentNullException( nameof( desiredKeys ) );
+		lock ( _sync )
+		{
+			_retainedScratch.Clear();
+			while ( _requests.Count > 0 )
+			{
+				var request = _requests.Dequeue();
+				if ( desiredKeys.Contains( request.Key ) && _latestGenerations.TryGetValue( request.Key, out var generation ) && generation == request.Generation )
+					_retainedScratch.Enqueue( request );
+			}
+			while ( _retainedScratch.Count > 0 ) _requests.Enqueue( _retainedScratch.Dequeue() );
+			return _requests.Count;
 		}
 	}
 

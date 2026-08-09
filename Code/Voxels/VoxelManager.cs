@@ -32,6 +32,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<Vector3Int> _gpuPreviousStreamingObservers = new( 4 );
 	private readonly HashSet<Vector3Int> _gpuDesiredScratch = new();
 	private readonly List<Vector3Int> _gpuOrderedScratch = new();
+	private readonly List<VoxelGpuClipboxDebugBlock> _gpuClipboxDebugScratch = new( 2048 );
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
@@ -170,7 +171,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Rendering" ), Range( 4, 8 )]
 	public int GpuClipboxBlocksPerAxis { get; set; } = 4;
 
-	[Property, Group( "Rendering" ), Range( 1, 4 )]
+	[Property, Group( "Rendering" ), Range( 1, 7 )]
 	public int GpuClipboxLevelCount { get; set; } = 2;
 
 	[Property, Group( "Rendering" )]
@@ -230,6 +231,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	[Property, Group( "Diagnostics" )]
 	public bool CaptureFrameStutterDiagnostics { get; set; }
+
+	[Property, Group( "Diagnostics" )]
+	public VoxelGpuClipboxDebugMode GpuClipboxDebugMode { get; set; } = VoxelGpuClipboxDebugMode.Off;
+
+	[Property, Group( "Diagnostics" )]
+	public bool GpuClipboxDebugLabels { get; set; } = true;
+
+	[Property, Group( "Diagnostics" ), Range( 1, 2048 )]
+	public int GpuClipboxDebugMaxBlocks { get; set; } = 512;
 
 	[Property, ReadOnly, Group( "Diagnostics" )]
 	public string GpuTerrainLiveDiagnostics => _gpuTerrainLiveDiagnostics;
@@ -321,6 +331,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
 		GpuClipboxBlocksPerAxis = GpuClipboxBlocksPerAxis <= 4 ? 4 : 8;
 		GpuClipboxLevelCount = System.Math.Clamp( GpuClipboxLevelCount, 1, VoxelClipboxConfig.MaximumLevelCount );
+		GpuClipboxDebugMaxBlocks = System.Math.Clamp( GpuClipboxDebugMaxBlocks, 1, 2048 );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
@@ -720,7 +731,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void RefreshGpuTerrainLiveDiagnostics( VoxelGpuTerrainDiagnostics diagnostics )
 	{
-		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; policy={diagnostics.LodPolicy}; indirectGroup={diagnostics.IndirectCommandGroupSize}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargestFree={diagnostics.VertexLargestFree}; indexLargestFree={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
+		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; policy={diagnostics.LodPolicy}; indirectGroup={diagnostics.IndirectCommandGroupSize}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; clipboxRevision={diagnostics.ClipboxRevision}; clipboxChangedSlots={diagnostics.ClipboxChangedSlots}; clipboxPendingRevisions={diagnostics.ClipboxPendingRevisionCount}/{diagnostics.ClipboxMaximumPendingRevisionCount}; clipboxStable/active={diagnostics.ClipboxStableSlotCount}/{diagnostics.ClipboxActiveSlotCount}; clipboxDropped={diagnostics.ClipboxDroppedWork}; clipboxStationary={diagnostics.ClipboxStationaryUpdates}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargestFree={diagnostics.VertexLargestFree}; indexLargestFree={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
 	}
 
 	internal static double ComputeUnaccountedFrameMilliseconds( double frameMilliseconds, params double[] timingMilliseconds )
@@ -735,7 +746,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		var diagnostics = CaptureGpuTerrainDiagnostics();
 		RefreshGpuTerrainLiveDiagnostics( diagnostics );
-		Log.Info( $"Voxel GPU terrain diagnostics: backend={diagnostics.Backend}, available={diagnostics.Available}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, blocked={diagnostics.BlockedRequests:N0}, capacityLimited={diagnostics.CapacityLimited}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, deferrals={diagnostics.CapacityDeferrals:N0}, evictions={diagnostics.CapacityEvictions:N0}, staleRejected={diagnostics.StalePublicationsRejected:N0}, scratch={FormatBytes( diagnostics.ScratchBytes )}, poolUsed/peak/capacity={FormatBytes( diagnostics.PoolUsedBytes )}/{FormatBytes( diagnostics.PeakPoolUsedBytes )}/{FormatBytes( diagnostics.PoolCapacityBytes )}, vertexFree/largest={diagnostics.VertexFree:N0}/{diagnostics.VertexLargestFree:N0}, indexFree/largest={diagnostics.IndexFree:N0}/{diagnostics.IndexLargestFree:N0}, countSubmit={diagnostics.CountSubmissionMilliseconds:F3}ms total/{diagnostics.CountSubmissionPerBlockMilliseconds:F4}ms per block, countReadback={diagnostics.CountReadbackCount:N0} batches at {diagnostics.CountReadbackAverageMilliseconds:F3}ms avg, emitSubmit={diagnostics.EmitSubmissionMilliseconds:F3}ms total/{diagnostics.EmitSubmissionPerBlockMilliseconds:F4}ms per block, requestToVisible(avg/p95/max)={diagnostics.RequestToVisible.AverageMilliseconds:F2}/{diagnostics.RequestToVisible.P95Milliseconds:F2}/{diagnostics.RequestToVisible.MaximumMilliseconds:F2}ms, batchComplete(avg/p95/max)={diagnostics.BatchCompletion.AverageMilliseconds:F2}/{diagnostics.BatchCompletion.P95Milliseconds:F2}/{diagnostics.BatchCompletion.MaximumMilliseconds:F2}ms, geometryReadback={diagnostics.GeometryReadbackBytes:N0}B, failure={diagnostics.Failure}." );
+		Log.Info( $"Voxel GPU terrain diagnostics: backend={diagnostics.Backend}, policy={diagnostics.LodPolicy}, available={diagnostics.Available}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, blocked={diagnostics.BlockedRequests:N0}, capacityLimited={diagnostics.CapacityLimited}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, clipboxRevision={diagnostics.ClipboxRevision}, clipboxChangedSlots={diagnostics.ClipboxChangedSlots:N0}, clipboxPendingRevisions={diagnostics.ClipboxPendingRevisionCount}/{diagnostics.ClipboxMaximumPendingRevisionCount}, clipboxStable/active={diagnostics.ClipboxStableSlotCount:N0}/{diagnostics.ClipboxActiveSlotCount:N0}, clipboxDropped={diagnostics.ClipboxDroppedWork:N0}, clipboxStationary={diagnostics.ClipboxStationaryUpdates:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, deferrals={diagnostics.CapacityDeferrals:N0}, evictions={diagnostics.CapacityEvictions:N0}, staleRejected={diagnostics.StalePublicationsRejected:N0}, scratch={FormatBytes( diagnostics.ScratchBytes )}, poolUsed/peak/capacity={FormatBytes( diagnostics.PoolUsedBytes )}/{FormatBytes( diagnostics.PeakPoolUsedBytes )}/{FormatBytes( diagnostics.PoolCapacityBytes )}, vertexFree/largest={diagnostics.VertexFree:N0}/{diagnostics.VertexLargestFree:N0}, indexFree/largest={diagnostics.IndexFree:N0}/{diagnostics.IndexLargestFree:N0}, countSubmit={diagnostics.CountSubmissionMilliseconds:F3}ms total/{diagnostics.CountSubmissionPerBlockMilliseconds:F4}ms per block, countReadback={diagnostics.CountReadbackCount:N0} batches at {diagnostics.CountReadbackAverageMilliseconds:F3}ms avg, emitSubmit={diagnostics.EmitSubmissionMilliseconds:F3}ms total/{diagnostics.EmitSubmissionPerBlockMilliseconds:F4}ms per block, requestToVisible(avg/p95/max)={diagnostics.RequestToVisible.AverageMilliseconds:F2}/{diagnostics.RequestToVisible.P95Milliseconds:F2}/{diagnostics.RequestToVisible.MaximumMilliseconds:F2}ms, batchComplete(avg/p95/max)={diagnostics.BatchCompletion.AverageMilliseconds:F2}/{diagnostics.BatchCompletion.P95Milliseconds:F2}/{diagnostics.BatchCompletion.MaximumMilliseconds:F2}ms, geometryReadback={diagnostics.GeometryReadbackBytes:N0}B, failure={diagnostics.Failure}." );
 	}
 
 	private void DisposeGpuTerrainBackend()
@@ -1314,6 +1325,55 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			var material = distance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air;
 			chunk.FillLayer( z, new Voxel( distance, material ) );
 		}
+	}
+
+	protected override void DrawGizmos()
+	{
+		base.DrawGizmos();
+		if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Off || _gpuTerrainBackend is null || !_gpuTerrainBackend.UsesRegularClipbox ) return;
+		var count = _gpuTerrainBackend.CopyClipboxDebugBlocks( _gpuClipboxDebugScratch );
+		var drawCount = System.Math.Min( count, System.Math.Max( 1, GpuClipboxDebugMaxBlocks ) );
+		using ( Gizmo.Scope( "Voxel GPU Clipbox", GameObject.WorldTransform ) )
+		{
+			Gizmo.Draw.IgnoreDepth = true;
+			Gizmo.Draw.LineThickness = 1.0f;
+			for ( var index = 0; index < drawCount; index++ )
+			{
+				var block = _gpuClipboxDebugScratch[index];
+				var scale = 1 << block.Lod;
+				var minimum = new Vector3( block.Coordinate.x * ChunkSize * scale * VoxelSize, block.Coordinate.y * ChunkSize * scale * VoxelSize, (block.Coordinate.z - 1) * ChunkSize * scale * VoxelSize );
+				var extent = ChunkSize * scale * VoxelSize;
+				var bounds = new BBox( minimum, minimum + Vector3.One * extent );
+				Gizmo.Draw.Color = GetClipboxDebugColor( block );
+				Gizmo.Draw.LineBBox( bounds );
+				if ( !GpuClipboxDebugLabels || GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Lod )
+				{
+					if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Lod ) Gizmo.Draw.Text( $"L{block.Lod}", new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
+					continue;
+				}
+				var label = $"L{block.Lod} slot={block.StableSlotId} {block.State}";
+				if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full ) label += $"\ncoord={block.Coordinate} gen={block.Generation} mesh=V{block.VertexOffset}+{block.VertexCapacity}/I{block.IndexOffset}+{block.IndexCapacity} idx={block.IndexCount}";
+				Gizmo.Draw.Text( label, new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
+			}
+		}
+	}
+
+	private static Color GetClipboxDebugColor( VoxelGpuClipboxDebugBlock block )
+	{
+		return block.State switch
+		{
+			VoxelGpuDebugBlockState.Pending => Color.Yellow,
+			VoxelGpuDebugBlockState.Deferred => Color.Red,
+			VoxelGpuDebugBlockState.Missing => Color.White,
+			_ => block.Lod switch
+			{
+				0 => Color.Cyan,
+				1 => Color.Green,
+				2 => Color.Blue,
+				3 => Color.Magenta,
+				_ => Color.White
+			}
+		};
 	}
 
 	private void ResolveGpuPoolCapacity()

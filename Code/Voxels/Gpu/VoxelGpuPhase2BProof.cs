@@ -42,11 +42,15 @@ internal static class VoxelGpuPhase2BProof
 		return new VoxelGpuPhase2BProofResult( string.IsNullOrEmpty( failure ), test, failure ?? string.Empty );
 	}
 
-	public static VoxelGpuPhase2BProofResult ValidateRegularClipbox( string test, VoxelGpuTerrainDiagnostics diagnostics, int expectedActiveBlocks, string expectedPolicy )
+	public static VoxelGpuPhase2BProofResult ValidateRegularClipbox( string test, VoxelGpuTerrainDiagnostics diagnostics, int expectedActiveBlocks, string expectedPolicy, int expectedStableSlots = 0 )
 	{
 		var proof = ValidateStatic( test, diagnostics, expectedActiveBlocks );
 		var failure = proof.Failure;
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.LodPolicy != expectedPolicy ) failure = $"reported LOD policy '{diagnostics.LodPolicy}', expected '{expectedPolicy}'";
+		if ( string.IsNullOrEmpty( failure ) && expectedStableSlots > 0 && diagnostics.ClipboxStableSlotCount != expectedStableSlots ) failure = $"reported {diagnostics.ClipboxStableSlotCount} stable clipbox slots, expected {expectedStableSlots}";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxActiveSlotCount != expectedActiveBlocks ) failure = $"reported {diagnostics.ClipboxActiveSlotCount} active clipbox slots, expected {expectedActiveBlocks}";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxDroppedWork != 0 ) failure = $"dropped {diagnostics.ClipboxDroppedWork} clipbox slot requests";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxMaximumPendingRevisionCount > 1 ) failure = $"observed {diagnostics.ClipboxMaximumPendingRevisionCount} pending clipbox revisions";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.DepthPrepassCommandLists != diagnostics.OpaqueCommandLists ) failure = $"depth command lists {diagnostics.DepthPrepassCommandLists} differ from opaque command lists {diagnostics.OpaqueCommandLists}";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.VisibleDrawCommands == 0 ) failure = "regular clipbox settled without visible indexed commands";
 		return new VoxelGpuPhase2BProofResult( string.IsNullOrEmpty( failure ), test, failure ?? string.Empty );
