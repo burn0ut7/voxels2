@@ -1,7 +1,9 @@
 public enum VoxelGpuClipboxDebugMode
 {
 	Off,
+	/// <summary>Draw only active regular blocks that have published index data.</summary>
 	Lod,
+	/// <summary>Draw every active regular slot, including missing, pending, and empty slots.</summary>
 	SlotAndMesh,
 	Full
 }

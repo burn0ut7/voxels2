@@ -3,7 +3,7 @@ internal readonly record struct VoxelClipboxConfig
 	public const int CellsPerBlock = 32;
 	public const int MinimumBlocksPerAxis = 4;
 	public const int MaximumBlocksPerAxis = 8;
-	public const int MaximumLevelCount = 4;
+	public const int MaximumLevelCount = 7;
 
 	public int BlocksPerAxis { get; }
 	public int LevelCount { get; }
@@ -19,7 +19,7 @@ internal readonly record struct VoxelClipboxConfig
 		if ( blocksPerAxis is not (4 or 8) )
 			throw new System.ArgumentOutOfRangeException( nameof( blocksPerAxis ), blocksPerAxis, "Clipbox supports 4 or 8 blocks per axis." );
 		if ( levelCount < 1 || levelCount > MaximumLevelCount )
-			throw new System.ArgumentOutOfRangeException( nameof( levelCount ), levelCount, "Clipbox supports one through four levels." );
+			throw new System.ArgumentOutOfRangeException( nameof( levelCount ), levelCount, $"Clipbox supports one through {MaximumLevelCount} levels." );
 		if ( (blocksPerAxis & (blocksPerAxis - 1)) != 0 || blocksPerAxis % 4 != 0 )
 			throw new System.ArgumentException( "Blocks per axis must be a power of two divisible by four.", nameof( blocksPerAxis ) );
 

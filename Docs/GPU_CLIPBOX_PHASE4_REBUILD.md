@@ -524,6 +524,14 @@ Expected values:
 | 8 | 2 | 960 | 1,024 |
 | 8 | 4 | 1,856 | 2,048 |
 
+The authored GPU world uses `ChunkRadius` as the coverage authority. With `GpuClipboxMatchChunkRadius` enabled, the runtime selects the smallest level count whose outer radius is at least the chunk radius:
+
+```text
+coverageRadius = (BlocksPerAxis * 2^(Levels - 1)) / 2
+```
+
+Therefore the authored `B8` world at `ChunkRadius=64` resolves to `L5` and covers the complete 64-chunk radius. The supported maximum level count is seven, so the same relationship remains valid through the manager's maximum chunk radius. Manual `GpuClipboxLevelCount` values remain available for isolated benchmark configurations when matching is disabled.
+
 `Stable regular slots = levels * B³`.
 
 If runtime counts differ without cropping or inactive levels, fail the planner gate.
@@ -1342,6 +1350,8 @@ stale/deferred = red
 transition = separate high-contrast palette
 ```
 
+`GpuClipboxDebugMode=Lod` draws only regular slots with published mesh index data. `SlotAndMesh` draws every active regular slot, including missing, pending, deferred, and zero-geometry slots. `Full` retains the all-slot view and adds transition-face ownership diagnostics. The debug block limit is applied after this filtering so empty slots cannot hide mesh-bearing LOD blocks.
+
 When the authored world is not running, the Full clipbox gizmo reuses the authoritative planner to draw the editor preview and labels those desired blocks and seams as `Missing`/not resident. In play mode the same gizmo reads the live backend, including current state and persistent regular or transition mesh ranges; the preview never creates terrain or changes residency.
 
 Do not use debug visualization to alter terrain state.
@@ -1660,6 +1670,7 @@ phase4_command_list_active_range
 phase4_regular_b4_l2_stationary
 phase4_regular_b4_l4_stationary
 phase4_regular_b8_l4_stationary
+phase4_regular_radius64_match
 phase4_regular_cardinal_streaming
 phase4_regular_diagonal_streaming
 phase4_regular_vertical_streaming

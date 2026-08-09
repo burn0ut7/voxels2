@@ -182,6 +182,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int GpuClipboxLevelCount { get; set; } = 4;
 
 	[Property, Group( "Rendering" )]
+	public bool GpuClipboxMatchChunkRadius { get; set; } = true;
+
+	[Property, Group( "Rendering" )]
 	public bool GpuAutoScalePoolToChunkRadius { get; set; } = true;
 
 	[Property, Group( "Rendering" ), Range( 65536, MaximumGpuVertexPoolCapacity )]
@@ -248,11 +251,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Diagnostics" )]
 	public bool GpuClipboxDebugLabels { get; set; } = true;
 
-	[Property, Group( "Diagnostics" ), Range( 1, 2048 )]
-	public int GpuClipboxDebugMaxBlocks { get; set; } = 512;
+	[Property, Group( "Diagnostics" ), Range( 1, 4096 )]
+	public int GpuClipboxDebugMaxBlocks { get; set; } = 4096;
 
-	[Property, Group( "Diagnostics" ), Range( 1, 2048 )]
-	public int GpuClipboxDebugMaxTransitions { get; set; } = 512;
+	[Property, Group( "Diagnostics" ), Range( 1, 4096 )]
+	public int GpuClipboxDebugMaxTransitions { get; set; } = 4096;
 
 	[Property, ReadOnly, Group( "Diagnostics" )]
 	public string GpuTerrainLiveDiagnostics => _gpuTerrainLiveDiagnostics;
@@ -269,7 +272,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int ActiveChunkGameObjectCount => _chunkGameObjects.Count;
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox && VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ? GpuClipboxConfig.ExpectedActiveRegularCount : checked( ChunkDiameter * ChunkDiameter );
-	private VoxelClipboxConfig GpuClipboxConfig => new( GpuClipboxBlocksPerAxis, GpuClipboxLevelCount, checked( (ushort)GpuTerrainRuleVersion ) );
+	[Property, ReadOnly, Group( "Rendering" )]
+	public int EffectiveGpuClipboxLevelCount => ResolveGpuClipboxLevelCount();
+
+	[Property, ReadOnly, Group( "Rendering" )]
+	public int GpuClipboxCoverageRadius => checked( GpuClipboxBlocksPerAxis * (1 << (ResolveGpuClipboxLevelCount() - 1)) / 2 );
+
+	private VoxelClipboxConfig GpuClipboxConfig => new( GpuClipboxBlocksPerAxis, ResolveGpuClipboxLevelCount(), checked( (ushort)GpuTerrainRuleVersion ) );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
 	public bool IsPlayerSafetyActive => _playerSafetyActive;
 	internal bool IsGpuTransvoxelProofRunning => _gpuTransvoxelProof?.IsRunning == true;
@@ -349,8 +358,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
 		GpuClipboxBlocksPerAxis = GpuClipboxBlocksPerAxis <= 4 ? 4 : 8;
 		GpuClipboxLevelCount = System.Math.Clamp( GpuClipboxLevelCount, 1, VoxelClipboxConfig.MaximumLevelCount );
-		GpuClipboxDebugMaxBlocks = System.Math.Clamp( GpuClipboxDebugMaxBlocks, 1, 2048 );
-		GpuClipboxDebugMaxTransitions = System.Math.Clamp( GpuClipboxDebugMaxTransitions, 1, 2048 );
+		GpuClipboxDebugMaxBlocks = System.Math.Clamp( GpuClipboxDebugMaxBlocks, 1, 4096 );
+		GpuClipboxDebugMaxTransitions = System.Math.Clamp( GpuClipboxDebugMaxTransitions, 1, 4096 );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
@@ -745,7 +754,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			}
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
-			Log.Info( $"Voxel persistent GPU terrain world scheduled: policy={GpuTerrainLodPolicy}, chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), clipbox={GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis} levels={GpuClipboxLevelCount}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU terrain world scheduled: policy={GpuTerrainLodPolicy}, chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), clipbox={GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis} levels={EffectiveGpuClipboxLevelCount}, coverageRadius={GpuClipboxCoverageRadius}, matchRadius={GpuClipboxMatchChunkRadius}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
@@ -1418,14 +1427,17 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var count = _gpuTerrainBackend is not null
 			? _gpuTerrainBackend.CopyClipboxDebugBlocks( _gpuClipboxDebugScratch )
 			: CopyEditorClipboxDebugBlocks();
-		var drawCount = System.Math.Min( count, System.Math.Max( 1, GpuClipboxDebugMaxBlocks ) );
+		var drawLimit = System.Math.Max( 1, GpuClipboxDebugMaxBlocks );
 		using ( Gizmo.Scope( "Voxel GPU Clipbox", GameObject.WorldTransform ) )
 		{
 			Gizmo.Draw.IgnoreDepth = true;
 			Gizmo.Draw.LineThickness = 1.0f;
-			for ( var index = 0; index < drawCount; index++ )
+			var drawCount = 0;
+			for ( var index = 0; index < count && drawCount < drawLimit; index++ )
 			{
 				var block = _gpuClipboxDebugScratch[index];
+				if ( !ShouldDrawClipboxDebugBlock( block ) ) continue;
+				drawCount++;
 				var scale = 1 << block.Lod;
 				var minimum = new Vector3( block.Coordinate.x * ChunkSize * scale * VoxelSize, block.Coordinate.y * ChunkSize * scale * VoxelSize, (block.Coordinate.z - 1) * ChunkSize * scale * VoxelSize );
 				var extent = ChunkSize * scale * VoxelSize;
@@ -1473,6 +1485,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			}
 		}
 	}
+
+	private bool ShouldDrawClipboxDebugBlock( VoxelGpuClipboxDebugBlock block ) => GpuClipboxDebugMode != VoxelGpuClipboxDebugMode.Lod || block.IndexCount > 0;
 
 	private bool TryPrepareClipboxDebugSnapshot( out bool editorPreview )
 	{
@@ -1579,6 +1593,21 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				_ => Color.White
 			}
 		};
+	}
+
+	private int ResolveGpuClipboxLevelCount()
+	{
+		if ( !GpuClipboxMatchChunkRadius ) return System.Math.Clamp( GpuClipboxLevelCount, 1, VoxelClipboxConfig.MaximumLevelCount );
+
+		var coverageRadius = GpuClipboxBlocksPerAxis / 2;
+		var levelCount = 1;
+		while ( coverageRadius < ChunkRadius && levelCount < VoxelClipboxConfig.MaximumLevelCount )
+		{
+			coverageRadius = checked( coverageRadius * 2 );
+			levelCount++;
+		}
+
+		return levelCount;
 	}
 
 	private void ResolveGpuPoolCapacity()
@@ -2904,7 +2933,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private WorldConfiguration CaptureWorldConfiguration()
 	{
-		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuTerrainLodPolicy, GpuClipboxBlocksPerAxis, GpuClipboxLevelCount, GpuAutoScalePoolToChunkRadius, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuTerrainLodPolicy, GpuClipboxBlocksPerAxis, GpuClipboxLevelCount, GpuClipboxMatchChunkRadius, GpuAutoScalePoolToChunkRadius, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
 	}
 
 	private TerrainConfiguration CaptureTerrainConfiguration() => new( SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
@@ -2955,7 +2984,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
 	private readonly record struct TerrainConfiguration( float Frequency, float Amplitude, float BaseHeight, int Seed );
-	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, VoxelGpuTerrainLodPolicy GpuTerrainLodPolicy, int GpuClipboxBlocksPerAxis, int GpuClipboxLevelCount, bool GpuAutoScalePoolToChunkRadius, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, VoxelGpuTerrainLodPolicy GpuTerrainLodPolicy, int GpuClipboxBlocksPerAxis, int GpuClipboxLevelCount, bool GpuClipboxMatchChunkRadius, bool GpuAutoScalePoolToChunkRadius, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
 
 	private sealed class WorldGenerationWorkerResult
 	{
