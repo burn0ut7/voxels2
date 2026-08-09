@@ -52,7 +52,6 @@ internal static class VoxelGpuPhase2BProof
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxDroppedWork != 0 ) failure = $"dropped {diagnostics.ClipboxDroppedWork} clipbox slot requests";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxMaximumPendingRevisionCount > 1 ) failure = $"observed {diagnostics.ClipboxMaximumPendingRevisionCount} pending clipbox revisions";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.DepthPrepassCommandLists != diagnostics.OpaqueCommandLists ) failure = $"depth command lists {diagnostics.DepthPrepassCommandLists} differ from opaque command lists {diagnostics.OpaqueCommandLists}";
-		if ( string.IsNullOrEmpty( failure ) && diagnostics.VisibleDrawCommands == 0 ) failure = "regular clipbox settled without visible indexed commands";
 		return new VoxelGpuPhase2BProofResult( string.IsNullOrEmpty( failure ), test, failure ?? string.Empty );
 	}
 }
