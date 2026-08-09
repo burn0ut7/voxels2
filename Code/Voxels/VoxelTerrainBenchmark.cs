@@ -1495,11 +1495,20 @@ public sealed class VoxelTerrainBenchmark : Component
 		var builder = new System.Text.StringBuilder();
 		if ( FileSystem.Data.FileExists( HistoryJsonLinesPath ) )
 		{
-			builder.Append( FileSystem.Data.ReadAllText( HistoryJsonLinesPath ).TrimEnd() );
+			var existingLines = FileSystem.Data.ReadAllText( HistoryJsonLinesPath )
+				.Split( '\n', System.StringSplitOptions.RemoveEmptyEntries )
+				.Select( NormalizeHistoryJsonLine );
+			builder.Append( string.Join( "\n", existingLines ).TrimEnd() );
 			builder.AppendLine();
 		}
 		foreach ( var result in _results ) builder.AppendLine( SerializeScenarioJson( result ) );
 		FileSystem.Data.WriteAllText( HistoryJsonLinesPath, builder.ToString() );
+	}
+
+	private static string NormalizeHistoryJsonLine( string line )
+	{
+		return line.Replace( "\"gpu_terrain_structured_debug_report\":,", "\"gpu_terrain_structured_debug_report\":{},", System.StringComparison.Ordinal )
+			.Replace( "\"gpu_terrain_structured_debug_report\":}", "\"gpu_terrain_structured_debug_report\":{}}", System.StringComparison.Ordinal );
 	}
 
 	private string BuildLatestJson( string failure )
