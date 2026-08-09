@@ -140,7 +140,7 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			capabilities.IndirectFirstInstance,
 			capabilities.IndirectCommandGroupSize,
 			RequestedBlocks,
-			residents?.PublishedCount ?? 0,
+			residents?.PublishedCountFor( false ) ?? 0,
 			PendingCountBatches,
 			PendingEmitBatches,
 			BackpressureEvents,

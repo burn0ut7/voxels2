@@ -772,12 +772,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	private void UpdateQueueDiagnostics()
 	{
-		_diagnostics.DesiredBlocks = DesiredCount + TransitionDesiredCount;
-		_diagnostics.RequestedBlocks = DesiredCount + TransitionDesiredCount;
-		_diagnostics.PendingRequestCount = _scheduler.PendingCount + _transitionScheduler.PendingCount;
+		_diagnostics.DesiredBlocks = DesiredCount;
+		_diagnostics.RequestedBlocks = DesiredCount;
+		_diagnostics.PendingRequestCount = _scheduler.PendingCount;
 		_diagnostics.PendingPublicationCount = _publications.Count;
-		_diagnostics.BlockedRequests = BlockedRequestCount + BlockedTransitionRequestCount;
-		_diagnostics.CapacityLimited = BlockedRequestCount + BlockedTransitionRequestCount > 0;
+		_diagnostics.BlockedRequests = BlockedRequestCount;
+		_diagnostics.CapacityLimited = BlockedRequestCount > 0;
 		_diagnostics.QueuesBounded = _scheduler.PendingCount <= _scheduler.MaximumPendingRequests && _transitionScheduler.PendingCount <= _transitionScheduler.MaximumPendingRequests && _publications.Count <= VoxelGpuScratchArena.RingSize + 1;
 		if ( _clipboxPlanner is not null )
 		{
