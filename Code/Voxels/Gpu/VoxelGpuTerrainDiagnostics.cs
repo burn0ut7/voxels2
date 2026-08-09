@@ -61,7 +61,13 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	int ClipboxStableSlotCount,
 	int ClipboxActiveSlotCount,
 	int ClipboxDroppedWork,
-	int ClipboxStationaryUpdates );
+	int ClipboxStationaryUpdates,
+	int ClipboxTransitionCapacity,
+	int ClipboxTransitionActiveSlotCount,
+	int ClipboxTransitionChangedSlots,
+	int ClipboxTransitionPendingSlots,
+	int ClipboxTransitionDependencyMismatches,
+	int ClipboxTransitionStationaryUpdates );
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
 {
@@ -100,6 +106,12 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	public int ClipboxActiveSlotCount;
 	public int ClipboxDroppedWork;
 	public int ClipboxStationaryUpdates;
+	public int ClipboxTransitionCapacity;
+	public int ClipboxTransitionActiveSlotCount;
+	public int ClipboxTransitionChangedSlots;
+	public int ClipboxTransitionPendingSlots;
+	public int ClipboxTransitionDependencyMismatches;
+	public int ClipboxTransitionStationaryUpdates;
 
 	public void RecordCountReadback( double milliseconds )
 	{
@@ -177,7 +189,13 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			ClipboxStableSlotCount,
 			ClipboxActiveSlotCount,
 			ClipboxDroppedWork,
-			ClipboxStationaryUpdates );
+			ClipboxStationaryUpdates,
+			ClipboxTransitionCapacity,
+			ClipboxTransitionActiveSlotCount,
+			ClipboxTransitionChangedSlots,
+			ClipboxTransitionPendingSlots,
+			ClipboxTransitionDependencyMismatches,
+			ClipboxTransitionStationaryUpdates );
 	}
 
 	private static VoxelTimingDistribution Summarize( List<double> values )

@@ -33,6 +33,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly HashSet<Vector3Int> _gpuDesiredScratch = new();
 	private readonly List<Vector3Int> _gpuOrderedScratch = new();
 	private readonly List<VoxelGpuClipboxDebugBlock> _gpuClipboxDebugScratch = new( 2048 );
+	private readonly List<VoxelGpuClipboxDebugTransition> _gpuClipboxTransitionDebugScratch = new( 2048 );
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
@@ -241,6 +242,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Diagnostics" ), Range( 1, 2048 )]
 	public int GpuClipboxDebugMaxBlocks { get; set; } = 512;
 
+	[Property, Group( "Diagnostics" ), Range( 1, 2048 )]
+	public int GpuClipboxDebugMaxTransitions { get; set; } = 512;
+
 	[Property, ReadOnly, Group( "Diagnostics" )]
 	public string GpuTerrainLiveDiagnostics => _gpuTerrainLiveDiagnostics;
 
@@ -332,6 +336,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuClipboxBlocksPerAxis = GpuClipboxBlocksPerAxis <= 4 ? 4 : 8;
 		GpuClipboxLevelCount = System.Math.Clamp( GpuClipboxLevelCount, 1, VoxelClipboxConfig.MaximumLevelCount );
 		GpuClipboxDebugMaxBlocks = System.Math.Clamp( GpuClipboxDebugMaxBlocks, 1, 2048 );
+		GpuClipboxDebugMaxTransitions = System.Math.Clamp( GpuClipboxDebugMaxTransitions, 1, 2048 );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
@@ -731,7 +736,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void RefreshGpuTerrainLiveDiagnostics( VoxelGpuTerrainDiagnostics diagnostics )
 	{
-		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; policy={diagnostics.LodPolicy}; indirectGroup={diagnostics.IndirectCommandGroupSize}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; clipboxRevision={diagnostics.ClipboxRevision}; clipboxChangedSlots={diagnostics.ClipboxChangedSlots}; clipboxPendingRevisions={diagnostics.ClipboxPendingRevisionCount}/{diagnostics.ClipboxMaximumPendingRevisionCount}; clipboxStable/active={diagnostics.ClipboxStableSlotCount}/{diagnostics.ClipboxActiveSlotCount}; clipboxDropped={diagnostics.ClipboxDroppedWork}; clipboxStationary={diagnostics.ClipboxStationaryUpdates}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargestFree={diagnostics.VertexLargestFree}; indexLargestFree={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
+		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; policy={diagnostics.LodPolicy}; indirectGroup={diagnostics.IndirectCommandGroupSize}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; clipboxRevision={diagnostics.ClipboxRevision}; clipboxChangedSlots={diagnostics.ClipboxChangedSlots}; clipboxPendingRevisions={diagnostics.ClipboxPendingRevisionCount}/{diagnostics.ClipboxMaximumPendingRevisionCount}; clipboxStable/active={diagnostics.ClipboxStableSlotCount}/{diagnostics.ClipboxActiveSlotCount}; clipboxDropped={diagnostics.ClipboxDroppedWork}; clipboxStationary={diagnostics.ClipboxStationaryUpdates}; transitionCapacity={diagnostics.ClipboxTransitionCapacity}; transitionActive/changed/pending={diagnostics.ClipboxTransitionActiveSlotCount}/{diagnostics.ClipboxTransitionChangedSlots}/{diagnostics.ClipboxTransitionPendingSlots}; transitionDependencyMismatches={diagnostics.ClipboxTransitionDependencyMismatches}; transitionStationary={diagnostics.ClipboxTransitionStationaryUpdates}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargest={diagnostics.VertexLargestFree}; indexLargest={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
 	}
 
 	internal static double ComputeUnaccountedFrameMilliseconds( double frameMilliseconds, params double[] timingMilliseconds )
@@ -1355,8 +1360,41 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full ) label += $"\ncoord={block.Coordinate} gen={block.Generation} mesh=V{block.VertexOffset}+{block.VertexCapacity}/I{block.IndexOffset}+{block.IndexCapacity} idx={block.IndexCount}";
 				Gizmo.Draw.Text( label, new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
 			}
+			if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full )
+			{
+				var transitionCount = _gpuTerrainBackend.CopyClipboxDebugTransitions( _gpuClipboxTransitionDebugScratch );
+				var transitionDrawCount = System.Math.Min( transitionCount, System.Math.Max( 1, GpuClipboxDebugMaxTransitions ) );
+				for ( var index = 0; index < transitionDrawCount; index++ )
+				{
+					var transition = _gpuClipboxTransitionDebugScratch[index];
+					var scale = 1 << transition.FineLod;
+					var minimum = new Vector3( transition.FineCoordinate.x * ChunkSize * scale * VoxelSize, transition.FineCoordinate.y * ChunkSize * scale * VoxelSize, (transition.FineCoordinate.z - 1) * ChunkSize * scale * VoxelSize );
+					var extent = ChunkSize * scale * VoxelSize;
+					var thickness = System.MathF.Max( VoxelSize, extent * 0.025f );
+					var bounds = GetTransitionDebugBounds( minimum, extent, thickness, transition.Face );
+					Gizmo.Draw.Color = transition.State switch
+					{
+						VoxelGpuDebugBlockState.Pending => Color.Yellow,
+						VoxelGpuDebugBlockState.Deferred => Color.Red,
+						_ => Color.White
+					};
+					Gizmo.Draw.LineBBox( bounds );
+					if ( GpuClipboxDebugLabels ) Gizmo.Draw.Text( $"T{transition.FineLod}->{transition.CoarseLod} {transition.Face} owner={transition.StableSlotId} gen={transition.FineGeneration}/{transition.CoarseGeneration} dep={transition.DependenciesValid}", new Transform( bounds.Center ) );
+				}
+			}
 		}
 	}
+
+	private static BBox GetTransitionDebugBounds( Vector3 minimum, float extent, float thickness, VoxelClipboxFaceDirection face ) => face switch
+	{
+		VoxelClipboxFaceDirection.NegativeX => new BBox( new Vector3( minimum.x - thickness, minimum.y, minimum.z ), new Vector3( minimum.x, minimum.y + extent, minimum.z + extent ) ),
+		VoxelClipboxFaceDirection.PositiveX => new BBox( new Vector3( minimum.x + extent, minimum.y, minimum.z ), new Vector3( minimum.x + extent + thickness, minimum.y + extent, minimum.z + extent ) ),
+		VoxelClipboxFaceDirection.NegativeY => new BBox( new Vector3( minimum.x, minimum.y - thickness, minimum.z ), new Vector3( minimum.x + extent, minimum.y, minimum.z + extent ) ),
+		VoxelClipboxFaceDirection.PositiveY => new BBox( new Vector3( minimum.x, minimum.y + extent, minimum.z ), new Vector3( minimum.x + extent, minimum.y + extent + thickness, minimum.z + extent ) ),
+		VoxelClipboxFaceDirection.NegativeZ => new BBox( new Vector3( minimum.x, minimum.y, minimum.z - thickness ), new Vector3( minimum.x + extent, minimum.y + extent, minimum.z ) ),
+		VoxelClipboxFaceDirection.PositiveZ => new BBox( new Vector3( minimum.x, minimum.y, minimum.z + extent ), new Vector3( minimum.x + extent, minimum.y + extent, minimum.z + extent + thickness ) ),
+		_ => new BBox( minimum, minimum + Vector3.One * extent )
+	};
 
 	private static Color GetClipboxDebugColor( VoxelGpuClipboxDebugBlock block )
 	{

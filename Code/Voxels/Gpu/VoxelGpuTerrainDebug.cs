@@ -28,3 +28,15 @@ internal readonly record struct VoxelGpuClipboxDebugBlock(
 	Vector3 DrawOrigin,
 	Vector3 BoundsMin,
 	Vector3 BoundsMax );
+
+internal readonly record struct VoxelGpuClipboxDebugTransition(
+	Vector3Int FineCoordinate,
+	Vector3Int CoarseCoordinate,
+	int FineLod,
+	int CoarseLod,
+	VoxelClipboxFaceDirection Face,
+	int StableSlotId,
+	VoxelGpuDebugBlockState State,
+	uint FineGeneration,
+	uint CoarseGeneration,
+	bool DependenciesValid );

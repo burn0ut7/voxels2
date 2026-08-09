@@ -8,6 +8,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainRenderer _renderer;
 	private readonly VoxelClipboxRuntimePlanner _clipboxPlanner;
+	private readonly VoxelGpuTransitionMetadata _clipboxTransitions;
 	private readonly List<VoxelVisualBlockKey> _clipboxKeyScratch;
 	private readonly Queue<PendingPublication> _publications = new();
 	private readonly int _chunkSize;
@@ -104,9 +105,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		if ( clipboxConfig.HasValue )
 		{
 			_clipboxPlanner = new VoxelClipboxRuntimePlanner( clipboxConfig.Value );
+			_clipboxTransitions = new VoxelGpuTransitionMetadata( _clipboxPlanner.StableTransitionSlotCount );
 			_clipboxKeyScratch = new List<VoxelVisualBlockKey>( clipboxConfig.Value.ExpectedActiveRegularCount );
 			_diagnostics.LodPolicy = $"regular_clipbox_b{clipboxConfig.Value.BlocksPerAxis}_l{clipboxConfig.Value.LevelCount}";
 			_diagnostics.ClipboxStableSlotCount = clipboxConfig.Value.StableRegularSlotCount;
+			_diagnostics.ClipboxTransitionCapacity = _clipboxTransitions.Capacity;
 		}
 		_publishedScratch = new VoxelGpuResidentTable.ResidentEntry[residentCapacity];
 		_evictionCandidates = new List<EvictionCandidate>( residentCapacity );
@@ -126,12 +129,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		if ( !_clipboxPlanner.Update( observerCanonicalSample ) )
 		{
 			_diagnostics.ClipboxStationaryUpdates++;
+			_diagnostics.ClipboxTransitionStationaryUpdates++;
 			_diagnostics.ClipboxRevision = _clipboxPlanner.Revision;
 			return false;
 		}
 		_diagnostics.ClipboxRevision = _clipboxPlanner.Revision;
 		_diagnostics.ClipboxChangedSlots = _clipboxPlanner.ChangedSlotCount;
 		_diagnostics.ClipboxActiveSlotCount = _clipboxPlanner.ActiveRegularCount;
+		_diagnostics.ClipboxTransitionChangedSlots = _clipboxPlanner.ChangedTransitionSlotCount;
+		_diagnostics.ClipboxTransitionActiveSlotCount = _clipboxPlanner.ActiveTransitionCount;
 		_clipboxKeyScratch.Clear();
 		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
 			if ( assignment.Active ) _clipboxKeyScratch.Add( assignment.Key );
@@ -141,7 +147,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_diagnostics.ClipboxDroppedWork += _clipboxPlanner.ActiveRegularCount - desiredCount;
 			_diagnostics.Failure = $"GPU regular clipbox admitted {desiredCount} of {_clipboxPlanner.ActiveRegularCount} active slots.";
 		}
+		_clipboxTransitions.Update( _clipboxPlanner.DesiredTransitions, _residents, _scheduler );
+		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
+		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
+		if ( !_clipboxTransitions.DependenciesValid )
+			_diagnostics.Failure = $"GPU transition metadata has {_clipboxTransitions.DependencyMismatchCount} unresolved regular generation dependencies.";
 		_clipboxPlanner.Commit();
+		_clipboxTransitions.Commit();
+		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		return true;
 	}
 
@@ -250,6 +263,20 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			else if ( IsPending( assignment.Key ) ) state = VoxelGpuDebugBlockState.Pending;
 			else if ( IsBlocked( assignment.Key ) ) state = VoxelGpuDebugBlockState.Deferred;
 			destination.Add( new VoxelGpuClipboxDebugBlock( assignment.Coordinate, assignment.Lod, assignment.StableSlotId, state, generation, vertexOffset, vertexCapacity, indexOffset, indexCapacity, indexCount, drawOrigin, boundsMin, boundsMax ) );
+		}
+		return destination.Count;
+	}
+
+	public int CopyClipboxDebugTransitions( List<VoxelGpuClipboxDebugTransition> destination )
+	{
+		if ( destination is null ) throw new System.ArgumentNullException( nameof( destination ) );
+		destination.Clear();
+		if ( _clipboxPlanner is null ) return 0;
+		foreach ( var entry in _clipboxTransitions.Desired )
+		{
+			if ( !entry.Active ) continue;
+			var state = !entry.DependenciesValid ? VoxelGpuDebugBlockState.Deferred : entry.Pending ? VoxelGpuDebugBlockState.Pending : VoxelGpuDebugBlockState.Resident;
+			destination.Add( new VoxelGpuClipboxDebugTransition( entry.FineCoordinate, entry.CoarseCoordinate, entry.FineLevel, entry.CoarseLevel, entry.Face, entry.StableSlotId, state, entry.Key.FineGeneration, entry.Key.CoarseGeneration, entry.DependenciesValid ) );
 		}
 		return destination.Count;
 	}

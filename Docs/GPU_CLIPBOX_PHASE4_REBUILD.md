@@ -64,8 +64,8 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 | 4R-1 mathematical clipbox planner | Implemented; standalone proof passed, live editor gate pending |
 | 4R-2 renderer-capacity proof | Implemented; standalone proof passed, live editor gate pending |
 | 4R-3 regular two-level clipbox | Implemented; static integration and live compiler gates passed, runtime benchmark gate pending |
-| 4R-4 four-level toroidal streaming | Implemented; planner/runtime integration, bounded revision diagnostics, and editor visualization added; runtime benchmark gate pending |
-| 4R-5 transition ownership and residency | Not started |
+| 4R-4 four-level toroidal streaming | Implemented; planner/runtime integration, bounded revision diagnostics, and editor visualization added; clean runtime benchmark gate passed in suite v17 |
+| 4R-5 transition ownership and residency | Implemented; stable seam slots, fine-side ownership, generation dependency metadata, diagnostics, proof, and editor visualization added; suite v18 runtime gate pending |
 | 4R-6 Transvoxel golden reference and GPU proof | Not started |
 | 4R-7 production GPU transition pipeline | Not started |
 | 4R-8 coherent publication and stability | Not started |
@@ -1232,6 +1232,8 @@ Pass:
 No transition geometry yet.
 
 Implement stable seam slots and keys.
+
+The rebuild uses fixed `(LevelCount - 1) * 6 * B²` seam slots. The proof covers 96, 288, 384, and 1152 slots for B4/L2, B4/L4, B8/L2, and B8/L4. The fine regular block is the sole owner of a face, and a slot is active only when its same-LOD neighbor is inactive and the adjacent coarse block is active. Each active key carries both regular stable slot IDs, both scheduler generations, rule version, and edit revision. Current/desired metadata arrays are reused without truncation; stationary observers produce no transition work, and Full clipbox gizmos draw and label each owned face dependency.
 
 Pass:
 

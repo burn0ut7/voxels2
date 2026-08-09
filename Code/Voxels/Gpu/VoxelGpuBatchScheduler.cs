@@ -83,6 +83,11 @@ internal sealed class VoxelGpuBatchScheduler
 		lock ( _sync ) return _latestGenerations.TryGetValue( key, out var current ) && current == generation;
 	}
 
+	public bool TryGetGeneration( VoxelVisualBlockKey key, out uint generation )
+	{
+		lock ( _sync ) return _latestGenerations.TryGetValue( key, out generation ) && generation != 0;
+	}
+
 	public void Clear()
 	{
 		lock ( _sync )

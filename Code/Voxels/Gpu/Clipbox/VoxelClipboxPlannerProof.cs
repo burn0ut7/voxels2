@@ -7,7 +7,11 @@ public readonly record struct VoxelClipboxPlannerProofReport(
 	int Configurations,
 	int ActiveRegularCount,
 	int StableRegularSlots,
-	long AllocatedBytesAfterWarmup );
+	long AllocatedBytesAfterWarmup,
+	int TransitionCapacity = 0,
+	int ActiveTransitionCount = 0,
+	int ChangedTransitionSlots = 0,
+	bool TransitionOwnershipValidated = false );
 
 internal static class VoxelClipboxPlannerProof
 {
@@ -19,6 +23,9 @@ internal static class VoxelClipboxPlannerProof
 		var cases = 0;
 		var activeRegularCount = 0;
 		var stableRegularSlots = 0;
+		var transitionCapacity = 0;
+		var activeTransitionCount = 0;
+		var changedTransitionSlots = 0;
 
 		try
 		{
@@ -26,8 +33,9 @@ internal static class VoxelClipboxPlannerProof
 
 			ValidateMovementCases( ref cases );
 			ValidateReferenceEquivalence( ref cases );
+			ValidateTransitionOwnership( ref cases, ref transitionCapacity, ref activeTransitionCount, ref changedTransitionSlots );
 			var allocatedBytesAfterWarmup = ValidateNoAllocationAfterWarmup( ref cases );
-			return new VoxelClipboxPlannerProofReport( true, string.Empty, cases, configurations, activeRegularCount, stableRegularSlots, allocatedBytesAfterWarmup );
+			return new VoxelClipboxPlannerProofReport( true, string.Empty, cases, configurations, activeRegularCount, stableRegularSlots, allocatedBytesAfterWarmup, transitionCapacity, activeTransitionCount, changedTransitionSlots, true );
 		}
 		catch ( Exception exception )
 		{
@@ -41,6 +49,9 @@ internal static class VoxelClipboxPlannerProof
 		var cases = 0;
 		var activeRegularCount = 0;
 		var stableRegularSlots = 0;
+		var transitionCapacity = 0;
+		var activeTransitionCount = 0;
+		var changedTransitionSlots = 0;
 
 		try
 		{
@@ -70,11 +81,14 @@ internal static class VoxelClipboxPlannerProof
 				case "phase4_four_level_stationary_soak":
 					ValidateFourLevelStationarySoak( ref cases );
 					break;
+				case "phase4_transition_ownership":
+					ValidateTransitionOwnership( ref cases, ref transitionCapacity, ref activeTransitionCount, ref changedTransitionSlots );
+					break;
 				default:
 					throw new ArgumentException( $"Unknown clipbox planner scenario '{scenario}'.", nameof( scenario ) );
 			}
 
-			return new VoxelClipboxPlannerProofReport( true, string.Empty, cases, configurations, activeRegularCount, stableRegularSlots, 0 );
+			return new VoxelClipboxPlannerProofReport( true, string.Empty, cases, configurations, activeRegularCount, stableRegularSlots, 0, transitionCapacity, activeTransitionCount, changedTransitionSlots, scenario == "phase4_transition_ownership" );
 		}
 		catch ( Exception exception )
 		{
@@ -204,6 +218,74 @@ internal static class VoxelClipboxPlannerProof
 			}
 		}
 		cases++;
+	}
+
+	private static void ValidateTransitionOwnership( ref int cases, ref int transitionCapacity, ref int activeTransitionCount, ref int changedTransitionSlots )
+	{
+		foreach ( var blocksPerAxis in new[] { 4, 8 } )
+		foreach ( var levelCount in new[] { 2, 4 } )
+		{
+			var config = new VoxelClipboxConfig( blocksPerAxis, levelCount, 17, 23 );
+			var planner = new VoxelClipboxRuntimePlanner( config );
+			var observer = new Vector3Int( 7 * VoxelClipboxConfig.CellsPerBlock + 7, 11 * VoxelClipboxConfig.CellsPerBlock + 11, 19 * VoxelClipboxConfig.CellsPerBlock + 19 );
+			if ( !planner.Update( observer ) ) throw new InvalidOperationException( $"B{blocksPerAxis} L{levelCount} transition plan did not initialize." );
+			var expectedCapacity = checked( (levelCount - 1) * 6 * blocksPerAxis * blocksPerAxis );
+			if ( planner.StableTransitionSlotCount != expectedCapacity || planner.DesiredTransitions.Length != expectedCapacity ) throw new InvalidOperationException( $"B{blocksPerAxis} L{levelCount} reported the wrong transition capacity." );
+			if ( planner.ActiveTransitionCount <= 0 || planner.ActiveTransitionCount > expectedCapacity ) throw new InvalidOperationException( $"B{blocksPerAxis} L{levelCount} activated an invalid number of transition faces: {planner.ActiveTransitionCount}/{expectedCapacity}." );
+			ValidateTransitionAssignments( planner, config );
+			transitionCapacity = expectedCapacity;
+			activeTransitionCount = planner.ActiveTransitionCount;
+			changedTransitionSlots = System.Math.Max( changedTransitionSlots, planner.ChangedTransitionSlotCount );
+			ValidateChangedTransitionSlots( planner );
+			planner.Commit();
+			if ( planner.Update( observer ) || planner.ChangedTransitionSlotCount != 0 ) throw new InvalidOperationException( $"B{blocksPerAxis} L{levelCount} stationary movement produced transition work." );
+			planner.Commit();
+			cases++;
+		}
+	}
+
+	private static void ValidateTransitionAssignments( VoxelClipboxRuntimePlanner planner, VoxelClipboxConfig config )
+	{
+		var owners = new System.Collections.Generic.HashSet<(int Slot, VoxelClipboxFaceDirection Face)>();
+		foreach ( var transition in planner.DesiredTransitions )
+		{
+			if ( transition.StableSlotId != VoxelClipboxTransitionPlanner.GetStableSlotId( config, transition.FineLevel, transition.Face, transition.FaceU, transition.FaceV ) ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} is not stable." );
+			if ( transition.CoarseLevel != transition.FineLevel + 1 || transition.FineLevel >= config.LevelCount - 1 ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} has an invalid LOD pair." );
+			if ( !transition.Active ) continue;
+			if ( !owners.Add( (transition.FineRegularSlotId, transition.Face) ) ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} duplicated a fine-side owner." );
+			var fine = planner.DesiredSlots[transition.FineRegularSlotId];
+			var coarse = planner.DesiredSlots[transition.CoarseRegularSlotId];
+			if ( !fine.Active || fine.Lod != transition.FineLevel || fine.Coordinate != transition.FineCoordinate ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} has an invalid fine owner." );
+			if ( !coarse.Active || coarse.Lod != transition.CoarseLevel || coarse.Coordinate != transition.CoarseCoordinate ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} has an invalid coarse dependency." );
+			if ( IsFineNeighborActive( planner.DesiredLevels[transition.FineLevel], transition.FineCoordinate, transition.Face ) ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} crosses an active same-LOD neighbor." );
+		}
+	}
+
+	private static bool IsFineNeighborActive( VoxelClipboxLevelState level, Vector3Int coordinate, VoxelClipboxFaceDirection face )
+	{
+		var delta = face switch
+		{
+			VoxelClipboxFaceDirection.NegativeX => new Vector3Int( -1, 0, 0 ),
+			VoxelClipboxFaceDirection.PositiveX => new Vector3Int( 1, 0, 0 ),
+			VoxelClipboxFaceDirection.NegativeY => new Vector3Int( 0, -1, 0 ),
+			VoxelClipboxFaceDirection.PositiveY => new Vector3Int( 0, 1, 0 ),
+			VoxelClipboxFaceDirection.NegativeZ => new Vector3Int( 0, 0, -1 ),
+			VoxelClipboxFaceDirection.PositiveZ => new Vector3Int( 0, 0, 1 ),
+			_ => throw new ArgumentOutOfRangeException( nameof( face ) )
+		};
+		return level.IsActive( coordinate + delta );
+	}
+
+	private static void ValidateChangedTransitionSlots( VoxelClipboxRuntimePlanner planner )
+	{
+		for ( var index = 0; index < planner.ChangedTransitionSlotCount; index++ )
+		{
+			var slotId = planner.GetChangedTransitionSlotId( index );
+			var current = planner.CurrentTransitions[slotId];
+			var desired = planner.DesiredTransitions[slotId];
+			if ( !current.Active && !desired.Active ) throw new InvalidOperationException( $"Inactive transition slot {slotId} was reported as changed." );
+			if ( current == desired ) throw new InvalidOperationException( $"Unchanged transition slot {slotId} was reported as changed." );
+		}
 	}
 
 	private static long ValidateNoAllocationAfterWarmup( ref int cases )

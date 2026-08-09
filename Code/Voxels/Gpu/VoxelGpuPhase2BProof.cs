@@ -51,6 +51,8 @@ internal static class VoxelGpuPhase2BProof
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxActiveSlotCount != expectedActiveBlocks ) failure = $"reported {diagnostics.ClipboxActiveSlotCount} active clipbox slots, expected {expectedActiveBlocks}";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxDroppedWork != 0 ) failure = $"dropped {diagnostics.ClipboxDroppedWork} clipbox slot requests";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxMaximumPendingRevisionCount > 1 ) failure = $"observed {diagnostics.ClipboxMaximumPendingRevisionCount} pending clipbox revisions";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxTransitionDependencyMismatches != 0 ) failure = $"observed {diagnostics.ClipboxTransitionDependencyMismatches} unresolved transition generation dependencies";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.ClipboxTransitionPendingSlots != 0 ) failure = $"observed {diagnostics.ClipboxTransitionPendingSlots} uncommitted transition metadata slots";
 		if ( string.IsNullOrEmpty( failure ) && diagnostics.DepthPrepassCommandLists != diagnostics.OpaqueCommandLists ) failure = $"depth command lists {diagnostics.DepthPrepassCommandLists} differ from opaque command lists {diagnostics.OpaqueCommandLists}";
 		return new VoxelGpuPhase2BProofResult( string.IsNullOrEmpty( failure ), test, failure ?? string.Empty );
 	}

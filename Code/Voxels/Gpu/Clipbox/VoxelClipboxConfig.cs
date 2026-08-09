@@ -10,6 +10,7 @@ internal readonly record struct VoxelClipboxConfig
 	public ushort RuleVersion { get; }
 	public uint EditRevision { get; }
 	public int StableRegularSlotCount => checked( LevelCount * BlocksPerAxis * BlocksPerAxis * BlocksPerAxis );
+	public int StableTransitionSlotCount => checked( (LevelCount - 1) * 6 * BlocksPerAxis * BlocksPerAxis );
 	public int ExpectedActiveRegularCount => checked( BlocksPerAxis * BlocksPerAxis * BlocksPerAxis +
 		(LevelCount - 1) * (BlocksPerAxis * BlocksPerAxis * BlocksPerAxis - (BlocksPerAxis / 2) * (BlocksPerAxis / 2) * (BlocksPerAxis / 2)) );
 
