@@ -224,7 +224,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	public int WarmupFrames { get; set; } = 30;
 
 	[Property, Group( "Run" ), Range( 10.0f, 180.0f )]
-	public float ScenarioTimeoutSeconds { get; set; } = 90.0f;
+	public float ScenarioTimeoutSeconds { get; set; } = 180.0f;
 
 	[Property, Group( "Run" ), Range( 5.0f, 100.0f )]
 	public float MajorOutlierThresholdPercent { get; set; } = 20.0f;
