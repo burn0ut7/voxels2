@@ -132,6 +132,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private VoxelGpuPhase2BProofResult _pendingGpuPhase2BProof;
 	private VoxelGpuPhase3BProofResult _pendingGpuPhase3BProof;
 	private VoxelClipboxPlannerProofReport _pendingClipboxPlannerProof;
+	private VoxelClipboxReferenceEquivalenceRunner _referenceEquivalenceRunner;
 	private int _phase4PlannerScenarioIndex;
 	private VoxelTransvoxelTransitionProofResult _pendingTransitionProof;
 	private VoxelGpuTransitionCaseProofResult _pendingTransitionGpuProof;
@@ -380,10 +381,25 @@ public sealed class VoxelTerrainBenchmark : Component
 			case BenchmarkPhase.StartPhase4Planner:
 				if ( _manager.IsPlayerSafetyActive ) break;
 				BeginScenario( Phase4PlannerScenarioNames[_phase4PlannerScenarioIndex], "Phase 4 mathematical clipbox planner correctness and bounded movement proof" );
-				_pendingClipboxPlannerProof = VoxelClipboxDiagnostics.RunPlannerScenario( Phase4PlannerScenarioNames[_phase4PlannerScenarioIndex] );
+				if ( Phase4PlannerScenarioNames[_phase4PlannerScenarioIndex] == "phase4_planner_reference_equivalence" )
+				{
+					_referenceEquivalenceRunner = VoxelClipboxDiagnostics.StartReferenceEquivalence();
+					_pendingClipboxPlannerProof = default;
+				}
+				else
+				{
+					_pendingClipboxPlannerProof = VoxelClipboxDiagnostics.RunPlannerScenario( Phase4PlannerScenarioNames[_phase4PlannerScenarioIndex] );
+				}
 				_phase = BenchmarkPhase.WaitPhase4Planner;
 				break;
 			case BenchmarkPhase.WaitPhase4Planner:
+				if ( _referenceEquivalenceRunner is not null )
+				{
+					_referenceEquivalenceRunner.Step( 4.0 );
+					if ( !_referenceEquivalenceRunner.IsComplete ) break;
+					_pendingClipboxPlannerProof = _referenceEquivalenceRunner.Report;
+					_referenceEquivalenceRunner = null;
+				}
 				CompleteScenario( clipboxPlannerProof: _pendingClipboxPlannerProof );
 				if ( !_pendingClipboxPlannerProof.Passed )
 				{

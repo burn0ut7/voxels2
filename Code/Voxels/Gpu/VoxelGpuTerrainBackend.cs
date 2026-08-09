@@ -619,9 +619,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			if ( reclaimed > 0 ) { WakeBlockedRequests(); WakeBlockedTransitionRequests(); }
 			UpdateQueueDiagnostics();
 			PublishCompletedEmits();
-			TryCommitClipboxRevision();
 			for ( var index = 0; index < _scratchRing.Length; index++ ) ProcessCountReadback( index );
 			ProcessTransitionCountReadback();
+			RefreshClipboxTransitionDependencies();
+			TryCommitClipboxRevision();
 			SubmitCountBatches();
 			SubmitTransitionCountBatch();
 			LogProgress();
@@ -635,6 +636,16 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_diagnostics.Failure = exception.Message;
 			Log.Error( $"Voxel GPU terrain backend failed: {exception}" );
 		}
+	}
+
+	private void RefreshClipboxTransitionDependencies()
+	{
+		if ( !_clipboxRevisionPending || _clipboxPlanner is null || _clipboxTransitions.DependenciesValid ) return;
+		if ( !_clipboxTransitions.Update( _clipboxPlanner.DesiredTransitions, _residents, _scheduler ) ) return;
+
+		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
+		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
+		UpdateDesiredTransitions( true );
 	}
 
 	private void LogProgress()

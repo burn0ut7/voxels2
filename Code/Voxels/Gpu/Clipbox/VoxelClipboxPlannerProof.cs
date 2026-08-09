@@ -437,4 +437,107 @@ public static class VoxelClipboxDiagnostics
 {
 	public static VoxelClipboxPlannerProofReport RunPlannerProof() => VoxelClipboxPlannerProof.Run();
 	public static VoxelClipboxPlannerProofReport RunPlannerScenario( string scenario ) => VoxelClipboxPlannerProof.RunScenario( scenario );
+	internal static VoxelClipboxReferenceEquivalenceRunner StartReferenceEquivalence() => new();
+}
+
+internal sealed class VoxelClipboxReferenceEquivalenceRunner
+{
+	private const int TotalPositions = 10_000;
+	private readonly VoxelClipboxConfig _config = VoxelClipboxConfig.DevelopmentDefault;
+	private readonly VoxelClipboxRuntimePlanner _planner;
+	private uint _state = 0x13579BDFu;
+	private int _positionIndex;
+	private VoxelClipboxPlannerProofReport _report;
+
+	public bool IsComplete { get; private set; }
+	public VoxelClipboxPlannerProofReport Report => _report;
+
+	public VoxelClipboxReferenceEquivalenceRunner()
+	{
+		_planner = new VoxelClipboxRuntimePlanner( _config );
+	}
+
+	public void Step( double budgetMilliseconds )
+	{
+		if ( IsComplete ) return;
+		var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		try
+		{
+			do
+			{
+				var position = new Vector3Int( NextCoordinate(), NextCoordinate(), NextCoordinate() );
+				var reference = VoxelClipboxReferencePlanner.Plan( position, _config );
+				_planner.Update( position );
+				ValidatePlanArrays( reference, _planner.DesiredLevels, _planner.DesiredSlots, _config );
+				ValidateChangedSlots( _planner );
+				_planner.Commit();
+				_positionIndex++;
+			}
+			while ( _positionIndex < TotalPositions && System.Diagnostics.Stopwatch.GetElapsedTime( started ).TotalMilliseconds < budgetMilliseconds );
+
+			if ( _positionIndex >= TotalPositions )
+			{
+				_report = new VoxelClipboxPlannerProofReport( true, string.Empty, 1, 0, 0, 0, 0 );
+				IsComplete = true;
+			}
+		}
+		catch ( Exception exception )
+		{
+			_report = new VoxelClipboxPlannerProofReport( false, exception.Message, 0, 0, 0, 0, -1 );
+			IsComplete = true;
+		}
+	}
+
+	private int NextCoordinate()
+	{
+		_state = unchecked( _state * 1664525u + 1013904223u );
+		return (int)(_state % 20001u) - 10000;
+	}
+
+	private static void ValidateChangedSlots( VoxelClipboxRuntimePlanner planner )
+	{
+		for ( var index = 0; index < planner.ChangedSlotCount; index++ )
+		{
+			var slotId = planner.GetChangedSlotId( index );
+			var current = planner.CurrentSlots[slotId];
+			var desired = planner.DesiredSlots[slotId];
+			if ( !current.Active && !desired.Active ) throw new InvalidOperationException( $"Inactive slot {slotId} was reported as changed." );
+			if ( current == desired ) throw new InvalidOperationException( $"Unchanged slot {slotId} was reported as changed." );
+		}
+	}
+
+	private static void ValidatePlanArrays( VoxelClipboxPlan plan, VoxelClipboxLevelState[] levels, VoxelClipboxRegularSlotAssignment[] slots, VoxelClipboxConfig config )
+	{
+		var activeCount = 0;
+		for ( var level = 0; level < config.LevelCount; level++ )
+		{
+			var state = levels[level];
+			if ( state.Level != level || state.StableSlotBase != level * config.BlocksPerAxis * config.BlocksPerAxis * config.BlocksPerAxis ) throw new InvalidOperationException( $"Level {level} has an invalid stable slot range." );
+			if ( state.Outer.SizeX != config.BlocksPerAxis || state.Outer.SizeY != config.BlocksPerAxis || state.Outer.SizeZ != config.BlocksPerAxis ) throw new InvalidOperationException( $"Level {level} outer bounds are not {config.BlocksPerAxis} blocks wide." );
+			if ( level > 0 )
+			{
+				var parent = levels[level - 1];
+				var expectedInner = new VoxelClipboxBounds( parent.Origin / 2, (parent.Origin + config.BlocksPerAxis) / 2 );
+				if ( state.Inner != expectedInner ) throw new InvalidOperationException( $"Level {level} is not aligned with its parent." );
+			}
+
+			var levelActiveCount = 0;
+			for ( var slot = state.StableSlotBase; slot < state.StableSlotBase + state.StableSlotCount; slot++ )
+			{
+				var assignment = slots[slot];
+				if ( assignment.StableSlotId != slot || assignment.Lod != level ) throw new InvalidOperationException( $"Slot {slot} has an invalid identity." );
+				var expectedSlot = VoxelClipboxCoordinates.GetSlotIndex( level, assignment.Coordinate, config.BlocksPerAxis );
+				if ( expectedSlot != slot ) throw new InvalidOperationException( $"Slot {slot} does not match its toroidal coordinate." );
+				if ( assignment.Active != state.IsActive( assignment.Coordinate ) ) throw new InvalidOperationException( $"Slot {slot} has an incorrect active mask." );
+				var expectedMask = VoxelClipboxTransitionPlanner.GetCoarseFaceMask( config, levels, assignment.Coordinate, level );
+				if ( assignment.Key != new VoxelVisualBlockKey( assignment.Coordinate, level, config.RuleVersion, config.EditRevision, TransitionFaceMask: expectedMask ) ) throw new InvalidOperationException( $"Slot {slot} has an incorrect GPU identity or transition mask." );
+				if ( assignment.Active ) levelActiveCount++;
+			}
+
+			if ( state.ActiveCount != levelActiveCount ) throw new InvalidOperationException( $"Level {level} reports {state.ActiveCount}, counted {levelActiveCount}." );
+			activeCount += levelActiveCount;
+		}
+
+		if ( activeCount != plan.ActiveRegularCount ) throw new InvalidOperationException( "Plan active count does not match its slots." );
+	}
 }
