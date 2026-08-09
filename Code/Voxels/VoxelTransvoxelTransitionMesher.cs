@@ -8,7 +8,15 @@ internal readonly record struct VoxelTransvoxelTransitionProofResult(
 	int BoundaryEdges,
 	int GradientNormals,
 	float PositionTolerance,
-	bool TablesValidated );
+	bool TablesValidated,
+	bool GpuCaseProofAvailable = false,
+	bool GpuCaseProofPassed = false,
+	string GpuCaseProofFailure = "",
+	int GpuCaseVariants = 0,
+	long GpuCaseBufferBytes = 0,
+	double GpuCaseSubmissionMilliseconds = 0.0,
+	double GpuCaseCompletionMilliseconds = 0.0,
+	double GpuCaseReadbackMilliseconds = 0.0 );
 
 internal static class VoxelTransvoxelTransitionMesher
 {
@@ -123,8 +131,8 @@ internal static class VoxelTransvoxelTransitionMesher
 
 		for ( var caseCode = 0; caseCode < 512; caseCode++ )
 		{
-			var samples = BuildSyntheticCase( caseCode );
-			var gradients = BuildSyntheticGradients();
+			var samples = BuildSyntheticCaseForProof( caseCode );
+			var gradients = BuildSyntheticGradientsForProof();
 			for ( var face = 0; face < 6; face++ )
 			{
 				var mesh = BuildCell( samples, gradients, (VoxelClipboxFaceDirection)face, 1.0f );
@@ -162,7 +170,7 @@ internal static class VoxelTransvoxelTransitionMesher
 		return new VoxelTransvoxelTransitionProofResult( true, string.Empty, cases, orientations, fixtureCases, triangles, boundaryEdges, gradientNormals, positionTolerance, true );
 	}
 
-	private static float[] BuildSyntheticCase( int caseCode )
+	internal static float[] BuildSyntheticCaseForProof( int caseCode )
 	{
 		var samples = new float[13];
 		for ( var index = 0; index < 9; index++ )
@@ -175,7 +183,7 @@ internal static class VoxelTransvoxelTransitionMesher
 		return samples;
 	}
 
-	private static Vector3[] BuildSyntheticGradients()
+	internal static Vector3[] BuildSyntheticGradientsForProof()
 	{
 		var gradients = new Vector3[13];
 		for ( var index = 0; index < gradients.Length; index++ ) gradients[index] = new Vector3( 0.6f, 0.8f, 0.25f ).Normal;
@@ -322,4 +330,216 @@ internal enum VoxelTransitionFixture
 	Sphere,
 	CaveMouth,
 	Tangent
+}
+
+internal readonly record struct VoxelGpuTransitionCaseProofResult(
+	bool Passed,
+	string Failure,
+	int Variants,
+	int MismatchedCases,
+	int VertexCount,
+	int TriangleCount,
+	long GpuBufferBytes,
+	double SubmissionMilliseconds,
+	double CompletionMilliseconds,
+	double ReadbackMilliseconds );
+
+internal sealed class VoxelGpuTransitionCaseProof : SceneCustomObject, System.IDisposable
+{
+	private const int CaseCount = 512;
+	private const int FaceCount = 6;
+	private const int VariantCount = CaseCount * FaceCount * 2;
+	private const int SamplesPerCase = 13;
+	private const int VerticesPerCase = 12;
+	private const int IndicesPerCase = 36;
+	private const int GeometryOffset = CaseCount;
+	private const int TriangleOffset = GeometryOffset + 56;
+	private const int VertexOffset = TriangleOffset + 56 * IndicesPerCase;
+	private const float PositionTolerance = 0.001f;
+
+	private readonly ComputeShader _shader;
+	private readonly GpuBuffer<float> _samples;
+	private readonly GpuBuffer<uint> _lookup;
+	private readonly GpuBuffer<Vector4> _outputVertices;
+	private readonly GpuBuffer<uint> _outputIndices;
+	private readonly GpuBuffer<uint> _statistics;
+	private readonly Vector3[] _expectedVertices;
+	private readonly uint[] _expectedIndices;
+	private readonly Vector4[] _gpuVertices;
+	private readonly uint[] _gpuIndices;
+	private readonly uint[] _gpuStatistics = new uint[3];
+	private readonly object _resultLock = new();
+	private ProofState _state;
+	private long _dispatchTimestamp;
+	private double _submissionMilliseconds;
+	private VoxelGpuTransitionCaseProofResult _result;
+	private bool _hasResult;
+	private bool _disposed;
+
+	public bool IsRunning => !_disposed && _state is not ProofState.Idle and not ProofState.Complete and not ProofState.Failed;
+
+	public VoxelGpuTransitionCaseProof( SceneWorld sceneWorld ) : base( sceneWorld )
+	{
+		var sampleData = new float[CaseCount * SamplesPerCase];
+		_expectedVertices = new Vector3[VariantCount * VerticesPerCase];
+		_expectedIndices = new uint[VariantCount * IndicesPerCase];
+		_gpuVertices = new Vector4[_expectedVertices.Length];
+		_gpuIndices = new uint[_expectedIndices.Length];
+		var lookup = CreateLookup();
+		for ( var caseCode = 0; caseCode < CaseCount; caseCode++ )
+		{
+			var samples = VoxelTransvoxelTransitionMesher.BuildSyntheticCaseForProof( caseCode );
+			System.Array.Copy( samples, 0, sampleData, caseCode * SamplesPerCase, SamplesPerCase );
+			var gradients = VoxelTransvoxelTransitionMesher.BuildSyntheticGradientsForProof();
+			for ( var reverse = 0; reverse < 2; reverse++ )
+			for ( var face = 0; face < FaceCount; face++ )
+			{
+				var variant = (reverse * FaceCount + face) * CaseCount + caseCode;
+				var mesh = VoxelTransvoxelTransitionMesher.BuildCell( samples, gradients, (VoxelClipboxFaceDirection)face, 1.0f, reverse != 0 );
+				for ( var vertex = 0; vertex < mesh.Vertices.Count; vertex++ ) _expectedVertices[variant * VerticesPerCase + vertex] = mesh.Vertices[vertex].Position;
+				for ( var index = 0; index < mesh.Indices.Count; index++ ) _expectedIndices[variant * IndicesPerCase + index] = (uint)mesh.Indices[index];
+			}
+		}
+
+		_samples = new GpuBuffer<float>( sampleData.Length, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Proof Samples" );
+		_lookup = new GpuBuffer<uint>( lookup.Length, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Proof Lookup" );
+		_outputVertices = new GpuBuffer<Vector4>( _gpuVertices.Length, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Proof Vertices" );
+		_outputIndices = new GpuBuffer<uint>( _gpuIndices.Length, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Proof Indices" );
+		_statistics = new GpuBuffer<uint>( _gpuStatistics.Length, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Proof Statistics" );
+		_samples.SetData( sampleData );
+		_lookup.SetData( lookup );
+		_shader = new ComputeShader( "shaders/voxel_gpu_transition_case_proof_cs.shader" );
+		_shader.Attributes.Set( "Samples", _samples );
+		_shader.Attributes.Set( "Lookup", _lookup );
+		_shader.Attributes.Set( "OutputVertices", _outputVertices );
+		_shader.Attributes.Set( "OutputIndices", _outputIndices );
+		_shader.Attributes.Set( "Statistics", _statistics );
+		_shader.Attributes.Set( "VariantCount", VariantCount );
+		_shader.Attributes.Set( "GeometryOffset", GeometryOffset );
+		_shader.Attributes.Set( "TriangleOffset", TriangleOffset );
+		_shader.Attributes.Set( "VertexOffset", VertexOffset );
+		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
+	}
+
+	public void Run()
+	{
+		if ( _disposed || _state != ProofState.Idle ) return;
+		_hasResult = false;
+		_state = ProofState.DispatchPending;
+	}
+
+	public bool TryTakeResult( out VoxelGpuTransitionCaseProofResult result )
+	{
+		lock ( _resultLock )
+		{
+			if ( !_hasResult ) { result = default; return false; }
+			result = _result;
+			_hasResult = false;
+			return true;
+		}
+	}
+
+	public override void RenderSceneObject()
+	{
+		if ( _disposed ) return;
+		try
+		{
+			if ( _state == ProofState.ComputeExecutionPending ) { _state = ProofState.ReadbackPending; return; }
+			if ( _state == ProofState.ReadbackPending )
+			{
+				var readbackStart = System.Diagnostics.Stopwatch.GetTimestamp();
+				_statistics.GetData( _gpuStatistics );
+				_outputVertices.GetData( _gpuVertices );
+				_outputIndices.GetData( _gpuIndices );
+				CompleteValidation( System.Diagnostics.Stopwatch.GetElapsedTime( readbackStart ).TotalMilliseconds );
+				return;
+			}
+			if ( _state != ProofState.DispatchPending ) return;
+			var start = System.Diagnostics.Stopwatch.GetTimestamp();
+			_statistics.Clear();
+			Graphics.ResourceBarrierTransition( _outputVertices, Sandbox.Rendering.ResourceState.UnorderedAccess );
+			Graphics.ResourceBarrierTransition( _outputIndices, Sandbox.Rendering.ResourceState.UnorderedAccess );
+			Graphics.ResourceBarrierTransition( _statistics, Sandbox.Rendering.ResourceState.UnorderedAccess );
+			_shader.Dispatch( VariantCount, 1, 1 );
+			Graphics.UavBarrier( _outputVertices );
+			Graphics.UavBarrier( _outputIndices );
+			Graphics.UavBarrier( _statistics );
+			_dispatchTimestamp = start;
+			_submissionMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds;
+			_state = ProofState.ComputeExecutionPending;
+		}
+		catch ( System.Exception exception )
+		{
+			CompleteFailure( exception.Message );
+		}
+	}
+
+	private void CompleteValidation( double readbackMilliseconds )
+	{
+		var mismatches = (int)_gpuStatistics[0];
+		var vertexCount = 0;
+		var triangleCount = 0;
+		var failure = string.Empty;
+		for ( var variant = 0; variant < VariantCount && string.IsNullOrEmpty( failure ); variant++ )
+		{
+			var caseCode = variant % CaseCount;
+			var cellClass = VoxelTransvoxelTransitionTables.CellClass[caseCode];
+			var geometryCounts = VoxelTransvoxelTransitionTables.GeometryCounts[cellClass & 0x7F];
+			var expectedVertexCount = geometryCounts >> 4;
+			var expectedIndexCount = (geometryCounts & 0x0F) * 3;
+			vertexCount += expectedVertexCount;
+			triangleCount += expectedIndexCount / 3;
+			for ( var vertex = 0; vertex < expectedVertexCount; vertex++ )
+			{
+				var expected = _expectedVertices[variant * VerticesPerCase + vertex];
+				var actual = _gpuVertices[variant * VerticesPerCase + vertex];
+				if ( (new Vector3( actual.x, actual.y, actual.z ) - expected).Length > PositionTolerance ) { mismatches++; failure = $"GPU transition vertex mismatch at variant {variant}, vertex {vertex}."; break; }
+			}
+			for ( var index = 0; string.IsNullOrEmpty( failure ) && index < expectedIndexCount; index++ )
+			{
+				var expectedIndex = (uint)(variant * VerticesPerCase) + _expectedIndices[variant * IndicesPerCase + index];
+				if ( _gpuIndices[variant * IndicesPerCase + index] != expectedIndex ) { mismatches++; failure = $"GPU transition index mismatch at variant {variant}, index {index}: GPU={_gpuIndices[variant * IndicesPerCase + index]}, CPU={expectedIndex}."; }
+			}
+		}
+		if ( string.IsNullOrEmpty( failure ) && _gpuStatistics[0] != 0 ) failure = $"GPU transition case classification mismatches={_gpuStatistics[0]}";
+		if ( string.IsNullOrEmpty( failure ) && _gpuStatistics[1] != (uint)vertexCount ) failure = $"GPU transition vertex total mismatch: GPU={_gpuStatistics[1]}, CPU={vertexCount}.";
+		if ( string.IsNullOrEmpty( failure ) && _gpuStatistics[2] != (uint)triangleCount ) failure = $"GPU transition triangle total mismatch: GPU={_gpuStatistics[2]}, CPU={triangleCount}.";
+		var passed = string.IsNullOrEmpty( failure );
+		_result = new VoxelGpuTransitionCaseProofResult( passed, failure, VariantCount, mismatches, vertexCount, triangleCount, GetBufferBytes(), _submissionMilliseconds, System.Diagnostics.Stopwatch.GetElapsedTime( _dispatchTimestamp ).TotalMilliseconds, readbackMilliseconds );
+		_state = passed ? ProofState.Complete : ProofState.Failed;
+		_hasResult = true;
+	}
+
+	private void CompleteFailure( string failure )
+	{
+		lock ( _resultLock )
+		{
+			_result = new VoxelGpuTransitionCaseProofResult( false, failure, VariantCount, 0, 0, 0, GetBufferBytes(), _submissionMilliseconds, _dispatchTimestamp == 0 ? 0.0 : System.Diagnostics.Stopwatch.GetElapsedTime( _dispatchTimestamp ).TotalMilliseconds, 0.0 );
+			_state = ProofState.Failed;
+			_hasResult = true;
+		}
+	}
+
+	private long GetBufferBytes() => (long)_samples.ElementCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)_outputVertices.ElementCount * 16 + (long)_outputIndices.ElementCount * sizeof( uint ) + (long)_statistics.ElementCount * sizeof( uint );
+
+	private static uint[] CreateLookup()
+	{
+		var values = new uint[VertexOffset + CaseCount * VerticesPerCase];
+		var offset = 0;
+		foreach ( var value in VoxelTransvoxelTransitionTables.CellClass ) values[offset++] = value;
+		foreach ( var value in VoxelTransvoxelTransitionTables.GeometryCounts ) values[offset++] = value;
+		foreach ( var value in VoxelTransvoxelTransitionTables.TriangleIndices ) values[offset++] = value;
+		foreach ( var value in VoxelTransvoxelTransitionTables.VertexData ) values[offset++] = value;
+		return values;
+	}
+
+	public void Dispose()
+	{
+		if ( _disposed ) return;
+		_disposed = true;
+		_samples.Dispose(); _lookup.Dispose(); _outputVertices.Dispose(); _outputIndices.Dispose(); _statistics.Dispose();
+		Delete();
+	}
+
+	private enum ProofState { Idle, DispatchPending, ComputeExecutionPending, ReadbackPending, Complete, Failed }
 }

@@ -89,6 +89,7 @@ $requiredMetrics = @(
 	'gpu_transvoxel_batch_size', 'gpu_transvoxel_surface_blocks', 'gpu_transvoxel_dispatches',
 	'gpu_transvoxel_gpu_publication_passed', 'gpu_transvoxel_gpu_publication_ms', 'gpu_transvoxel_cpu_publication_ms',
 	'transition_reference_available', 'transition_reference_passed', 'transition_reference_failure', 'transition_reference_cases', 'transition_reference_orientations', 'transition_reference_fixture_cases', 'transition_reference_triangles', 'transition_reference_boundary_edges', 'transition_reference_gradient_normals', 'transition_reference_position_tolerance', 'transition_reference_tables_validated',
+	'transition_gpu_case_available', 'transition_gpu_case_passed', 'transition_gpu_case_failure', 'transition_gpu_case_variants', 'transition_gpu_case_buffer_bytes', 'transition_gpu_case_submission_ms', 'transition_gpu_case_completion_ms', 'transition_gpu_case_readback_ms',
 	'gpu_terrain_available', 'gpu_terrain_backend', 'gpu_terrain_requested_blocks', 'gpu_terrain_resident_blocks',
 	'gpu_terrain_render_shader', 'gpu_terrain_production_lighting', 'gpu_terrain_depth_prepass',
 	'gpu_terrain_depth_command_lists', 'gpu_terrain_opaque_command_lists',
@@ -271,6 +272,13 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.transition_reference_triangles -le 0 ) { Add-Failure "$context recorded no transition triangles" }
 		if ( [int]$scenario.transition_reference_boundary_edges -le 0 ) { Add-Failure "$context recorded no watertight boundary edges" }
 		if ( [int]$scenario.transition_reference_gradient_normals -le 0 ) { Add-Failure "$context recorded no gradient normals" }
+		if ( $scenario.scenario -eq 'phase4_transition_all_512_cases' )
+		{
+			if ( $scenario.transition_gpu_case_available -ne $true ) { Add-Failure "$context has no GPU transition case proof result" }
+			if ( $scenario.transition_gpu_case_passed -ne $true ) { Add-Failure "$context GPU transition case proof failed: $($scenario.transition_gpu_case_failure)" }
+			if ( [int]$scenario.transition_gpu_case_variants -ne 6144 ) { Add-Failure "$context did not validate all GPU transition case/orientation/winding variants" }
+			if ( [long]$scenario.transition_gpu_case_buffer_bytes -le 0 ) { Add-Failure "$context reported no GPU transition proof allocation" }
+		}
 	}
 	elseif ( $scenario.scenario -in @('phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range') )
 	{

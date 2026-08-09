@@ -54,10 +54,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<BatchTimingEvent> _batchTimingHistory = new( MaximumBatchTimingHistory );
 	private readonly Dictionary<Vector3Int, double> _initialSdfGenerationMilliseconds = new();
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
+	private VoxelGpuTransitionCaseProof _gpuTransitionCaseProof;
 	private VoxelGpuTerrainBackend _gpuTerrainBackend;
 	private bool _gpuEditUnavailableWarningLogged;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
+	private VoxelGpuTransitionCaseProofResult _lastGpuTransitionCaseProofResult;
+	private bool _hasGpuTransitionCaseProofResult;
 	private long _nextChunkTimingSequence;
 	private long _nextBatchTimingSequence;
 	private long _cpuBatchStartTimestamp;
@@ -228,6 +231,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public bool RequestGpuTransvoxelProof { get; set; }
 
 	[Property, Group( "Diagnostics" )]
+	public bool RequestGpuTransitionCaseProof { get; set; }
+
+	[Property, Group( "Diagnostics" )]
 	public bool RequestGpuTerrainDiagnosticsLog { get; set; }
 
 	[Property, Group( "Diagnostics" )]
@@ -263,6 +269,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal bool IsGpuTransvoxelProofRunning => _gpuTransvoxelProof?.IsRunning == true;
 	internal bool HasGpuTransvoxelProofResult => _hasGpuTransvoxelProofResult;
 	internal VoxelGpuTransvoxelProofResult LastGpuTransvoxelProofResult => _lastGpuTransvoxelProofResult;
+	internal bool HasGpuTransitionCaseProofResult => _hasGpuTransitionCaseProofResult;
+	internal VoxelGpuTransitionCaseProofResult LastGpuTransitionCaseProofResult => _lastGpuTransitionCaseProofResult;
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
 	public bool IsTerrainSettled => (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod || AreDesiredChunksLoaded()) && _chunkStreamingGenerationQueue.Count == 0 &&
@@ -367,10 +375,16 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
+		UpdateGpuTransitionCaseProof();
 		if ( RequestGpuTransvoxelProof )
 		{
 			RequestGpuTransvoxelProof = false;
 			RunGpuTransvoxelProof();
+		}
+		if ( RequestGpuTransitionCaseProof )
+		{
+			RequestGpuTransitionCaseProof = false;
+			RunGpuTransitionCaseProof();
 		}
 		if ( CaptureWorldConfiguration() != _generationConfiguration )
 		{
@@ -405,6 +419,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
 		DisposeGpuTransvoxelProof();
+		DisposeGpuTransitionCaseProof();
 		DisposeGpuTerrainBackend();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -415,6 +430,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	protected override void OnDestroy()
 	{
 		DisposeGpuTransvoxelProof();
+		DisposeGpuTransitionCaseProof();
 		DisposeGpuTerrainBackend();
 		DisposeCpuVisualWorld();
 		ClearChunkColliders();
@@ -826,6 +842,53 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public void ClearGpuTransvoxelProof()
 	{
 		DisposeGpuTransvoxelProof();
+	}
+
+	[Button]
+	public void RunGpuTransitionCaseProof()
+	{
+		DisposeGpuTransitionCaseProof();
+		_hasGpuTransitionCaseProofResult = false;
+		_lastGpuTransitionCaseProofResult = default;
+		if ( Application.IsDedicatedServer )
+		{
+			Log.Error( "Voxel GPU transition case proof requires a rendering client." );
+			return;
+		}
+		if ( Scene.SceneWorld is null )
+		{
+			Log.Error( "Voxel GPU transition case proof requires an active scene world." );
+			return;
+		}
+		try
+		{
+			_gpuTransitionCaseProof = new VoxelGpuTransitionCaseProof( Scene.SceneWorld );
+			_gpuTransitionCaseProof.Run();
+			Log.Info( "Voxel GPU transition case proof scheduled: variants=6144, cases=512, orientations=6, winding=2, diagnosticReadback=enabled." );
+		}
+		catch ( System.Exception exception )
+		{
+			DisposeGpuTransitionCaseProof();
+			_lastGpuTransitionCaseProofResult = new VoxelGpuTransitionCaseProofResult( false, exception.Message, 6144, 0, 0, 0, 0, 0.0, 0.0, 0.0 );
+			_hasGpuTransitionCaseProofResult = true;
+			Log.Error( $"Voxel GPU transition case proof failed to start: {exception.Message}" );
+		}
+	}
+
+	public void ClearGpuTransitionCaseProof() => DisposeGpuTransitionCaseProof();
+
+	private void UpdateGpuTransitionCaseProof()
+	{
+		if ( _gpuTransitionCaseProof is null || !_gpuTransitionCaseProof.TryTakeResult( out var result ) ) return;
+		_lastGpuTransitionCaseProofResult = result;
+		_hasGpuTransitionCaseProofResult = true;
+		Log.Info( $"Voxel GPU transition case proof: result={(result.Passed ? "PASS" : "FAIL")}, variants={result.Variants:N0}, mismatches={result.MismatchedCases:N0}, vertices={result.VertexCount:N0}, triangles={result.TriangleCount:N0}, gpuBuffers={FormatBytes( result.GpuBufferBytes )}, submission={result.SubmissionMilliseconds:F3}ms, completion={result.CompletionMilliseconds:F3}ms, diagnosticReadback={result.ReadbackMilliseconds:F3}ms, validation={result.Failure}." );
+	}
+
+	private void DisposeGpuTransitionCaseProof()
+	{
+		_gpuTransitionCaseProof?.Dispose();
+		_gpuTransitionCaseProof = null;
 	}
 
 	private void UpdateGpuTransvoxelProof()
