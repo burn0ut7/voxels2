@@ -44,7 +44,8 @@ CS
 		if ( id.x >= count ) return;
 		uint block = id.x / (uint)HaloSampleCount;
 		uint localIndex = id.x - block * (uint)HaloSampleCount;
-		float3 localSample = float3( Decode3D( localIndex, HaloSize ) ) - 1.0f;
+		uint sampleSpacing = 1u << (uint)max( BlockRequests[block].Lod, 0 );
+		float3 localSample = (float3( Decode3D( localIndex, HaloSize ) ) - 1.0f) * (float)sampleSpacing;
 		float3 sample = BlockRequests[block].SampleOrigin.xyz + localSample;
 		float density = sample.z;
 		if ( BlockRequests[block].RuleVersion != 0 ) density = TerrainRuleStressV1( sample );

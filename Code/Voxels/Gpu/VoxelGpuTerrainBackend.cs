@@ -32,8 +32,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	public bool IsSettled => DesiredCount == _residents.PublishedCount && _scheduler.PendingCount == 0 && PendingRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle );
 	private int DesiredCount { get { lock ( _desiredSync ) return _desiredKeys.Count; } }
+	public int DesiredKeyCount => DesiredCount;
 	private int PendingRequestCount { get { lock ( _desiredSync ) return _pendingRequests.Count; } }
 	private bool IsDesired( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _desiredKeys.Contains( key ); }
+	public bool DesiredKeysEqual( IEnumerable<VoxelVisualBlockKey> keys )
+	{
+		if ( keys is null ) return false;
+		lock ( _desiredSync ) return _desiredKeys.SetEquals( keys );
+	}
 	public bool IsAvailable => _capabilities.Available;
 	public bool IsTerrainRenderingEnabled => _renderer.IsTerrainRenderingEnabled;
 	public bool IsProcessingEnabled => _processingEnabled;
@@ -93,20 +99,27 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	public void UpdateDesiredSet( IEnumerable<Vector3Int> coordinates, int ruleVersion )
 	{
+		if ( coordinates is null ) throw new System.ArgumentNullException( nameof( coordinates ) );
+		UpdateDesiredKeys( coordinates.Select( coordinate => new VoxelVisualBlockKey( coordinate, 0, ruleVersion ) ) );
+	}
+
+	public void UpdateDesiredKeys( IEnumerable<VoxelVisualBlockKey> keys )
+	{
+		if ( keys is null ) throw new System.ArgumentNullException( nameof( keys ) );
 		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		_diagnostics.RuleVersion = ruleVersion;
 		var desiredCount = 0;
 		lock ( _desiredSync )
 		{
 			_desiredScratch.Clear();
-			foreach ( var coordinate in coordinates )
+			foreach ( var key in keys )
 			{
 				if ( _desiredScratch.Count >= _residents.Capacity )
 				{
 					_diagnostics.BackpressureEvents++;
 					break;
 				}
-				_desiredScratch.Add( new VoxelVisualBlockKey( coordinate, 0, ruleVersion ) );
+				_desiredScratch.Add( key );
+				_diagnostics.RuleVersion = key.RuleVersion;
 			}
 			desiredCount = _desiredScratch.Count;
 
@@ -211,7 +224,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					throw new System.InvalidOperationException( $"resident table exhausted while reserving {item.Key}" );
 				}
 				slots[index] = slot;
-				var sampleOrigin = new Vector3( item.Key.Coordinate.x * _chunkSize, item.Key.Coordinate.y * _chunkSize, (item.Key.Coordinate.z - 1) * _chunkSize );
+				var sampleSpacing = 1 << item.Key.Lod;
+				var sampleOrigin = new Vector3( item.Key.Coordinate.x * _chunkSize * sampleSpacing, item.Key.Coordinate.y * _chunkSize * sampleSpacing, (item.Key.Coordinate.z - 1) * _chunkSize * sampleSpacing );
 				requests[index] = new VoxelGpuBlockRequest
 				{
 					SampleOrigin = new Vector4( sampleOrigin, 0.0f ),
@@ -272,10 +286,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				continue;
 			}
 
+			var sampleSpacing = 1 << scheduled.Key.Lod;
 			var drawOrigin = new Vector3(
-				scheduled.Key.Coordinate.x * _chunkSize * _voxelSize,
-				scheduled.Key.Coordinate.y * _chunkSize * _voxelSize,
-				(scheduled.Key.Coordinate.z - 1) * _chunkSize * _voxelSize );
+				scheduled.Key.Coordinate.x * _chunkSize * _voxelSize * sampleSpacing,
+				scheduled.Key.Coordinate.y * _chunkSize * _voxelSize * sampleSpacing,
+				(scheduled.Key.Coordinate.z - 1) * _chunkSize * _voxelSize * sampleSpacing );
 			allocations[index] = new VoxelGpuAllocationDescriptor
 			{
 				VertexOffset = (uint)handle.Vertices.Offset,
@@ -286,9 +301,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				ResidentSlot = (uint)activeBatch.Slots[index],
 				RequestIndex = (uint)index,
 				Flags = 1,
-				DrawOrigin = new Vector4( drawOrigin, 0.0f )
+				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
+				Reserved = new Vector4( sampleSpacing, 0.0f, 0.0f, 0.0f )
 			};
-			var extent = _chunkSize * _voxelSize;
+			var extent = _chunkSize * _voxelSize * sampleSpacing;
 			var descriptor = new VoxelGpuResidentDescriptor
 			{
 				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
