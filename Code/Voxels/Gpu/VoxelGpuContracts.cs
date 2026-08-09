@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int Lod, int RuleVersion );
+internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int Lod, int RuleVersion, uint EditRevision = 0 );
 
 [StructLayout( LayoutKind.Sequential, Pack = 4, Size = 64 )]
 internal struct VoxelGpuBlockRequest
