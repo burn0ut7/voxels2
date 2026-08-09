@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 21;
+	private const int SuiteVersion = 22;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
@@ -43,7 +43,6 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_command_list_active_range",
 		"phase4_regular_b4_l2_stationary",
 		"phase4_regular_b4_l4_stationary",
-		"phase4_regular_b8_l4_stationary",
 		"phase4_regular_radius64_match",
 		"gpu_transvoxel_regular_proof",
 		"gpu_persistent_static_set",
@@ -67,7 +66,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		"varied_edits",
 		"bulk_edit",
 		"sustained_world_sweep_and_depth_dig_20hz",
-		"sustained_world_spiral_place_20hz"
+		"sustained_world_spiral_place_20hz",
+		"phase4_regular_b8_l4_stationary"
 	};
 	private static readonly ComparisonMetric[] ComparisonMetrics =
 	{
@@ -184,14 +184,14 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		"phase4_regular_b4_l2_stationary",
 		"phase4_regular_b4_l4_stationary",
-		"phase4_regular_b8_l4_stationary",
 		"phase4_regular_radius64_match"
 	};
-	private static readonly int[] Phase4RegularBlocksPerAxis = { 4, 4, 8, 8 };
-	private static readonly int[] Phase4RegularLevelCounts = { 2, 4, 4, 5 };
-	private static readonly int[] Phase4RegularExpectedActiveCounts = { 120, 232, 1856, 2304 };
-	private static readonly int[] Phase4RegularExpectedStableSlots = { 128, 256, 2048, 2560 };
-	private static readonly int[] Phase4RegularSoakSeconds = { 0, 0, 60, 0 };
+	private static readonly int[] Phase4RegularBlocksPerAxis = { 4, 4, 8 };
+	private static readonly int[] Phase4RegularLevelCounts = { 2, 4, 5 };
+	private static readonly int[] Phase4RegularExpectedActiveCounts = { 120, 232, 2304 };
+	private static readonly int[] Phase4RegularExpectedStableSlots = { 128, 256, 2560 };
+	private const int FinalStationarySoakSeconds = 60;
+	private const string FinalStationaryScenarioName = "phase4_regular_b8_l4_stationary";
 
 	[Property, Group( "Run" )]
 	public bool RunOnStart { get; set; } = true;
@@ -204,12 +204,12 @@ public sealed class VoxelTerrainBenchmark : Component
 		VoxelTerrainBenchmarkMode.GpuOnly => new[]
 		{
 			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
-			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_b8_l4_stationary", "phase4_regular_radius64_match",
+			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match",
 			"gpu_persistent_static_set", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
 			"gpu_player_clipbox_oscillation",
 			"gpu_allocator_churn", "gpu_replacement_failure", "gpu_pool_exhaustion", "gpu_return_origin_stability",
-			"gpu_async_readback_saturation", "gpu_resource_recreation", "gpu_dedicated_server_startup"
+			"gpu_async_readback_saturation", "gpu_resource_recreation", "gpu_dedicated_server_startup", "phase4_regular_b8_l4_stationary"
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
@@ -491,11 +491,6 @@ public sealed class VoxelTerrainBenchmark : Component
 			case BenchmarkPhase.WaitPhase4Regular:
 				if ( _manager.IsTerrainSettled )
 				{
-					if ( Phase4RegularSoakSeconds[_phase4RegularScenarioIndex] > 0 )
-					{
-						_phase4RegularSoakStartTimestamp = _phase4RegularSoakStartTimestamp == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : _phase4RegularSoakStartTimestamp;
-						if ( System.Diagnostics.Stopwatch.GetElapsedTime( _phase4RegularSoakStartTimestamp ).TotalSeconds < Phase4RegularSoakSeconds[_phase4RegularScenarioIndex] ) break;
-					}
 					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
 					var scenarioIndex = _phase4RegularScenarioIndex;
 					_pendingRegularClipboxProof = VoxelGpuPhase2BProof.ValidateRegularClipbox( Phase4RegularScenarioNames[scenarioIndex], diagnostics, Phase4RegularExpectedActiveCounts[scenarioIndex], $"regular_clipbox_b{Phase4RegularBlocksPerAxis[scenarioIndex]}_l{Phase4RegularLevelCounts[scenarioIndex]}", Phase4RegularExpectedStableSlots[scenarioIndex] );
@@ -679,7 +674,8 @@ public sealed class VoxelTerrainBenchmark : Component
 				if ( !_pendingGpuPhase2BProof.Passed ) { FailRun( $"Phase 2B dedicated-server startup failed: {_pendingGpuPhase2BProof.Failure}" ); break; }
 				if ( Mode == VoxelTerrainBenchmarkMode.GpuOnly )
 				{
-					FinalizeCompletedRun();
+					_phase = BenchmarkPhase.StartFinalStationarySoak;
+					StartWarmup();
 					break;
 				}
 				_manager.VisualBackend = VoxelVisualBackendMode.CpuChunks;
@@ -782,6 +778,29 @@ public sealed class VoxelTerrainBenchmark : Component
 				if ( _manager.IsTerrainSettled )
 				{
 					CompleteScenario();
+					_phase = BenchmarkPhase.StartFinalStationarySoak;
+					StartWarmup();
+				}
+				break;
+			case BenchmarkPhase.StartFinalStationarySoak:
+				BeginFinalStationarySoak();
+				break;
+			case BenchmarkPhase.WaitFinalStationarySoak:
+				if ( _manager.IsTerrainSettled )
+				{
+					_phase4RegularSoakStartTimestamp = _phase4RegularSoakStartTimestamp == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : _phase4RegularSoakStartTimestamp;
+					if ( System.Diagnostics.Stopwatch.GetElapsedTime( _phase4RegularSoakStartTimestamp ).TotalSeconds < FinalStationarySoakSeconds ) break;
+
+					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
+					_pendingRegularClipboxProof = VoxelGpuPhase2BProof.ValidateRegularClipbox( FinalStationaryScenarioName, diagnostics, 1856, "regular_clipbox_b8_l4", 2048 );
+					CompleteScenario( gpuTerrain: diagnostics, gpuPhase2BProof: _pendingRegularClipboxProof );
+					RestoreFinalStationarySoakSettings();
+					_holdBenchmarkPlayersAtOrigin = false;
+					if ( !_pendingRegularClipboxProof.Passed )
+					{
+						FailRun( $"Final stationary clipbox failed: {_pendingRegularClipboxProof.Failure}" );
+						break;
+					}
 					FinalizeCompletedRun();
 				}
 				break;
@@ -881,6 +900,31 @@ public sealed class VoxelTerrainBenchmark : Component
 		var hottest = result.CallCounts.Enumerate().OrderByDescending( entry => entry.Count ).First();
 		Log.Info( $"Voxel terrain benchmark scenario {result.Name}: result={(result.Passed ? "PASS" : "FAIL")}, elapsed={result.ElapsedMilliseconds:F2}ms, FPS(avg/1%-low/0.1%-low)={result.AverageFramesPerSecond:F1}/{result.OnePercentLowFramesPerSecond:F1}/{result.PointOnePercentLowFramesPerSecond:F1}, frameMs(p95/max)={result.FrameP95Milliseconds:F2}/{result.FrameMaximumMilliseconds:F2}, stutters={result.StutterEvents:N0}, editLatency(p95/settle)={result.EditCallP95Milliseconds:F3}/{result.PostEditSettleMilliseconds:F2}ms, GPU-p95={result.GpuP95Milliseconds:F2}ms, hottest={hottest.Name}:{hottest.Count:N0}, allocated={FormatBytes( result.AllocatedBytes )}." );
 		_sampler = null;
+	}
+
+	private void BeginFinalStationarySoak()
+	{
+		_holdBenchmarkPlayersAtOrigin = true;
+		HoldBenchmarkPlayersAtOrigin();
+		_manager.SetBenchmarkPlayerProtection( true );
+		_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
+		_manager.GpuClipboxBlocksPerAxis = 8;
+		_manager.GpuClipboxLevelCount = 4;
+		_manager.GpuClipboxMatchChunkRadius = false;
+		_manager.VisualBackend = VoxelVisualBackendMode.GpuPersistentFixedLod;
+		BeginScenario( FinalStationaryScenarioName, "Final 60-second stationary GPU clipbox soak at B8 L4" );
+		_manager.GenerateGpuTerrainWorld();
+		_phase4RegularSoakStartTimestamp = 0;
+		_phase = BenchmarkPhase.WaitFinalStationarySoak;
+	}
+
+	private void RestoreFinalStationarySoakSettings()
+	{
+		_manager.GpuTerrainLodPolicy = _originalGpuTerrainLodPolicy;
+		_manager.GpuClipboxBlocksPerAxis = _originalGpuClipboxBlocksPerAxis;
+		_manager.GpuClipboxLevelCount = _originalGpuClipboxLevelCount;
+		_manager.GpuClipboxMatchChunkRadius = _originalGpuClipboxMatchChunkRadius;
+		_manager.ChunkRadius = _originalChunkRadius;
 	}
 
 	private void CompleteScenarioAndWarmup( BenchmarkPhase next )
@@ -2080,6 +2124,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		WaitGpuResourceRecreation,
 		StartGpuDedicatedServerStartup,
 		WaitGpuDedicatedServerStartup,
+		StartFinalStationarySoak,
+		WaitFinalStationarySoak,
 		StartLiveConfiguration,
 		WaitLiveConfiguration,
 		StartInfinityTraversal,
