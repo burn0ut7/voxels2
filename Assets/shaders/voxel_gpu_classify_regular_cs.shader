@@ -12,7 +12,7 @@ CS
 	int ChunkSize < Attribute( "ChunkSize" ); >; int SampleSize < Attribute( "SampleSize" ); >; int HaloSize < Attribute( "HaloSize" ); >; int CellCount < Attribute( "CellCount" ); >; int EdgeSlotCount < Attribute( "EdgeSlotCount" ); >; int BatchSize < Attribute( "BatchSize" ); >; int PublicationPass < Attribute( "PublicationPass" ); >;
 	int RegularGeometryCountsOffset < Attribute( "RegularGeometryCountsOffset" ); >; int RegularVertexDataOffset < Attribute( "RegularVertexDataOffset" ); >;
 	static const uint3 Corners[8]={uint3(0,0,0),uint3(1,0,0),uint3(0,1,0),uint3(1,1,0),uint3(0,0,1),uint3(1,0,1),uint3(0,1,1),uint3(1,1,1)};
-	uint3 Decode3D(uint index,uint size){uint p=size*size,z=index/p,r=index-z*p,y=r/size;return uint3(r-y*size,y,z);} uint HaloIndex(int3 p){int3 h=p+1;return h.x+HaloSize*(h.y+HaloSize*h.z);} float Distance(uint block,int3 p){float v=DensitySamples[block*HaloSize*HaloSize*HaloSize+HaloIndex(p)];return abs(v)<.000001f?.000001f:v;} uint SampleIndex(uint3 p){return p.x+SampleSize*(p.y+SampleSize*p.z);}
+	uint3 Decode3D(uint index,uint size){uint p=size*size,z=index/p,r=index-z*p,y=r/size;return uint3(r-y*size,y,z);} uint HaloIndex(int3 p){int3 h=p+1;return h.x+HaloSize*(h.y+HaloSize*h.z);} float Distance(uint block,int3 p){float v=DensitySamples[block*HaloSize*HaloSize*HaloSize+HaloIndex(p)];return abs(v)<.000001f?(v<0?-.000001f:.000001f):v;} uint SampleIndex(uint3 p){return p.x+SampleSize*(p.y+SampleSize*p.z);}
 	uint EdgeSlot(uint3 cell,uint data){uint code=data&0xff,a=(code>>4)&0xf,b=code&0xf;uint3 first=cell+Corners[a],second=cell+Corners[b],d=uint3(abs(int3(first)-int3(second)));uint axis=d.x!=0?0:d.y!=0?1:2;return SampleIndex(min(first,second))*3+axis;}
 	[numthreads(64,1,1)] void MainCs(uint3 id:SV_DispatchThreadID)
 	{

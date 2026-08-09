@@ -18,7 +18,7 @@ CS
 	int EdgeSlotCount < Attribute( "EdgeSlotCount" ); >; int EdgeGroupCount < Attribute( "EdgeGroupCount" ); >; int BatchSize < Attribute( "BatchSize" ); >;
 	float VoxelSize < Attribute( "VoxelSize" ); >;
 	uint3 Decode3D(uint i,uint s){uint p=s*s,z=i/p,r=i-z*p,y=r/s;return uint3(r-y*s,y,z);} uint HaloIndex(int3 p){int3 h=p+1;return h.x+HaloSize*(h.y+HaloSize*h.z);}
-	float Raw(uint block,int3 p){return DensitySamples[block*(uint)HaloSampleCount+HaloIndex(p)];} float Distance(uint block,int3 p){float v=Raw(block,p);return abs(v)<.000001f?.000001f:v;}
+	float Raw(uint block,int3 p){return DensitySamples[block*(uint)HaloSampleCount+HaloIndex(p)];} float Distance(uint block,int3 p){float v=Raw(block,p);return abs(v)<.000001f?(v<0?-.000001f:.000001f):v;}
 	float3 Gradient(uint block,int3 p){return float3(Raw(block,p+int3(1,0,0))-Raw(block,p-int3(1,0,0)),Raw(block,p+int3(0,1,0))-Raw(block,p-int3(0,1,0)),Raw(block,p+int3(0,0,1))-Raw(block,p-int3(0,0,1)));}
 	float3 Safe(float3 v,float3 f){float d=dot(v,v);return d>1e-12f?v*rsqrt(d):f;}
 	[numthreads(64,1,1)] void MainCs(uint3 id:SV_DispatchThreadID)
