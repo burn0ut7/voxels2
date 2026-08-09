@@ -27,6 +27,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly HashSet<VoxelVisualBlockKey> _blockedRequests = new();
 	private readonly Dictionary<VoxelVisualBlockKey, BlockedRequest> _blockedDetails = new();
 	private readonly List<VoxelVisualBlockKey> _wakeScratch = new();
+	private readonly VoxelGpuResidentTable.ResidentEntry[] _publishedScratch;
+	private readonly List<EvictionCandidate> _evictionCandidates;
 	private readonly object _desiredSync = new();
 	private ulong _epoch;
 	private long _nextProgressLogTimestamp;
@@ -35,6 +37,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private int _slowRenderLogCount;
 	private int _slowDesiredSetLogCount;
 	private bool _processingEnabled = true;
+	private int _retireUndesiredRequested;
+	private int _worstPublishedRank = -1;
 
 	public bool IsSettled => IsStreamingWorkIdle && (DesiredCount == _residents.PublishedCount || BlockedRequestCount >= System.Math.Max( 0, DesiredCount - _residents.PublishedCount ));
 	public bool IsCapacityLimited => BlockedRequestCount > 0;
@@ -91,6 +95,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		}
 		_pool = new VoxelGpuMeshPool( vertexCapacity, indexCapacity );
 		_residents = new VoxelGpuResidentTable( residentCapacity );
+		_publishedScratch = new VoxelGpuResidentTable.ResidentEntry[residentCapacity];
+		_evictionCandidates = new List<EvictionCandidate>( residentCapacity );
 		_diagnostics.ResidentCapacity = residentCapacity;
 		_diagnostics.PendingRequestCapacity = _scheduler.MaximumPendingRequests;
 		_renderer = new VoxelGpuTerrainRenderer( world, camera, _pool, _residents, _diagnostics, System.Math.Max( 0, cullingPaddingChunks ) * chunkSize * voxelSize );
@@ -137,6 +143,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				_residents.CancelUnpublishedReservation( key );
 				_desiredKeys.Remove( key );
 			}
+			if ( _leavingScratch.Count > 0 ) System.Threading.Interlocked.Exchange( ref _retireUndesiredRequested, 1 );
 			_desiredOrder.Clear();
 			_desiredOrder.AddRange( _desiredOrderScratch );
 			_desiredRanks.Clear();
@@ -157,6 +164,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			UpdatePendingCountBatches();
 			_settledLogged = false;
 		}
+		RecomputeWorstPublishedRank();
 		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
 		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowDesiredSetLogCount ) <= 32 )
 			Log.Info( $"Voxel GPU desired-set hitch trace: {updateMilliseconds:F2}ms, desired={desiredCount:N0}, pending={PendingRequestCount:N0}, scheduler={_scheduler.PendingCount:N0}." );
@@ -175,7 +183,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		try
 		{
 			_epoch++;
-			RetireUndesiredResidents();
+			if ( System.Threading.Interlocked.Exchange( ref _retireUndesiredRequested, 0 ) != 0 ) RetireUndesiredResidents();
 			var reclaimed = _pool.Reclaim( _epoch );
 			if ( reclaimed > 0 ) WakeBlockedRequests();
 			UpdateQueueDiagnostics();
@@ -387,9 +395,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				}
 				if ( !replaced.IsEmpty ) _pool.Retire( replaced, _epoch + VoxelGpuCapabilities.RetirementEpochs );
 				RemovePendingRequest( resident.Key );
+				UpdateWorstPublishedRank( resident.Key );
 				_diagnostics.RecordRequestToVisible( System.Diagnostics.Stopwatch.GetElapsedTime( resident.RequestedTimestamp ).TotalMilliseconds );
 			}
-			RetireUndesiredResidents();
 			_diagnostics.RecordBatchCompletion( System.Diagnostics.Stopwatch.GetElapsedTime( publication.RequestedTimestamp ).TotalMilliseconds );
 			_diagnostics.PendingEmitBatches--;
 			_renderer.MarkDirty();
@@ -410,14 +418,20 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private void RetireUndesiredResidents()
 	{
 		var retired = 0;
-		foreach ( var (_, entry) in _residents.PublishedEntries() )
+		var publishedCount = _residents.CopyPublishedEntries( _publishedScratch );
+		for ( var index = 0; index < publishedCount; index++ )
 		{
+			var entry = _publishedScratch[index];
 			if ( IsDesired( entry.Key ) ) continue;
 			if ( !_residents.TryRemove( entry.Key, out var allocation ) ) continue;
 			if ( !allocation.IsEmpty ) _pool.Retire( allocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
 			retired++;
 		}
-		if ( retired > 0 ) _renderer.MarkDirty();
+		if ( retired > 0 )
+		{
+			RecomputeWorstPublishedRank();
+			_renderer.MarkDirty();
+		}
 	}
 
 	private void RemovePendingRequest( VoxelVisualBlockKey key ) { lock ( _desiredSync ) _pendingRequests.Remove( key ); }
@@ -465,16 +479,27 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private void EvictForCapacity( VoxelVisualBlockKey requestedKey, int vertexCount, int indexCount )
 	{
 		var requestedRank = PriorityRank( requestedKey );
+		if ( requestedRank >= System.Threading.Interlocked.CompareExchange( ref _worstPublishedRank, 0, 0 ) ) return;
 		var availableVertices = _pool.VertexFree;
 		var availableIndices = _pool.IndexFree;
-		var candidates = _residents.PublishedEntries()
-			.Where( item => IsDesired( item.Entry.Key ) && item.Entry.Key != requestedKey && PriorityRank( item.Entry.Key ) > requestedRank )
-			.OrderByDescending( item => PriorityRank( item.Entry.Key ) )
-			.ToArray();
-		foreach ( var (_, entry) in candidates )
+		var publishedCount = _residents.CopyPublishedEntries( _publishedScratch );
+		_evictionCandidates.Clear();
+		lock ( _desiredSync )
 		{
-			var needsContiguousSpace = _pool.VertexLargestFree < vertexCount || _pool.IndexLargestFree < indexCount;
-			if ( !needsContiguousSpace && availableVertices >= vertexCount && availableIndices >= indexCount ) break;
+			for ( var index = 0; index < publishedCount; index++ )
+			{
+				var entry = _publishedScratch[index];
+				if ( entry.Key == requestedKey || !_desiredRanks.TryGetValue( entry.Key, out var rank ) || rank <= requestedRank ) continue;
+				_evictionCandidates.Add( new EvictionCandidate( entry, rank ) );
+			}
+		}
+		_evictionCandidates.Sort( static ( left, right ) => right.Rank.CompareTo( left.Rank ) );
+		var evicted = 0;
+		foreach ( var candidate in _evictionCandidates )
+		{
+			if ( evicted > 0 && availableVertices >= vertexCount && availableIndices >= indexCount ) break;
+			var entry = candidate.Entry;
+			if ( PriorityRank( entry.Key ) <= requestedRank ) continue;
 			if ( !_residents.TryRemove( entry.Key, out var allocation ) ) continue;
 			if ( !allocation.IsEmpty )
 			{
@@ -483,8 +508,30 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				availableIndices += allocation.Indices.Count;
 			}
 			_diagnostics.CapacityEvictions++;
-			_renderer.MarkDirty();
+			evicted++;
 		}
+		if ( evicted == 0 ) return;
+		RecomputeWorstPublishedRank();
+		_renderer.MarkDirty();
+	}
+
+	private void UpdateWorstPublishedRank( VoxelVisualBlockKey key )
+	{
+		var rank = PriorityRank( key );
+		var current = System.Threading.Interlocked.CompareExchange( ref _worstPublishedRank, 0, 0 );
+		if ( rank > current ) System.Threading.Interlocked.Exchange( ref _worstPublishedRank, rank );
+	}
+
+	private void RecomputeWorstPublishedRank()
+	{
+		var publishedCount = _residents.CopyPublishedEntries( _publishedScratch );
+		var worstRank = -1;
+		lock ( _desiredSync )
+		{
+			for ( var index = 0; index < publishedCount; index++ )
+				if ( _desiredRanks.TryGetValue( _publishedScratch[index].Key, out var rank ) && rank > worstRank ) worstRank = rank;
+		}
+		System.Threading.Interlocked.Exchange( ref _worstPublishedRank, worstRank );
 	}
 
 	private int PriorityRank( VoxelVisualBlockKey key )
@@ -493,6 +540,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	}
 
 	private readonly record struct BlockedRequest( int VertexCount, int IndexCount );
+	private readonly record struct EvictionCandidate( VoxelGpuResidentTable.ResidentEntry Entry, int Rank );
 
 	public void Dispose()
 	{

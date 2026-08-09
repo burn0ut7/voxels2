@@ -7,10 +7,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainDiagnosticCounters _diagnostics;
 	private readonly float _cullingPaddingWorld;
-	private readonly GpuBuffer<VoxelGpuResidentDescriptor> _residentBuffer;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
 	private readonly VoxelGpuResidentTable.ResidentEntry[] _residentSnapshot;
-	private readonly VoxelGpuResidentDescriptor[] _descriptorData;
 	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _argumentData;
 	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _uploadedArgumentData;
 	private readonly Sandbox.Rendering.CommandList[] _depthCommandLists;
@@ -49,31 +47,14 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_diagnostics = diagnostics ?? throw new System.ArgumentNullException( nameof( diagnostics ) );
 		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
 		_residentSnapshot = new VoxelGpuResidentTable.ResidentEntry[residents.Capacity];
-		_descriptorData = new VoxelGpuResidentDescriptor[residents.Capacity];
 		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
 		_uploadedArgumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
 		_material = Material.FromShader( ShaderName );
-		_residentBuffer = new GpuBuffer<VoxelGpuResidentDescriptor>( residents.Capacity, GpuBuffer.UsageFlags.Structured, "Voxel GPU Residents" );
 		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( residents.Capacity,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.IndirectDrawArguments, "Voxel GPU Draw Commands" );
 		var commandListCapacity = (residents.Capacity + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission;
-		_depthCommandLists = Enumerable.Range( 0, commandListCapacity )
-			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Depth Multi Draw {index}" ) )
-			.ToArray();
-		_opaqueCommandLists = Enumerable.Range( 0, commandListCapacity )
-			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Opaque Multi Draw {index}" ) )
-			.ToArray();
-		_attributes.Set( "TerrainResidents", _residentBuffer );
-		_drawArguments.SetData( _argumentData, 0 );
-		for ( var index = 0; index < commandListCapacity; index++ )
-		{
-			var offset = index * MaximumCommandsPerSubmission;
-			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, residents.Capacity - offset );
-			BuildAndAttachCommandList( _depthCommandLists[index], offset, commandCount, Sandbox.Rendering.Stage.AfterDepthPrepass );
-			BuildAndAttachCommandList( _opaqueCommandLists[index], offset, commandCount, Sandbox.Rendering.Stage.AfterOpaque );
-		}
-		_attachedDepthCommandListCount = commandListCapacity;
-		_attachedOpaqueCommandListCount = commandListCapacity;
+		_depthCommandLists = new Sandbox.Rendering.CommandList[commandListCapacity];
+		_opaqueCommandLists = new Sandbox.Rendering.CommandList[commandListCapacity];
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
 	}
 
@@ -114,20 +95,18 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			_lastCameraUp = cameraUp;
 		}
 		var residentsChanged = System.Threading.Interlocked.Exchange( ref _dirty, 0 ) != 0;
-		if ( residentsChanged || cameraChanged ) Rebuild( residentsChanged );
+		if ( residentsChanged || cameraChanged ) Rebuild();
 	}
 
-	private void Rebuild( bool uploadResidents )
+	private void Rebuild()
 	{
 		_cullingRebuildCount++;
-		_residents.CopyEntries( _residentSnapshot );
+		var publishedCount = _residents.CopyPublishedEntries( _residentSnapshot );
 		var frustum = _camera.GetFrustum();
 		var visibleCommandCount = 0;
-		for ( var slot = 0; slot < _residentSnapshot.Length; slot++ )
+		for ( var index = 0; index < publishedCount; index++ )
 		{
-			var entry = _residentSnapshot[slot];
-			if ( uploadResidents ) _descriptorData[slot] = entry.Published ? entry.Descriptor : default;
-			if ( !entry.Published ) continue;
+			var entry = _residentSnapshot[index];
 			if ( entry.Descriptor.IndexCount == 0 ) continue;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );
 			var boundsMax = new Vector3( entry.Descriptor.BoundsMax.x, entry.Descriptor.BoundsMax.y, entry.Descriptor.BoundsMax.z );
@@ -144,34 +123,32 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			};
 		}
 
-		System.Array.Clear( _argumentData, visibleCommandCount, _argumentData.Length - visibleCommandCount );
-		if ( uploadResidents )
-		{
-			var residentUploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
-			_residentBuffer.SetData( _descriptorData );
-			var residentUploadMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( residentUploadStart ).TotalMilliseconds;
-			if ( residentUploadMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowUploadLogCount ) <= 32 )
-				Log.Info( $"Voxel GPU resident buffer upload: {residentUploadMilliseconds:F2}ms, capacity={_descriptorData.Length:N0}." );
-		}
+		var uploadCount = visibleCommandCount == 0 ? 0 :
+			System.Math.Min( _argumentData.Length, ((visibleCommandCount + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission) * MaximumCommandsPerSubmission );
+		if ( uploadCount > visibleCommandCount ) System.Array.Clear( _argumentData, visibleCommandCount, uploadCount - visibleCommandCount );
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
-		if ( ArgumentsChanged( visibleCommandCount ) )
+		if ( ArgumentsChanged( uploadCount ) )
 		{
 			_argumentUploadCount++;
-			System.Array.Copy( _argumentData, _uploadedArgumentData, _argumentData.Length );
-			_uploadedArgumentCount = visibleCommandCount;
+			if ( uploadCount > 0 ) System.Array.Copy( _argumentData, _uploadedArgumentData, uploadCount );
+			_uploadedArgumentCount = uploadCount;
 			_hasUploadedArguments = true;
-			var argumentUploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
-			_drawArguments.SetData( _argumentData, 0 );
-			var argumentUploadMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( argumentUploadStart ).TotalMilliseconds;
-			if ( argumentUploadMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowUploadLogCount ) <= 32 )
-				Log.Info( $"Voxel GPU indirect argument upload: {argumentUploadMilliseconds:F2}ms, commands={visibleCommandCount:N0}, capacity={_argumentData.Length:N0}." );
+			if ( uploadCount > 0 )
+			{
+				var argumentUploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
+				_drawArguments.SetData( new System.Span<GpuBuffer.IndirectDrawIndexedArguments>( _argumentData, 0, uploadCount ) );
+				var argumentUploadMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( argumentUploadStart ).TotalMilliseconds;
+				if ( argumentUploadMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowUploadLogCount ) <= 32 )
+					Log.Info( $"Voxel GPU indirect argument upload: {argumentUploadMilliseconds:F2}ms, commands={visibleCommandCount:N0}, uploaded={uploadCount:N0}." );
+			}
 		}
+		UpdateCommandLists( uploadCount / MaximumCommandsPerSubmission );
 	}
 
-	private bool ArgumentsChanged( int visibleCommandCount )
+	private bool ArgumentsChanged( int uploadCount )
 	{
-		if ( !_hasUploadedArguments || visibleCommandCount != _uploadedArgumentCount ) return true;
-		for ( var index = 0; index < _argumentData.Length; index++ )
+		if ( !_hasUploadedArguments || uploadCount != _uploadedArgumentCount ) return true;
+		for ( var index = 0; index < uploadCount; index++ )
 		{
 			var current = _argumentData[index];
 			var previous = _uploadedArgumentData[index];
@@ -181,7 +158,32 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		return false;
 	}
 
-	private void BuildAndAttachCommandList( Sandbox.Rendering.CommandList commandList, int offset, uint commandCount, Sandbox.Rendering.Stage stage )
+	private void UpdateCommandLists( int requiredCount )
+	{
+		for ( var index = _attachedDepthCommandListCount; index < requiredCount; index++ )
+		{
+			_depthCommandLists[index] ??= new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Depth Multi Draw {index}" );
+			_opaqueCommandLists[index] ??= new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Opaque Multi Draw {index}" );
+			var offset = index * MaximumCommandsPerSubmission;
+			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, _residents.Capacity - offset );
+			BuildCommandList( _depthCommandLists[index], offset, commandCount );
+			BuildCommandList( _opaqueCommandLists[index], offset, commandCount );
+			if ( _renderingEnabled )
+			{
+				_camera.AddCommandList( _depthCommandLists[index], Sandbox.Rendering.Stage.AfterDepthPrepass );
+				_camera.AddCommandList( _opaqueCommandLists[index], Sandbox.Rendering.Stage.AfterOpaque );
+			}
+		}
+		if ( _renderingEnabled )
+		{
+			for ( var index = requiredCount; index < _attachedDepthCommandListCount; index++ ) _camera.RemoveCommandList( _depthCommandLists[index] );
+			for ( var index = requiredCount; index < _attachedOpaqueCommandListCount; index++ ) _camera.RemoveCommandList( _opaqueCommandLists[index] );
+		}
+		_attachedDepthCommandListCount = requiredCount;
+		_attachedOpaqueCommandListCount = requiredCount;
+	}
+
+	private void BuildCommandList( Sandbox.Rendering.CommandList commandList, int offset, uint commandCount )
 	{
 		commandList.Reset();
 		commandList.ResourceBarrierTransition( _pool.Vertices, Sandbox.Rendering.ResourceState.VertexOrIndexBuffer );
@@ -197,7 +199,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			Graphics.PrimitiveType.Triangles,
 			commandCount,
 			0 );
-		_camera.AddCommandList( commandList, stage );
 	}
 
 	public void Dispose()
@@ -209,7 +210,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_attachedDepthCommandListCount = 0;
 		_attachedOpaqueCommandListCount = 0;
 		_drawArguments.Dispose();
-		_residentBuffer.Dispose();
 		Delete();
 	}
 }
