@@ -179,8 +179,7 @@ Expected functional state:
 - The proof has batched density, classification, local scans, counts, and shared batch output.
 - The proof performs diagnostic readback and is not a production no-readback backend.
 - `VoxelGpuMeshPoolLifecycleProof` models allocation on the CPU but is not the production GPU geometry pool.
-- Production clipbox LOD and GPU transition-cell emission are opt-in through
-  `VoxelManager.GpuClipboxLodEnabled`; the fixed-LOD path remains the default.
+- Production LOD and transition cells are not implemented.
 
 If the current code already contains part of a later phase, preserve working code, verify it against the contracts below, and continue from the first unmet gate.
 
@@ -196,7 +195,7 @@ If the current code already contains part of a later phase, preserve working cod
 | Phase 2B — Persistent fixed-LOD GPU backend | Complete. Persistent pools, asynchronous count readback, transactional allocation, generation-safe publication, and bounded multi-draw are live. |
 | **Phase 3A — Production render integration** | **Complete for the current s&box renderer.** Standard lit Forward/Depth terrain rendering is live; the engine's generic indirect path reports `IndirectFirstInstance=false`, so the bounded world-space vertex fallback is retained and explicitly reported. |
 | **Phase 3B — Fixed-LOD movement streaming** | **Complete.** Actual player observers drive same-frame desired-set deltas, bounded queues, persistent residents, CPU frustum culling, and the required GPU traversal scenarios. |
-| **Phase 4 — 3D clipbox LOD and transitions** | **Complete.** Opt-in 3D clipbox residency, direct canonical-field sampling for LOD1–3, toroidal slab deltas, unique transition ownership, coherent publication, table-driven GPU seam emission, and exhaustive regular/transition/orientation/movement fixtures are live. |
+| **Phase 4 — 3D clipbox LOD and transitions** | **In progress.** Opt-in 3D clipbox residency, direct canonical-field sampling for LOD1–3, toroidal slab deltas, transition ownership, and coherent seam-set publication are implemented; GPU transition-cell emission and the exhaustive seam fixtures remain before the pass gate. |
 | Phase 5 — Sparse edits and CPU collision integration | After LOD correctness. |
 | Phase 6 — Final adoption campaign | After all mandatory behavior exists. |
 
@@ -1265,13 +1264,13 @@ GPU culling is not required for this phase.
 
 Begin only after Phases 2B, 3A, and 3B pass.
 
-The implementation is opt-in through `VoxelManager.GpuClipboxLodEnabled`.
+The first implementation slice is opt-in through `VoxelManager.GpuClipboxLodEnabled`.
 `GpuClipboxLodLevels` selects one through four levels, with a fixed 3D logical
 dimension derived from `GpuClipboxRadius` (kept separate from the potentially
 large fixed-LOD benchmark radius). LOD requests retain their logical block
 coordinate and sample spacing in the existing request ABI; the density and vertex
 passes evaluate the canonical field directly at that spacing. The fixed-LOD path
-remains the default for compatibility.
+remains the default until transition-cell emission and seam fixtures are validated.
 
 ## 11.1 LOD model
 
@@ -1345,14 +1344,6 @@ neighbor generation dependencies
 Keep the previous coherent set visible until the replacement set is complete.
 
 Do not hide cracks with skirts or overlapping duplicate geometry.
-
-Runtime transition emission is table-driven in
-`VoxelGpuTransitionMesher`. CPU-side work is limited to bounded 9-bit case
-classification and sample packaging; interpolation, vertex construction, and
-index emission execute in `voxel_gpu_transition_emit_mesh_cs.shader` into the
-shared persistent mesh pool. Transition draws are published only after the
-regular fine/coarse dependencies are resident, so the previous coherent seam
-set remains visible during replacement.
 
 ## 11.5 Phase 4 tests
 

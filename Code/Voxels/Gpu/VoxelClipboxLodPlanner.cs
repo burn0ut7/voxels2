@@ -94,7 +94,6 @@ internal sealed class VoxelClipboxLodPlanner
 			entering.AddRange( destination );
 			return destination.Count;
 		}
-		if ( observer == _lastObserver ) return destination.Count;
 
 		var changed = false;
 		foreach ( var level in _levels )

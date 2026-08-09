@@ -1,7 +1,6 @@
 internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDisposable
 {
 	public const int MaximumCommandsPerSubmission = 16;
-	public const int MaximumTransitionDraws = 8192;
 	public const string ShaderName = "shaders/voxel_gpu_terrain.shader";
 	private readonly CameraComponent _camera;
 	private readonly VoxelGpuMeshPool _pool;
@@ -11,7 +10,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly GpuBuffer<VoxelGpuResidentDescriptor> _residentBuffer;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
 	private readonly VoxelGpuResidentTable.ResidentEntry[] _residentSnapshot;
-	private readonly List<VoxelGpuTransitionDraw> _transitionDraws = new();
 	private readonly VoxelGpuResidentDescriptor[] _descriptorData;
 	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _argumentData;
 	private readonly GpuBuffer.IndirectDrawIndexedArguments[] _uploadedArgumentData;
@@ -52,13 +50,13 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
 		_residentSnapshot = new VoxelGpuResidentTable.ResidentEntry[residents.Capacity];
 		_descriptorData = new VoxelGpuResidentDescriptor[residents.Capacity];
-		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity + MaximumTransitionDraws];
-		_uploadedArgumentData = new GpuBuffer.IndirectDrawIndexedArguments[_argumentData.Length];
+		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
+		_uploadedArgumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
 		_material = Material.FromShader( ShaderName );
 		_residentBuffer = new GpuBuffer<VoxelGpuResidentDescriptor>( residents.Capacity, GpuBuffer.UsageFlags.Structured, "Voxel GPU Residents" );
-		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( _argumentData.Length,
+		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( residents.Capacity,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.IndirectDrawArguments, "Voxel GPU Draw Commands" );
-		var commandListCapacity = (_argumentData.Length + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission;
+		var commandListCapacity = (residents.Capacity + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission;
 		_depthCommandLists = Enumerable.Range( 0, commandListCapacity )
 			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Depth Multi Draw {index}" ) )
 			.ToArray();
@@ -70,7 +68,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		for ( var index = 0; index < commandListCapacity; index++ )
 		{
 			var offset = index * MaximumCommandsPerSubmission;
-			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, _argumentData.Length - offset );
+			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, residents.Capacity - offset );
 			BuildAndAttachCommandList( _depthCommandLists[index], offset, commandCount, Sandbox.Rendering.Stage.AfterDepthPrepass );
 			BuildAndAttachCommandList( _opaqueCommandLists[index], offset, commandCount, Sandbox.Rendering.Stage.AfterOpaque );
 		}
@@ -80,13 +78,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	}
 
 	public void MarkDirty() => System.Threading.Interlocked.Exchange( ref _dirty, 1 );
-
-	public void SetTransitionDraws( IEnumerable<VoxelGpuTransitionDraw> draws )
-	{
-		_transitionDraws.Clear();
-		if ( draws is not null ) _transitionDraws.AddRange( draws.Take( MaximumTransitionDraws ) );
-		MarkDirty();
-	}
 
 	public void SetRenderingEnabled( bool enabled )
 	{
@@ -149,19 +140,6 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 				InstanceCount = 1,
 				FirstIndex = entry.Descriptor.IndexOffset,
 				BaseVertex = (int)entry.Descriptor.VertexOffset,
-				FirstInstance = 0
-			};
-		}
-		foreach ( var transition in _transitionDraws )
-		{
-			if ( visibleCommandCount >= _argumentData.Length ) break;
-			if ( transition.IndexCount <= 0 ) continue;
-			_argumentData[visibleCommandCount++] = new GpuBuffer.IndirectDrawIndexedArguments
-			{
-				IndexCount = (uint)transition.IndexCount,
-				InstanceCount = 1,
-				FirstIndex = (uint)transition.IndexOffset,
-				BaseVertex = 0,
 				FirstInstance = 0
 			};
 		}
