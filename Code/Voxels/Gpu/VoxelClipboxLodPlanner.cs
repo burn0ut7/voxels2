@@ -246,31 +246,18 @@ internal sealed class VoxelClipboxLodPlanner
 		}
 	}
 
-	internal static bool IsCoveredByFinerLevel( Vector3Int coordinate, Vector3Int observer, VoxelClipboxLodLevel level )
+	private static bool IsCoveredByFinerLevel( Vector3Int coordinate, Vector3Int observer, VoxelClipboxLodLevel level )
 	{
 		var scale = level.SampleSpacing;
-		var finerScale = scale * 0.5f;
-		var finerSpacing = scale / 2;
-		var finerCenter = new Vector3Int(
-			FloorDiv( observer.x, finerSpacing ),
-			FloorDiv( observer.y, finerSpacing ),
-			FloorDiv( observer.z, finerSpacing ) );
-		var half = level.Dimension / 2;
-		var finerMin = new Vector3(
-			(finerCenter.x - half) * LogicalBlockSize * finerScale,
-			(finerCenter.y - half) * LogicalBlockSize * finerScale,
-			(finerCenter.z - half) * LogicalBlockSize * finerScale );
-		var finerMax = new Vector3(
-			(finerCenter.x + level.Dimension - half) * LogicalBlockSize * finerScale,
-			(finerCenter.y + level.Dimension - half) * LogicalBlockSize * finerScale,
-			(finerCenter.z + level.Dimension - half) * LogicalBlockSize * finerScale );
 		var worldCenter = new Vector3(
 			(coordinate.x + 0.5f) * LogicalBlockSize * scale,
 			(coordinate.y + 0.5f) * LogicalBlockSize * scale,
 			(coordinate.z + 0.5f) * LogicalBlockSize * scale );
-		return worldCenter.x >= finerMin.x && worldCenter.x < finerMax.x &&
-			worldCenter.y >= finerMin.y && worldCenter.y < finerMax.y &&
-			worldCenter.z >= finerMin.z && worldCenter.z < finerMax.z;
+		var observerCenter = new Vector3( observer.x * LogicalBlockSize, observer.y * LogicalBlockSize, observer.z * LogicalBlockSize );
+		var finerExtent = (level.Radius + 0.5f) * LogicalBlockSize * 0.5f;
+		return System.MathF.Abs( worldCenter.x - observerCenter.x ) <= finerExtent &&
+			System.MathF.Abs( worldCenter.y - observerCenter.y ) <= finerExtent &&
+			System.MathF.Abs( worldCenter.z - observerCenter.z ) <= finerExtent;
 	}
 
 	private static IEnumerable<(VoxelLodFaceDirection Face, Vector3Int Direction)> Directions()

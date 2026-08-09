@@ -1,16 +1,13 @@
 internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDisposable
 {
-	// Keep the indirect buffer in a small number of multi-draw submissions. A
-	// 4,096-resident world otherwise creates 256 command lists per render stage,
-	// even when frustum culling leaves only a fraction of those commands visible.
-	public const int MaximumCommandsPerSubmission = 128;
+	public const int MaximumCommandsPerSubmission = 16;
+	public const int MaximumTransitionDraws = 8192;
 	public const string ShaderName = "shaders/voxel_gpu_terrain.shader";
 	private readonly CameraComponent _camera;
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainDiagnosticCounters _diagnostics;
 	private readonly float _cullingPaddingWorld;
-	private readonly int _transitionCapacity;
 	private readonly GpuBuffer<VoxelGpuResidentDescriptor> _residentBuffer;
 	private readonly GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments> _drawArguments;
 	private readonly VoxelGpuResidentTable.ResidentEntry[] _residentSnapshot;
@@ -45,7 +42,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	public long ArgumentUploadCount => _argumentUploadCount;
 	public bool IsTerrainRenderingEnabled => _renderingEnabled;
 
-	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, float cullingPaddingWorld, int transitionCapacity )
+	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, float cullingPaddingWorld )
 		: base( world )
 	{
 		_camera = camera ?? throw new System.ArgumentNullException( nameof( camera ) );
@@ -53,10 +50,9 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_residents = residents ?? throw new System.ArgumentNullException( nameof( residents ) );
 		_diagnostics = diagnostics ?? throw new System.ArgumentNullException( nameof( diagnostics ) );
 		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
-		_transitionCapacity = System.Math.Max( 0, transitionCapacity );
 		_residentSnapshot = new VoxelGpuResidentTable.ResidentEntry[residents.Capacity];
 		_descriptorData = new VoxelGpuResidentDescriptor[residents.Capacity];
-		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity + _transitionCapacity];
+		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity + MaximumTransitionDraws];
 		_uploadedArgumentData = new GpuBuffer.IndirectDrawIndexedArguments[_argumentData.Length];
 		_material = Material.FromShader( ShaderName );
 		_residentBuffer = new GpuBuffer<VoxelGpuResidentDescriptor>( residents.Capacity, GpuBuffer.UsageFlags.Structured, "Voxel GPU Residents" );
@@ -87,14 +83,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 
 	public void SetTransitionDraws( IEnumerable<VoxelGpuTransitionDraw> draws )
 	{
-		var next = draws is null ? new List<VoxelGpuTransitionDraw>() : draws.ToList();
-		if ( next.Count > _transitionCapacity )
-		{
-			Log.Error( $"Voxel GPU transition renderer rejected {next.Count:N0} draws; capacity is {_transitionCapacity:N0}." );
-			return;
-		}
 		_transitionDraws.Clear();
-		_transitionDraws.AddRange( next );
+		if ( draws is not null ) _transitionDraws.AddRange( draws.Take( MaximumTransitionDraws ) );
 		MarkDirty();
 	}
 

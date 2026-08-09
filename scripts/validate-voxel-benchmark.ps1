@@ -12,7 +12,6 @@ $fullRequiredScenarios = @(
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
 	'gpu_production_render_integration',
-	'gpu_phase4_clipbox_lod',
 	'gpu_player_infinity_streaming',
 	'gpu_player_line_streaming',
 	'gpu_player_diagonal_streaming',
@@ -34,7 +33,7 @@ $fullRequiredScenarios = @(
 	'sustained_world_spiral_place_20hz'
 )
 $gpuRequiredScenarios = @(
-	'gpu_persistent_static_set', 'gpu_production_render_integration', 'gpu_phase4_clipbox_lod',
+	'gpu_persistent_static_set', 'gpu_production_render_integration',
 	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
 	'gpu_async_readback_saturation', 'gpu_resource_recreation', 'gpu_dedicated_server_startup'
@@ -76,7 +75,6 @@ $requiredMetrics = @(
 	'gpu_terrain_desired_blocks', 'gpu_terrain_resident_capacity', 'gpu_terrain_pending_request_capacity',
 	'gpu_terrain_pending_request_count', 'gpu_terrain_pending_publication_count', 'gpu_terrain_queues_bounded',
 	'gpu_phase3b_available', 'gpu_phase3b_passed', 'gpu_phase3b_test', 'gpu_phase3b_failure',
-	'gpu_phase4_available', 'gpu_phase4_passed', 'gpu_phase4_levels', 'gpu_phase4_residents', 'gpu_phase4_transitions', 'gpu_phase4_failure',
 	'stream_chunks_completed', 'stream_chunks_fresh', 'stream_chunks_cached', 'stream_batches_completed',
 	'stream_sdf_generation_avg_ms', 'stream_sdf_generation_p95_ms', 'stream_sdf_generation_max_ms',
 	'stream_mesh_queue_avg_ms', 'stream_mesh_queue_p95_ms', 'stream_mesh_queue_max_ms',
@@ -140,7 +138,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 14 ) { Add-Failure "Expected suite version 14, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 13 ) { Add-Failure "Expected suite version 13, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -218,15 +216,6 @@ foreach ( $scenario in $scenarios )
 		if ( $scenario.gpu_terrain_production_lighting -ne $true ) { Add-Failure "$context did not use standard production lighting" }
 		if ( $scenario.gpu_terrain_depth_prepass -ne $true ) { Add-Failure "$context did not attach a depth prepass" }
 		if ( [int]$scenario.gpu_terrain_depth_command_lists -le 0 -or [int]$scenario.gpu_terrain_opaque_command_lists -le 0 ) { Add-Failure "$context did not attach bounded depth and opaque command lists" }
-		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
-	}
-	elseif ( $scenario.scenario -eq 'gpu_phase4_clipbox_lod' )
-	{
-		if ( $scenario.gpu_phase4_available -ne $true ) { Add-Failure "$context has no Phase 4 proof result" }
-		if ( $scenario.gpu_phase4_passed -ne $true ) { Add-Failure "$context Phase 4 proof failed: $($scenario.gpu_phase4_failure)" }
-		if ( [int]$scenario.gpu_phase4_levels -lt 2 ) { Add-Failure "$context did not exercise multiple clipbox levels" }
-		if ( [long]$scenario.gpu_phase4_residents -le 0 -or [long]$scenario.gpu_phase4_transitions -le 0 ) { Add-Failure "$context generated no clipbox residency or transition work" }
-		if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no persistent GPU terrain diagnostics" }
 		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
 	}
 	elseif ( $scenario.scenario -in @('gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming') )

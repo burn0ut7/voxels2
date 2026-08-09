@@ -34,9 +34,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly HashSet<VoxelLodTransitionDescriptor> _requestedTransitionSet = new();
 	private bool _transitionsDirty;
 	private int _transitionRuleVersion;
-	private ulong _publishedDependencyGeneration;
-	private ulong _transitionDependencyGeneration;
-	private ulong _nextTransitionRetryEpoch;
 
 	public bool IsSettled => DesiredCount == _residents.PublishedCount && _scheduler.PendingCount == 0 && PendingRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle );
 	private int DesiredCount { get { lock ( _desiredSync ) return _desiredKeys.Count; } }
@@ -58,7 +55,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public bool IsAvailable => _capabilities.Available;
 	public bool IsTerrainRenderingEnabled => _renderer.IsTerrainRenderingEnabled;
 	public bool IsProcessingEnabled => _processingEnabled;
-	public ulong PublishedDependencyGeneration => _publishedDependencyGeneration;
 
 	public VoxelGpuTerrainBackend(
 		SceneWorld world,
@@ -67,7 +63,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		float voxelSize,
 		float sdfClampDistance,
 		int cullingPaddingChunks,
-		int transitionCapacity,
 		int residentCapacity,
 		int vertexCapacity,
 		int indexCapacity )
@@ -104,7 +99,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_residents = new VoxelGpuResidentTable( residentCapacity );
 		_diagnostics.ResidentCapacity = residentCapacity;
 		_diagnostics.PendingRequestCapacity = _scheduler.MaximumPendingRequests;
-		_renderer = new VoxelGpuTerrainRenderer( world, camera, _pool, _residents, _diagnostics, System.Math.Max( 0, cullingPaddingChunks ) * chunkSize * voxelSize, transitionCapacity );
+		_renderer = new VoxelGpuTerrainRenderer( world, camera, _pool, _residents, _diagnostics, System.Math.Max( 0, cullingPaddingChunks ) * chunkSize * voxelSize );
 		_diagnostics.ScratchBytes = _scratchRing.Sum( scratch => scratch.CapacityBytes );
 		_nextProgressLogTimestamp = System.Diagnostics.Stopwatch.GetTimestamp() + 10 * System.Diagnostics.Stopwatch.Frequency;
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
@@ -115,20 +110,18 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public void SetRenderingEnabled( bool enabled ) => _renderer.SetRenderingEnabled( enabled );
 	public void SetProcessingEnabled( bool enabled ) => _processingEnabled = enabled;
 
-	public void UpdateTransitions( IEnumerable<VoxelLodTransitionDescriptor> transitions, int ruleVersion, ulong dependencyGeneration = 0 )
+	public void UpdateTransitions( IEnumerable<VoxelLodTransitionDescriptor> transitions, int ruleVersion )
 	{
 		var next = transitions is null
 			? new HashSet<VoxelLodTransitionDescriptor>()
 			: new HashSet<VoxelLodTransitionDescriptor>( transitions );
-		if ( ruleVersion == _transitionRuleVersion && dependencyGeneration == _transitionDependencyGeneration && _requestedTransitionSet.SetEquals( next ) ) return;
+		if ( ruleVersion == _transitionRuleVersion && _requestedTransitionSet.SetEquals( next ) ) return;
 		_requestedTransitionSet.Clear();
 		_requestedTransitionSet.UnionWith( next );
 		_requestedTransitions.Clear();
 		_requestedTransitions.AddRange( _requestedTransitionSet );
 		_transitionRuleVersion = ruleVersion;
-		_transitionDependencyGeneration = dependencyGeneration;
 		_transitionsDirty = true;
-		_nextTransitionRetryEpoch = 0;
 		Log.Info( $"Voxel GPU transition residency updated: transitions={_requestedTransitions.Count:N0}, rule={ruleVersion}." );
 	}
 
@@ -237,17 +230,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		try
 		{
 			_epoch++;
-			if ( _transitionsDirty && _epoch >= _nextTransitionRetryEpoch && _transitionMesher.Rebuild( _requestedTransitions, _pool, _epoch, _transitionRuleVersion ) )
+			if ( _transitionsDirty && _transitionMesher.Rebuild( _requestedTransitions, _pool, _epoch, _transitionRuleVersion ) )
 				{
 					_renderer.SetTransitionDraws( _transitionMesher.Draws );
 					_transitionsDirty = false;
 					Log.Info( $"Voxel GPU transition mesh published: draws={_transitionMesher.Draws.Count:N0}." );
 				}
-			else if ( _transitionsDirty && _epoch >= _nextTransitionRetryEpoch )
-			{
-				_nextTransitionRetryEpoch = _epoch + 60;
-				Log.Warning( $"Voxel GPU transition mesh deferred: transitions={_requestedTransitions.Count:N0}; previous coherent seam set remains visible." );
-			}
 			_pool.Reclaim( _epoch );
 			UpdateQueueDiagnostics();
 			PublishCompletedEmits();
@@ -428,7 +416,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		while ( _publications.TryPeek( out var publication ) && publication.PublishEpoch <= _epoch )
 		{
 			_publications.Dequeue();
-			var publishedAny = false;
 			for ( var residentIndex = 0; residentIndex < publication.Count; residentIndex++ )
 			{
 				var resident = publication.Residents[residentIndex];
@@ -445,11 +432,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					continue;
 				}
 				if ( !replaced.IsEmpty ) _pool.Retire( replaced, _epoch + VoxelGpuCapabilities.RetirementEpochs );
-				publishedAny = true;
 				RemovePendingRequest( resident.Key );
 				_diagnostics.RecordRequestToVisible( System.Diagnostics.Stopwatch.GetElapsedTime( resident.RequestedTimestamp ).TotalMilliseconds );
 			}
-			if ( publishedAny ) _publishedDependencyGeneration++;
 			RetireUndesiredResidents();
 			_diagnostics.RecordBatchCompletion( System.Diagnostics.Stopwatch.GetElapsedTime( publication.RequestedTimestamp ).TotalMilliseconds );
 			_diagnostics.PendingEmitBatches--;

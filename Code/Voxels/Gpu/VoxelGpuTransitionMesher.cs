@@ -24,9 +24,7 @@ internal sealed class VoxelGpuTransitionMesher : System.IDisposable
 	private readonly GpuBuffer<uint> _vertexData;
 	private readonly List<VoxelGpuAllocationHandle> _allocations = new();
 	private readonly List<VoxelGpuTransitionDraw> _draws = new();
-	private readonly Dictionary<VoxelLodTransitionDescriptor, List<TransitionCell>> _faceCache = new();
 	private readonly TransitionCell[] _cellScratch = new TransitionCell[MaximumCells];
-	private int _cachedRuleVersion = int.MinValue;
 	private bool _disposed;
 
 	public IReadOnlyList<VoxelGpuTransitionDraw> Draws => _draws;
@@ -57,74 +55,46 @@ internal sealed class VoxelGpuTransitionMesher : System.IDisposable
 	{
 		if ( _disposed ) return false;
 		if ( transitions is null ) throw new System.ArgumentNullException( nameof( transitions ) );
-		var nextCells = new List<TransitionCell>();
-		var transitionCount = 0;
-		if ( ruleVersion != _cachedRuleVersion )
-		{
-			_faceCache.Clear();
-			_cachedRuleVersion = ruleVersion;
-		}
-		var activeTransitions = new HashSet<VoxelLodTransitionDescriptor>();
+		var nextDraws = new List<VoxelGpuTransitionDraw>();
+		var nextAllocations = new List<VoxelGpuAllocationHandle>();
+		var cellCount = 0;
 		foreach ( var transition in transitions )
 		{
-			if ( ++transitionCount > MaximumTransitionFaces )
-			{
-				Log.Error( $"Voxel GPU transition mesh rejected {transitionCount:N0} faces; capacity is {MaximumTransitionFaces:N0}." );
-				return false;
-			}
-			activeTransitions.Add( transition );
-			if ( !_faceCache.TryGetValue( transition, out var faceCells ) )
-			{
-				faceCells = new List<TransitionCell>( MaximumCellsPerFace );
-				BuildFaceCells( transition, ruleVersion, faceCells );
-				_faceCache.Add( transition, faceCells );
-			}
+			if ( nextAllocations.Count >= MaximumTransitionFaces ) break;
+			var faceCells = new List<TransitionCell>( MaximumCellsPerFace );
+			BuildFaceCells( transition, ruleVersion, faceCells );
 			if ( faceCells.Count == 0 ) continue;
-			if ( nextCells.Count > _cellScratch.Length - faceCells.Count )
-			{
-				Log.Error( $"Voxel GPU transition mesh rejected {nextCells.Count + faceCells.Count:N0} cells; capacity is {_cellScratch.Length:N0}." );
-				return false;
-			}
-			nextCells.AddRange( faceCells );
-		}
-		foreach ( var cached in _faceCache.Keys.Where( key => !activeTransitions.Contains( key ) ).ToArray() ) _faceCache.Remove( cached );
-
-		var nextAllocations = new List<VoxelGpuAllocationHandle>( nextCells.Count > 0 ? 1 : 0 );
-		var cellCount = 0;
-		if ( nextCells.Count > 0 )
-		{
-			var vertexCount = checked( (int)nextCells.Sum( cell => (long)cell.VertexCount ) );
-			var indexCount = checked( (int)nextCells.Sum( cell => (long)cell.IndexCount ) );
+			var vertexCount = checked( (int)faceCells.Sum( cell => (long)cell.VertexCount ) );
+			var indexCount = checked( (int)faceCells.Sum( cell => (long)cell.IndexCount ) );
 			if ( vertexCount == 0 || indexCount == 0 || !pool.TryAllocate( vertexCount, indexCount, (uint)epoch, out var allocation ) )
 			{
+				foreach ( var allocated in nextAllocations ) pool.ReleaseImmediately( allocated );
 				return false;
 			}
 			var vertexOffset = allocation.Vertices.Offset;
 			var indexOffset = allocation.Indices.Offset;
 			var localVertex = 0;
 			var localIndex = 0;
-			for ( var index = 0; index < nextCells.Count; index++ )
+			for ( var index = 0; index < faceCells.Count; index++ )
 			{
-				var cell = nextCells[index];
+				var cell = faceCells[index];
 				cell.VertexOffset = (uint)(vertexOffset + localVertex);
 				cell.IndexOffset = (uint)(indexOffset + localIndex);
+				if ( cellCount >= _cellScratch.Length ) break;
 				_cellScratch[cellCount] = cell;
 				cellCount++;
 				localVertex += checked( (int)cell.VertexCount );
 				localIndex += checked( (int)cell.IndexCount );
 			}
 			nextAllocations.Add( allocation );
+			nextDraws.Add( new VoxelGpuTransitionDraw( indexOffset, indexCount ) );
 		}
 
 		foreach ( var allocation in _allocations ) pool.Retire( allocation, epoch + VoxelGpuCapabilities.RetirementEpochs );
 		_allocations.Clear();
 		_allocations.AddRange( nextAllocations );
 		_draws.Clear();
-		if ( nextAllocations.Count > 0 )
-		{
-			var allocation = nextAllocations[0];
-			_draws.Add( new VoxelGpuTransitionDraw( allocation.Indices.Offset, allocation.Indices.Count ) );
-		}
+		_draws.AddRange( nextDraws );
 		if ( cellCount == 0 ) return true;
 		var uploadCells = new TransitionCell[cellCount];
 		System.Array.Copy( _cellScratch, uploadCells, cellCount );
@@ -145,29 +115,11 @@ internal sealed class VoxelGpuTransitionMesher : System.IDisposable
 	{
 		var spacing = 1 << transition.Fine.Lod;
 		var basis = GetBasis( transition.Fine, transition.Face, spacing );
-		var sampleDimension = TransitionGridSize * 2 + 1;
-		var frontDensities = new float[sampleDimension * sampleDimension];
-		var backDensities = new float[sampleDimension * sampleDimension];
-		for ( var sampleV = 0; sampleV < sampleDimension; sampleV++ )
-		for ( var sampleU = 0; sampleU < sampleDimension; sampleU++ )
-		{
-			var offset = basis.U * (sampleU * spacing) + basis.V * (sampleV * spacing);
-			var index = sampleV * sampleDimension + sampleU;
-			frontDensities[index] = Evaluate( basis.Origin + offset, ruleVersion );
-			backDensities[index] = Evaluate( basis.Origin + offset + basis.W * (spacing * 2), ruleVersion );
-		}
 		var densities = new float[13];
 		for ( var cellV = 0; cellV < TransitionGridSize; cellV++ )
 		for ( var cellU = 0; cellU < TransitionGridSize; cellU++ )
 		{
-			var baseU = cellU * 2;
-			var baseV = cellV * 2;
-			for ( var corner = 0; corner < 9; corner++ )
-				densities[corner] = frontDensities[(baseV + corner / 3) * sampleDimension + baseU + corner % 3];
-			densities[9] = backDensities[baseV * sampleDimension + baseU];
-			densities[10] = backDensities[baseV * sampleDimension + baseU + 2];
-			densities[11] = backDensities[(baseV + 2) * sampleDimension + baseU];
-			densities[12] = backDensities[(baseV + 2) * sampleDimension + baseU + 2];
+			for ( var corner = 0; corner < 13; corner++ ) densities[corner] = Evaluate( SamplePosition( basis, cellU, cellV, corner, spacing ), ruleVersion );
 			var caseCode = 0;
 			for ( var corner = 0; corner < 9; corner++ ) if ( densities[corner] < 0.0f ) caseCode |= 1 << corner;
 			caseCode &= 0x1FF;
@@ -182,6 +134,15 @@ internal sealed class VoxelGpuTransitionMesher : System.IDisposable
 		}
 	}
 
+	private static Vector3 SamplePosition( FaceBasis basis, int cellU, int cellV, int corner, int spacing )
+	{
+		if ( corner < 9 )
+			return basis.Origin + basis.U * ((cellU * 2 + corner % 3) * spacing) + basis.V * ((cellV * 2 + corner / 3) * spacing);
+		var u = corner is 10 or 12 ? 2 : 0;
+		var v = corner is 11 or 12 ? 2 : 0;
+		return basis.Origin + basis.U * ((cellU * 2 + u) * spacing) + basis.V * ((cellV * 2 + v) * spacing) + basis.W * (spacing * 2);
+	}
+
 	private static float Evaluate( Vector3 world, int ruleVersion )
 	{
 		if ( ruleVersion == 0 ) return world.z;
@@ -189,18 +150,17 @@ internal sealed class VoxelGpuTransitionMesher : System.IDisposable
 		return world.z + 16.0f - rolling;
 	}
 
-	private FaceBasis GetBasis( VoxelVisualBlockKey fine, VoxelLodFaceDirection face, int spacing )
+	private static FaceBasis GetBasis( VoxelVisualBlockKey fine, VoxelLodFaceDirection face, int spacing )
 	{
-		var origin = new Vector3( fine.Coordinate.x * _chunkSize * spacing * _voxelSize, fine.Coordinate.y * _chunkSize * spacing * _voxelSize, (fine.Coordinate.z - 1) * _chunkSize * spacing * _voxelSize );
-		var scale = Vector3.One * _voxelSize;
+		var origin = new Vector3( fine.Coordinate.x * 32 * spacing, fine.Coordinate.y * 32 * spacing, (fine.Coordinate.z - 1) * 32 * spacing );
 		return face switch
 		{
-			VoxelLodFaceDirection.NegativeX => new( origin, new Vector3( 0, 0, 1 ) * scale, new Vector3( 0, 1, 0 ) * scale, new Vector3( -1, 0, 0 ) * scale ),
-			VoxelLodFaceDirection.PositiveX => new( origin + new Vector3( _chunkSize * spacing * _voxelSize, 0, 0 ), new Vector3( 0, 0, -1 ) * scale, new Vector3( 0, 1, 0 ) * scale, new Vector3( 1, 0, 0 ) * scale ),
-			VoxelLodFaceDirection.NegativeY => new( origin, new Vector3( 1, 0, 0 ) * scale, new Vector3( 0, 0, 1 ) * scale, new Vector3( 0, -1, 0 ) * scale ),
-			VoxelLodFaceDirection.PositiveY => new( origin + new Vector3( 0, _chunkSize * spacing * _voxelSize, 0 ), new Vector3( 1, 0, 0 ) * scale, new Vector3( 0, 0, -1 ) * scale, new Vector3( 0, 1, 0 ) * scale ),
-			VoxelLodFaceDirection.NegativeZ => new( origin, new Vector3( 1, 0, 0 ) * scale, new Vector3( 0, 1, 0 ) * scale, new Vector3( 0, 0, -1 ) * scale ),
-			_ => new( origin + new Vector3( 0, 0, _chunkSize * spacing * _voxelSize ), new Vector3( -1, 0, 0 ) * scale, new Vector3( 0, 1, 0 ) * scale, new Vector3( 0, 0, 1 ) * scale )
+			VoxelLodFaceDirection.NegativeX => new( origin, new Vector3( 0, 0, 1 ), new Vector3( 0, 1, 0 ), new Vector3( -1, 0, 0 ) ),
+			VoxelLodFaceDirection.PositiveX => new( origin + new Vector3( 32 * spacing, 0, 0 ), new Vector3( 0, 0, -1 ), new Vector3( 0, 1, 0 ), new Vector3( 1, 0, 0 ) ),
+			VoxelLodFaceDirection.NegativeY => new( origin, new Vector3( 1, 0, 0 ), new Vector3( 0, 0, 1 ), new Vector3( 0, -1, 0 ) ),
+			VoxelLodFaceDirection.PositiveY => new( origin + new Vector3( 0, 32 * spacing, 0 ), new Vector3( 1, 0, 0 ), new Vector3( 0, 0, -1 ), new Vector3( 0, 1, 0 ) ),
+			VoxelLodFaceDirection.NegativeZ => new( origin, new Vector3( 1, 0, 0 ), new Vector3( 0, 1, 0 ), new Vector3( 0, 0, -1 ) ),
+			_ => new( origin + new Vector3( 0, 0, 32 * spacing ), new Vector3( -1, 0, 0 ), new Vector3( 0, 1, 0 ), new Vector3( 0, 0, 1 ) )
 		};
 	}
 
