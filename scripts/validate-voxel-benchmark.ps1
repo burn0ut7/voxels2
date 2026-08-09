@@ -41,6 +41,7 @@ $fullRequiredScenarios = @(
 	'gpu_player_infinity_streaming',
 	'gpu_player_line_streaming',
 	'gpu_player_diagonal_streaming',
+	'gpu_player_clipbox_oscillation',
 	'gpu_allocator_churn',
 	'gpu_replacement_failure',
 	'gpu_pool_exhaustion',
