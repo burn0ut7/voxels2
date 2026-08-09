@@ -78,9 +78,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		{
 			_scheduler.Cancel( key );
 			_pendingRequests.Remove( key );
-			if ( _residents.TryRemove( key, out var allocation ) && !allocation.IsEmpty ) _pool.Retire( allocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
-			_desiredKeys.Remove( key );
-			_renderer.MarkDirty();
+			_residents.CancelUnpublishedReservation( key );
 		}
 
 		_desiredKeys.Clear();
@@ -114,6 +112,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_pool.Reclaim( _epoch );
 			UpdateQueueDiagnostics();
 			PublishCompletedEmits();
+			RetireUndesiredResidents();
 			for ( var index = 0; index < _scratchRing.Length; index++ ) ProcessCountReadback( index );
 			SubmitCountBatches();
 			LogProgress();
@@ -198,7 +197,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var count = counts[index];
 			if ( count.RequestIndex != index || count.Generation != scheduled.Generation || !_scheduler.IsCurrent( scheduled.Key, scheduled.Generation ) )
 			{
-				if ( !IsDesired( scheduled.Key ) ) RemovePendingRequest( scheduled.Key );
+				if ( !IsDesired( scheduled.Key ) )
+				{
+					RemovePendingRequest( scheduled.Key );
+					_residents.CancelUnpublishedReservation( scheduled.Key );
+				}
 				_diagnostics.StalePublicationsRejected++;
 				continue;
 			}
@@ -269,7 +272,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				if ( !_scheduler.IsCurrent( resident.Key, resident.Generation ) ||
 					!_residents.TryPublish( resident.Slot, resident.Key, resident.Generation, resident.Allocation, resident.Descriptor, out var replaced ) )
 				{
-					if ( !IsDesired( resident.Key ) ) RemovePendingRequest( resident.Key );
+					if ( !IsDesired( resident.Key ) )
+					{
+						RemovePendingRequest( resident.Key );
+						_residents.CancelUnpublishedReservation( resident.Key );
+					}
 					_diagnostics.StalePublicationsRejected++;
 					_pool.Retire( resident.Allocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
 					continue;
@@ -278,6 +285,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				RemovePendingRequest( resident.Key );
 				_diagnostics.RecordRequestToVisible( System.Diagnostics.Stopwatch.GetElapsedTime( resident.RequestedTimestamp ).TotalMilliseconds );
 			}
+			RetireUndesiredResidents();
 			_diagnostics.RecordBatchCompletion( System.Diagnostics.Stopwatch.GetElapsedTime( publication.RequestedTimestamp ).TotalMilliseconds );
 			_diagnostics.PendingEmitBatches--;
 			_renderer.MarkDirty();
@@ -291,6 +299,22 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.PendingRequestCount = _scheduler.PendingCount;
 		_diagnostics.PendingPublicationCount = _publications.Count;
 		_diagnostics.QueuesBounded = _scheduler.PendingCount <= _scheduler.MaximumPendingRequests && _publications.Count <= VoxelGpuScratchArena.RingSize;
+	}
+
+	private void RetireUndesiredResidents()
+	{
+		var desiredCount = DesiredCount;
+		if ( _residents.Count <= desiredCount ) return;
+
+		var retired = 0;
+		foreach ( var (_, entry) in _residents.PublishedEntries() )
+		{
+			if ( _residents.Count - retired <= desiredCount || IsDesired( entry.Key ) ) continue;
+			if ( !_residents.TryRemove( entry.Key, out var allocation ) ) continue;
+			if ( !allocation.IsEmpty ) _pool.Retire( allocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
+			retired++;
+		}
+		if ( retired > 0 ) _renderer.MarkDirty();
 	}
 
 	private void RemovePendingRequest( VoxelVisualBlockKey key ) { lock ( _desiredSync ) _pendingRequests.Remove( key ); }

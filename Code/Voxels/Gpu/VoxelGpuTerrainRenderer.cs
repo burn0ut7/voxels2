@@ -15,6 +15,10 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private int _attachedDepthCommandListCount;
 	private int _attachedOpaqueCommandListCount;
 	private int _dirty = 1;
+	private bool _hasCameraCullingState;
+	private Vector3 _lastCameraPosition;
+	private Vector3 _lastCameraForward;
+	private Vector3 _lastCameraUp;
 	private bool _disposed;
 
 	public bool UsesProductionLighting => true;
@@ -59,10 +63,26 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	public override void RenderSceneObject()
 	{
 		if ( _disposed ) return;
-		if ( System.Threading.Interlocked.Exchange( ref _dirty, 0 ) != 0 ) Rebuild();
+		var cameraRotation = _camera.WorldRotation;
+		var cameraPosition = _camera.WorldPosition;
+		var cameraForward = cameraRotation.Forward;
+		var cameraUp = cameraRotation.Up;
+		var cameraChanged = !_hasCameraCullingState ||
+			(cameraPosition - _lastCameraPosition).LengthSquared > 0.0001f ||
+			(cameraForward - _lastCameraForward).LengthSquared > 0.000001f ||
+			(cameraUp - _lastCameraUp).LengthSquared > 0.000001f;
+		if ( cameraChanged )
+		{
+			_hasCameraCullingState = true;
+			_lastCameraPosition = cameraPosition;
+			_lastCameraForward = cameraForward;
+			_lastCameraUp = cameraUp;
+		}
+		var residentsChanged = System.Threading.Interlocked.Exchange( ref _dirty, 0 ) != 0;
+		if ( residentsChanged || cameraChanged ) Rebuild( residentsChanged );
 	}
 
-	private void Rebuild()
+	private void Rebuild( bool uploadResidents )
 	{
 		var descriptorData = new VoxelGpuResidentDescriptor[_residents.Capacity];
 		var arguments = new List<GpuBuffer.IndirectDrawIndexedArguments>( _residents.Capacity );
@@ -87,7 +107,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 
 		var visibleCommandCount = arguments.Count;
 		while ( arguments.Count < _residents.Capacity ) arguments.Add( default );
-		_residentBuffer.SetData( descriptorData );
+		if ( uploadResidents ) _residentBuffer.SetData( descriptorData );
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
 		_drawArguments.SetData( arguments, 0 );
 	}

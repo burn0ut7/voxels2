@@ -1,5 +1,6 @@
 public sealed class VoxelManager : Component, Component.ExecuteInEditor
 {
+	private const int GpuStreamingStagingResidentCapacity = VoxelGpuScratchArena.MaximumBatchSize * 2;
 	public const string ChunkTag = "voxel_chunk";
 
 	private const int MinimumChunkSize = 4;
@@ -589,17 +590,18 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		try
 		{
+			var residentCapacity = checked( DesiredChunkCount + GpuStreamingStagingResidentCapacity );
 			_gpuTerrainBackend = new VoxelGpuTerrainBackend(
 				Scene.SceneWorld,
 				Scene.Camera,
 				ChunkSize,
 				VoxelSize,
 				SdfClampDistance,
-				System.Math.Max( 1, DesiredChunkCount ),
+				System.Math.Max( 1, residentCapacity ),
 				GpuVertexPoolCapacity,
 				GpuIndexPoolCapacity );
 			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
-			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
