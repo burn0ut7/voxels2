@@ -64,6 +64,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private bool _hasGpuTransvoxelProofResult;
 	private VoxelGpuTransitionCaseProofResult _lastGpuTransitionCaseProofResult;
 	private bool _hasGpuTransitionCaseProofResult;
+	private VoxelGpuClipboxSeamProofReport _lastGpuClipboxSeamProofResult;
+	private bool _hasGpuClipboxSeamProofResult;
 	private long _nextChunkTimingSequence;
 	private long _nextBatchTimingSequence;
 	private long _cpuBatchStartTimestamp;
@@ -240,6 +242,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public bool RequestGpuTransitionCaseProof { get; set; }
 
 	[Property, Group( "Diagnostics" )]
+	public bool RequestGpuClipboxSeamProof { get; set; }
+
+	[Property, Group( "Diagnostics" )]
 	public bool RequestGpuTerrainDiagnosticsLog { get; set; }
 
 	[Property, Group( "Diagnostics" )]
@@ -262,6 +267,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	[Property, ReadOnly, Group( "Diagnostics" )]
 	public string GpuTerrainStructuredDebugReport => _gpuTerrainBackend?.StructuredDebugReportJson ?? "{}";
+
+	[Property, ReadOnly, Group( "Diagnostics" )]
+	public string GpuClipboxSeamProof => !_hasGpuClipboxSeamProofResult ? "not-run" : FormatGpuClipboxSeamProof( _lastGpuClipboxSeamProofResult );
 
 	[Property, Group( "Diagnostics" ), Range( 0, MaximumDetailedChunkLogs )]
 	public int DetailedChunkLogLimit { get; set; } = 64;
@@ -400,6 +408,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			RequestGpuTransitionCaseProof = false;
 			RunGpuTransitionCaseProof();
+		}
+		UpdateGpuClipboxSeamProof();
+		if ( RequestGpuClipboxSeamProof && _gpuTerrainBackend?.IsSettled == true )
+		{
+			RequestGpuClipboxSeamProof = false;
+			RunGpuClipboxSeamProof();
 		}
 		if ( CaptureWorldConfiguration() != _generationConfiguration )
 		{
@@ -915,6 +929,46 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_gpuTransitionCaseProof?.Dispose();
 		_gpuTransitionCaseProof = null;
 	}
+
+	[Button]
+	public void RunGpuClipboxSeamProof()
+	{
+		if ( Application.IsDedicatedServer )
+		{
+			Log.Error( "Voxel GPU clipbox seam proof requires a rendering client." );
+			return;
+		}
+		if ( _gpuTerrainBackend is null )
+		{
+			Log.Error( "Voxel GPU clipbox seam proof requires the persistent regular clipbox backend." );
+			return;
+		}
+		if ( !_gpuTerrainBackend.IsSettled )
+		{
+			Log.Warning( "Voxel GPU clipbox seam proof is waiting for terrain settlement." );
+			RequestGpuClipboxSeamProof = true;
+			return;
+		}
+		_lastGpuClipboxSeamProofResult = _gpuTerrainBackend.RunTestOnlySeamProof();
+		_hasGpuClipboxSeamProofResult = true;
+		Log.Info( $"Voxel GPU production clipbox seam proof: result={(_lastGpuClipboxSeamProofResult.Passed ? "PASS" : "FAIL")}, transitions={_lastGpuClipboxSeamProofResult.PublishedTransitions:N0}/{_lastGpuClipboxSeamProofResult.ActiveTransitions:N0}, missing={_lastGpuClipboxSeamProofResult.MissingTransitions:N0}, dependencies={_lastGpuClipboxSeamProofResult.DependencyMismatches:N0}, faceMasks={_lastGpuClipboxSeamProofResult.FaceMaskMismatches:N0}, boundary={_lastGpuClipboxSeamProofResult.BoundaryVertices:N0}/{_lastGpuClipboxSeamProofResult.UnmatchedBoundaryVertices:N0}, maxSeamError={_lastGpuClipboxSeamProofResult.MaximumSeamPositionError:F6}, readback={FormatBytes( _lastGpuClipboxSeamProofResult.GeometryReadbackBytes )} in {_lastGpuClipboxSeamProofResult.GeometryReadbackMilliseconds:F3}ms, validation={_lastGpuClipboxSeamProofResult.Failure}." );
+	}
+
+	public void ClearGpuClipboxSeamProof()
+	{
+		_hasGpuClipboxSeamProofResult = false;
+		_lastGpuClipboxSeamProofResult = default;
+	}
+
+	private void UpdateGpuClipboxSeamProof()
+	{
+		if ( !RequestGpuClipboxSeamProof || _hasGpuClipboxSeamProofResult || _gpuTerrainBackend?.IsSettled != true ) return;
+		RequestGpuClipboxSeamProof = false;
+		RunGpuClipboxSeamProof();
+	}
+
+	private static string FormatGpuClipboxSeamProof( VoxelGpuClipboxSeamProofReport report ) =>
+		$"result={(report.Passed ? "PASS" : "FAIL")}; transitions={report.PublishedTransitions}/{report.ActiveTransitions}; missing={report.MissingTransitions}; dependencies={report.DependencyMismatches}; faceMasks={report.FaceMaskMismatches}; invalidIndices={report.InvalidIndices}; degenerate={report.DegenerateTriangles}; boundary={report.BoundaryVertices}/{report.UnmatchedBoundaryVertices}; maxSeamError={report.MaximumSeamPositionError:F6}; readback={FormatBytes( report.GeometryReadbackBytes )}; failure={report.Failure}";
 
 	private void UpdateGpuTransvoxelProof()
 	{
@@ -1436,6 +1490,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			for ( var index = 0; index < count && drawCount < drawLimit; index++ )
 			{
 				var block = _gpuClipboxDebugScratch[index];
+				if ( GpuClipboxDebugMode is VoxelGpuClipboxDebugMode.TransitionOnly or VoxelGpuClipboxDebugMode.DependencyMismatches or VoxelGpuClipboxDebugMode.SeamErrors ) continue;
 				if ( !ShouldDrawClipboxDebugBlock( block ) ) continue;
 				drawCount++;
 				var scale = 1 << block.Lod;
@@ -1454,7 +1509,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				if ( editorPreview ) label += "\neditor preview: not resident";
 				Gizmo.Draw.Text( label, new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
 			}
-			if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full )
+			if ( ShouldDrawTransitionDebug() )
 			{
 				var transitionCount = _gpuTerrainBackend is not null
 					? _gpuTerrainBackend.CopyClipboxDebugTransitions( _gpuClipboxTransitionDebugScratch )
@@ -1468,12 +1523,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 					var extent = ChunkSize * scale * VoxelSize;
 					var thickness = System.MathF.Max( VoxelSize, extent * 0.025f );
 					var bounds = GetTransitionDebugBounds( minimum, extent, thickness, transition.Face );
-					Gizmo.Draw.Color = transition.State switch
-					{
-						VoxelGpuDebugBlockState.Pending => Color.Yellow,
-						VoxelGpuDebugBlockState.Deferred => Color.Red,
-						_ => Color.White
-					};
+					Gizmo.Draw.Color = GetTransitionDebugColor( transition );
 					Gizmo.Draw.LineBBox( bounds );
 					if ( GpuClipboxDebugLabels )
 					{
@@ -1486,7 +1536,28 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 	}
 
-	private bool ShouldDrawClipboxDebugBlock( VoxelGpuClipboxDebugBlock block ) => GpuClipboxDebugMode != VoxelGpuClipboxDebugMode.Lod || block.IndexCount > 0;
+	private bool ShouldDrawClipboxDebugBlock( VoxelGpuClipboxDebugBlock block ) => GpuClipboxDebugMode switch
+	{
+		VoxelGpuClipboxDebugMode.Lod => block.IndexCount > 0,
+		VoxelGpuClipboxDebugMode.TransitionMasks => block.TransitionFaceMask != 0,
+		VoxelGpuClipboxDebugMode.MissingTransitions => block.TransitionFaceMask != 0,
+		_ => true
+	};
+
+	private bool ShouldDrawTransitionDebug() => GpuClipboxDebugMode is VoxelGpuClipboxDebugMode.Full or VoxelGpuClipboxDebugMode.TransitionOnly or VoxelGpuClipboxDebugMode.MissingTransitions or VoxelGpuClipboxDebugMode.DependencyMismatches or VoxelGpuClipboxDebugMode.Revision or VoxelGpuClipboxDebugMode.Wireframe or VoxelGpuClipboxDebugMode.SeamErrors;
+
+	private Color GetTransitionDebugColor( VoxelGpuClipboxDebugTransition transition )
+	{
+		if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.DependencyMismatches && !transition.DependenciesValid ) return Color.Orange;
+		if ( GpuClipboxDebugMode is VoxelGpuClipboxDebugMode.MissingTransitions or VoxelGpuClipboxDebugMode.SeamErrors )
+			return transition.State == VoxelGpuDebugBlockState.Resident && transition.IndexCount > 0 ? Color.Green : Color.Red;
+		return transition.State switch
+		{
+			VoxelGpuDebugBlockState.Pending => Color.Yellow,
+			VoxelGpuDebugBlockState.Deferred => Color.Red,
+			_ => Color.White
+		};
+	}
 
 	private bool TryPrepareClipboxDebugSnapshot( out bool editorPreview )
 	{

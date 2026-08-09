@@ -24,12 +24,6 @@ internal static class VoxelTransvoxelTransitionMesher
 	private const int MaximumIndicesPerCell = 36;
 	private const float SurfaceEpsilon = 0.000001f;
 	private static readonly int[] CaseSampleOrder = { 0, 1, 2, 5, 8, 7, 6, 3, 4 };
-	private static readonly Vector3Int[] SampleCoordinates =
-	{
-		new( 0, 0, 0 ), new( 1, 0, 0 ), new( 2, 0, 0 ),
-		new( 0, 1, 0 ), new( 1, 1, 0 ), new( 2, 1, 0 ),
-		new( 0, 2, 0 ), new( 1, 2, 0 ), new( 2, 2, 0 )
-	};
 	private static readonly int[][] BoundaryEdges =
 	{
 		new[] { 0, 1 }, new[] { 1, 2 }, new[] { 2, 5 }, new[] { 5, 8 },
@@ -223,7 +217,14 @@ internal static class VoxelTransvoxelTransitionMesher
 
 	private static int ValidateBoundaryMatching( float scale, float tolerance )
 	{
-		var face = VoxelClipboxFaceDirection.NegativeZ;
+		var matched = 0;
+		foreach ( var face in System.Enum.GetValues<VoxelClipboxFaceDirection>() )
+			matched += ValidateBoundaryMatchingForFace( face, scale, tolerance );
+		return matched;
+	}
+
+	private static int ValidateBoundaryMatchingForFace( VoxelClipboxFaceDirection face, float scale, float tolerance )
+	{
 		var samples = BuildFixtureSamples( VoxelTransitionFixture.Plane, face, scale );
 		var gradients = BuildFixtureGradients( VoxelTransitionFixture.Plane, face, scale );
 		var mesh = BuildCell( samples, gradients, face, scale );
@@ -252,7 +253,17 @@ internal static class VoxelTransvoxelTransitionMesher
 			};
 			if ( System.MathF.Abs( highFaceCoordinate ) > tolerance ) continue;
 			var p = vertex.Position / scale;
-			if ( p.x > tolerance && p.x < 2.0f - tolerance && p.y > tolerance && p.y < 2.0f - tolerance ) continue;
+			var tangential = face switch
+			{
+				VoxelClipboxFaceDirection.NegativeX => new Vector2( p.y, p.z ),
+				VoxelClipboxFaceDirection.PositiveX => new Vector2( p.z, p.y ),
+				VoxelClipboxFaceDirection.NegativeY => new Vector2( p.z, p.x ),
+				VoxelClipboxFaceDirection.PositiveY => new Vector2( p.x, p.z ),
+				VoxelClipboxFaceDirection.NegativeZ => new Vector2( p.x, p.y ),
+				VoxelClipboxFaceDirection.PositiveZ => new Vector2( p.y, p.x ),
+				_ => Vector2.Zero
+			};
+			if ( tangential.x > tolerance && tangential.x < 2.0f - tolerance && tangential.y > tolerance && tangential.y < 2.0f - tolerance ) continue;
 			var found = false;
 			foreach ( var position in expected )
 				if ( (vertex.Position - position).Length <= tolerance ) { found = true; break; }
@@ -284,28 +295,7 @@ internal static class VoxelTransvoxelTransitionMesher
 	}
 
 	private static Vector3 ToFacePosition( int sample, VoxelClipboxFaceDirection face, float scale )
-	{
-		var coarseSample = sample >= 9;
-		var coordinate = sample < 9 ? SampleCoordinates[sample] : sample switch
-		{
-			9 => new Vector3Int( 0, 0, 0 ),
-			10 => new Vector3Int( 2, 0, 0 ),
-			11 => new Vector3Int( 0, 2, 0 ),
-			12 => new Vector3Int( 2, 2, 0 ),
-			_ => throw new System.ArgumentOutOfRangeException( nameof( sample ) )
-		};
-		var position = face switch
-		{
-			VoxelClipboxFaceDirection.NegativeX => new Vector3( coarseSample ? -2.0f : 0.0f, coordinate.x, coordinate.y ),
-			VoxelClipboxFaceDirection.PositiveX => new Vector3( coarseSample ? 4.0f : 2.0f, coordinate.y, coordinate.x ),
-			VoxelClipboxFaceDirection.NegativeY => new Vector3( coordinate.y, coarseSample ? -2.0f : 0.0f, coordinate.x ),
-			VoxelClipboxFaceDirection.PositiveY => new Vector3( coordinate.x, coarseSample ? 4.0f : 2.0f, coordinate.y ),
-			VoxelClipboxFaceDirection.NegativeZ => new Vector3( coordinate.x, coordinate.y, coarseSample ? -2.0f : 0.0f ),
-			VoxelClipboxFaceDirection.PositiveZ => new Vector3( coordinate.y, coordinate.x, coarseSample ? 4.0f : 2.0f ),
-			_ => throw new System.ArgumentOutOfRangeException( nameof( face ) )
-		};
-		return position * scale;
-	}
+		=> VoxelTransvoxelTransitionOrientation.CellSamplePosition( sample, face, scale );
 
 	private static Vector3 FaceNormal( VoxelClipboxFaceDirection face ) => face switch
 	{
@@ -505,7 +495,7 @@ internal sealed class VoxelGpuTransitionCaseProof : SceneCustomObject, System.ID
 			{
 				var expected = _expectedVertices[variant * VerticesPerCase + vertex];
 				var actual = _gpuVertices[variant * VerticesPerCase + vertex];
-				if ( (new Vector3( actual.x, actual.y, actual.z ) - expected).Length > PositionTolerance ) { mismatches++; failure = $"GPU transition vertex mismatch at variant {variant}, vertex {vertex}."; break; }
+				if ( (new Vector3( actual.x, actual.y, actual.z ) - expected).Length > PositionTolerance ) { mismatches++; failure = $"GPU transition vertex mismatch at variant {variant}, vertex {vertex}: GPU=({actual.x:F4},{actual.y:F4},{actual.z:F4}), CPU=({expected.x:F4},{expected.y:F4},{expected.z:F4})."; break; }
 			}
 			for ( var index = 0; string.IsNullOrEmpty( failure ) && index < expectedIndexCount; index++ )
 			{

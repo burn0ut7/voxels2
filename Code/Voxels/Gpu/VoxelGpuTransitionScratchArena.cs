@@ -175,7 +175,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	public void Dispose()
 	{
 		lock ( _stateLock ) _disposed = true;
-		_requests.Dispose(); _samples.Dispose(); _lookup.Dispose(); _countResults.Dispose(); _allocations.Dispose();
+		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose();
 	}
 
 	private enum ArenaState { Idle, CountSubmitted, CountReady, EmitReady }

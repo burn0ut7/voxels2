@@ -1,0 +1,39 @@
+#ifndef VOXEL_TRANSVOXEL_ORIENTATION_FXC
+#define VOXEL_TRANSVOXEL_ORIENTATION_FXC
+
+int3 TransitionSampleCoordinates( uint sample )
+{
+	if ( sample < 9 ) return int3( sample % 3, (sample / 3) % 3, 0 );
+	if ( sample == 9 ) return int3( 0, 0, 0 );
+	if ( sample == 10 ) return int3( 2, 0, 0 );
+	if ( sample == 11 ) return int3( 0, 2, 0 );
+	return int3( 2, 2, 0 );
+}
+
+float3 TransitionFacePosition( uint sample, uint face, uint cellIndex, uint transitionCellsPerAxis, int chunkSize )
+{
+	int3 coordinate = TransitionSampleCoordinates( sample );
+	coordinate.xy += int2( (cellIndex % transitionCellsPerAxis) * 2, (cellIndex / transitionCellsPerAxis) * 2 );
+	int extent = chunkSize;
+	if ( face == 0 ) return float3( 0, coordinate.x, coordinate.y );
+	if ( face == 1 ) return float3( extent, coordinate.y, coordinate.x );
+	if ( face == 2 ) return float3( coordinate.y, 0, coordinate.x );
+	if ( face == 3 ) return float3( coordinate.x, extent, coordinate.y );
+	if ( face == 4 ) return float3( coordinate.x, coordinate.y, 0 );
+	return float3( coordinate.y, coordinate.x, extent );
+}
+
+float3 TransitionProofSamplePosition( uint sample, uint face )
+{
+	float3 position = TransitionFacePosition( sample, face, 0, 1, 2 );
+	if ( sample < 9 ) return position;
+	if ( face == 0 ) position.x -= 2.0f;
+	else if ( face == 1 ) position.x += 2.0f;
+	else if ( face == 2 ) position.y -= 2.0f;
+	else if ( face == 3 ) position.y += 2.0f;
+	else if ( face == 4 ) position.z -= 2.0f;
+	else position.z += 2.0f;
+	return position;
+}
+
+#endif

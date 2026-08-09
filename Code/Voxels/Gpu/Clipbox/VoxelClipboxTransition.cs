@@ -32,6 +32,22 @@ internal static class VoxelClipboxTransitionPlanner
 
 	public static uint FaceMaskBit( VoxelClipboxFaceDirection face ) => 1u << (int)face;
 
+	/// <summary>
+	/// Converts the fine-side transition orientation to the touching face on the
+	/// coarse block. Transition slots are named from the fine block's point of
+	/// view, while TransitionFaceMask is stored on the coarse regular block.
+	/// </summary>
+	public static VoxelClipboxFaceDirection OppositeFace( VoxelClipboxFaceDirection face ) => face switch
+	{
+		VoxelClipboxFaceDirection.NegativeX => VoxelClipboxFaceDirection.PositiveX,
+		VoxelClipboxFaceDirection.PositiveX => VoxelClipboxFaceDirection.NegativeX,
+		VoxelClipboxFaceDirection.NegativeY => VoxelClipboxFaceDirection.PositiveY,
+		VoxelClipboxFaceDirection.PositiveY => VoxelClipboxFaceDirection.NegativeY,
+		VoxelClipboxFaceDirection.NegativeZ => VoxelClipboxFaceDirection.PositiveZ,
+		VoxelClipboxFaceDirection.PositiveZ => VoxelClipboxFaceDirection.NegativeZ,
+		_ => throw new System.ArgumentOutOfRangeException( nameof( face ) )
+	};
+
 	public static int GetStableSlotId( VoxelClipboxConfig config, int fineLevel, VoxelClipboxFaceDirection face, int u, int v ) =>
 		checked( fineLevel * 6 * config.BlocksPerAxis * config.BlocksPerAxis + (int)face * config.BlocksPerAxis * config.BlocksPerAxis + u + config.BlocksPerAxis * v );
 
@@ -103,7 +119,7 @@ internal static class VoxelClipboxTransitionPlanner
 				if ( !fine.IsActive( fineCoordinate ) || fine.IsActive( neighborCoordinate ) || !coarse.IsActive( coarseCoordinate ) ) continue;
 				var coarseSlot = VoxelClipboxCoordinates.GetSlotIndex( fineLevel + 1, coarseCoordinate, config.BlocksPerAxis );
 				var assignment = regularSlots[coarseSlot];
-				regularSlots[coarseSlot] = assignment with { Key = assignment.Key with { TransitionFaceMask = assignment.Key.TransitionFaceMask | FaceMaskBit( face ) } };
+				regularSlots[coarseSlot] = assignment with { Key = assignment.Key with { TransitionFaceMask = assignment.Key.TransitionFaceMask | FaceMaskBit( OppositeFace( face ) ) } };
 			}
 		}
 	}
@@ -122,7 +138,7 @@ internal static class VoxelClipboxTransitionPlanner
 			var fineCoordinate = GetFaceCoordinate( fine.Outer, face, u, v );
 			var neighborCoordinate = fineCoordinate + GetFaceDelta( face );
 			var candidateCoarseCoordinate = VoxelClipboxCoordinates.FloorDiv( neighborCoordinate, 2 );
-			if ( candidateCoarseCoordinate == coarseCoordinate && fine.IsActive( fineCoordinate ) && !fine.IsActive( neighborCoordinate ) && coarse.IsActive( coarseCoordinate ) ) mask |= FaceMaskBit( face );
+			if ( candidateCoarseCoordinate == coarseCoordinate && fine.IsActive( fineCoordinate ) && !fine.IsActive( neighborCoordinate ) && coarse.IsActive( coarseCoordinate ) ) mask |= FaceMaskBit( OppositeFace( face ) );
 		}
 		return mask;
 	}

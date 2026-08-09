@@ -1,0 +1,66 @@
+#ifndef VOXEL_TERRAIN_FIELD_FXC
+#define VOXEL_TERRAIN_FIELD_FXC
+
+// One canonical procedural field for all GPU terrain paths. Coordinates are
+// canonical sample coordinates, so LOD only changes sampling density and never
+// changes the terrain datum.
+int VoxelTerrainHash( int x, int y, int seed )
+{
+	int value = seed + x * 374761393 + y * 668265263;
+	value = (value ^ (value >> 13)) * 1274126177;
+	return value ^ (value >> 16);
+}
+
+float2 VoxelTerrainGradient( int index )
+{
+	if ( index == 0 ) return float2( 1.0f, 0.0f );
+	if ( index == 1 ) return float2( -1.0f, 0.0f );
+	if ( index == 2 ) return float2( 0.0f, 1.0f );
+	if ( index == 3 ) return float2( 0.0f, -1.0f );
+	if ( index == 4 ) return float2( 0.70710677f, 0.70710677f );
+	if ( index == 5 ) return float2( -0.70710677f, 0.70710677f );
+	if ( index == 6 ) return float2( 0.70710677f, -0.70710677f );
+	return float2( -0.70710677f, -0.70710677f );
+}
+
+float VoxelTerrainSimplexNoise( float2 point, int seed )
+{
+	const float skewFactor = 0.3660254038f;
+	const float unskewFactor = 0.2113248654f;
+	float skewed = (point.x + point.y) * skewFactor;
+	int cellX = (int)floor( point.x + skewed );
+	int cellY = (int)floor( point.y + skewed );
+	float cellOffset = (cellX + cellY) * unskewFactor;
+	float2 offset = point - (float2( cellX, cellY ) - cellOffset);
+	int secondCornerX = offset.x > offset.y ? 1 : 0;
+	int secondCornerY = offset.x > offset.y ? 0 : 1;
+	float2 second = offset - float2( secondCornerX, secondCornerY ) + unskewFactor;
+	float2 third = offset - 1.0f + 2.0f * unskewFactor;
+	float value = 0.0f;
+	float radius = 0.5f - dot( offset, offset );
+	if ( radius > 0.0f ) value += radius * radius * radius * radius * dot( VoxelTerrainGradient( VoxelTerrainHash( cellX, cellY, seed ) & 7 ), offset );
+	radius = 0.5f - dot( second, second );
+	if ( radius > 0.0f ) value += radius * radius * radius * radius * dot( VoxelTerrainGradient( VoxelTerrainHash( cellX + secondCornerX, cellY + secondCornerY, seed ) & 7 ), second );
+	radius = 0.5f - dot( third, third );
+	if ( radius > 0.0f ) value += radius * radius * radius * radius * dot( VoxelTerrainGradient( VoxelTerrainHash( cellX + 1, cellY + 1, seed ) & 7 ), third );
+	return 70.0f * value;
+}
+
+float EvaluateTerrainDensity( float3 canonicalSample, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	float surfaceHeight = simplexBaseHeight + VoxelTerrainSimplexNoise( canonicalSample.xy * simplexFrequency, simplexSeed ) * simplexAmplitude;
+	return clamp( canonicalSample.z - surfaceHeight, -sdfClampDistance, sdfClampDistance );
+}
+
+float3 EvaluateTerrainGradient( float3 canonicalSample, float sampleStep, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	float3 delta = float3( sampleStep, 0.0f, 0.0f );
+	float x = EvaluateTerrainDensity( canonicalSample + delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed ) - EvaluateTerrainDensity( canonicalSample - delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	delta = float3( 0.0f, sampleStep, 0.0f );
+	float y = EvaluateTerrainDensity( canonicalSample + delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed ) - EvaluateTerrainDensity( canonicalSample - delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	delta = float3( 0.0f, 0.0f, sampleStep );
+	float z = EvaluateTerrainDensity( canonicalSample + delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed ) - EvaluateTerrainDensity( canonicalSample - delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	return float3( x, y, z );
+}
+
+#endif

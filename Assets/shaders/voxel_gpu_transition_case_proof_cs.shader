@@ -2,9 +2,11 @@ MODES
 {
 	Default();
 }
+// GPU LOD crack plan: force a clean live rebuild after orientation ownership fix.
 CS
 {
 	#include "system.fxc"
+	#include "voxel_transvoxel_orientation.fxc"
 	StructuredBuffer<float> Samples < Attribute( "Samples" ); >;
 	StructuredBuffer<uint> Lookup < Attribute( "Lookup" ); >;
 	RWStructuredBuffer<float4> OutputVertices < Attribute( "OutputVertices" ); >;
@@ -17,25 +19,6 @@ CS
 
 	static const uint CaseOrder[9] = { 0, 1, 2, 5, 8, 7, 6, 3, 4 };
 
-	uint3 SampleCoordinate( uint sample )
-	{
-		if ( sample < 9 ) return uint3( sample % 3, (sample / 3) % 3, 0 );
-		if ( sample == 9 ) return uint3( 0, 0, 0 );
-		if ( sample == 10 ) return uint3( 2, 0, 0 );
-		if ( sample == 11 ) return uint3( 0, 2, 0 );
-		return uint3( 2, 2, 0 );
-	}
-
-	float3 FacePosition( uint sample, uint face )
-	{
-		uint3 c = SampleCoordinate( sample );
-		if ( face == 0 ) return float3( 0, c.x, c.y );
-		if ( face == 1 ) return float3( 2, c.y, c.x );
-		if ( face == 2 ) return float3( c.y, 0, c.x );
-		if ( face == 3 ) return float3( c.x, 2, c.y );
-		if ( face == 4 ) return float3( c.x, c.y, 0 );
-		return float3( c.y, c.x, 2 );
-	}
 
 	[numthreads(64,1,1)]
 	void MainCs( uint3 id : SV_DispatchThreadID )
@@ -66,7 +49,7 @@ CS
 			float denominator = firstSample - secondSample;
 			float t = abs(denominator) > 0.000001f ? firstSample / denominator : 0.5f;
 			t = clamp(t, 0, 1);
-			float3 position = lerp(FacePosition(first, face), FacePosition(second, face), t);
+			float3 position = lerp(TransitionProofSamplePosition(first, face), TransitionProofSamplePosition(second, face), t);
 			OutputVertices[vertexBase + vertex] = float4(position, 1);
 		}
 

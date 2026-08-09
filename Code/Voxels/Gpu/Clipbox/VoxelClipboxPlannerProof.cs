@@ -257,6 +257,8 @@ internal static class VoxelClipboxPlannerProof
 			var coarse = planner.DesiredSlots[transition.CoarseRegularSlotId];
 			if ( !fine.Active || fine.Lod != transition.FineLevel || fine.Coordinate != transition.FineCoordinate ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} has an invalid fine owner." );
 			if ( !coarse.Active || coarse.Lod != transition.CoarseLevel || coarse.Coordinate != transition.CoarseCoordinate ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} has an invalid coarse dependency." );
+			var coarseFace = VoxelClipboxTransitionPlanner.OppositeFace( transition.Face );
+			if ( (coarse.Key.TransitionFaceMask & VoxelClipboxTransitionPlanner.FaceMaskBit( coarseFace )) == 0 ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} did not reserve the touching coarse {coarseFace} boundary layer." );
 			if ( IsFineNeighborActive( planner.DesiredLevels[transition.FineLevel], transition.FineCoordinate, transition.Face ) ) throw new InvalidOperationException( $"Transition slot {transition.StableSlotId} crosses an active same-LOD neighbor." );
 		}
 	}
