@@ -114,6 +114,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "World" ), Range( 1, MaximumChunkRadius )]
 	public int ChunkRadius { get; set; } = 4;
 
+	[Property, Group( "World" )]
+	public bool GenerateInEditor { get; set; }
+
 	[Property, Group( "World" ), Range( 1.0f, 128.0f )]
 	public float VoxelSize { get; set; } = 16.0f;
 
@@ -269,6 +272,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	protected override void OnUpdate()
 	{
+		if ( Application.IsEditor && !GenerateInEditor ) return;
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
 		if ( RequestGpuTransvoxelProof )
