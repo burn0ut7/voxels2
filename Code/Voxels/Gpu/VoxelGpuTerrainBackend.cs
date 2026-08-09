@@ -78,9 +78,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	{
 		lock ( _desiredSync )
 		{
-			if ( _residents.PublishedCount != _desiredKeys.Count + _desiredTransitionKeys.Count ) return false;
-			foreach ( var key in _desiredKeys ) if ( !_residents.ContainsKey( key ) ) return false;
-			foreach ( var key in _desiredTransitionKeys ) if ( !_residents.ContainsKey( key ) ) return false;
+			var desiredCount = _desiredKeys.Count + _desiredTransitionKeys.Count;
+			var blockedCount = _blockedRequests.Count + _blockedTransitionRequests.Count;
+			if ( _residents.PublishedCount > desiredCount || _residents.PublishedCount < desiredCount - blockedCount ) return false;
+			foreach ( var key in _desiredKeys ) if ( !_residents.ContainsKey( key ) && !_blockedRequests.Contains( key ) ) return false;
+			foreach ( var key in _desiredTransitionKeys ) if ( !_residents.ContainsKey( key ) && !_blockedTransitionRequests.Contains( key ) ) return false;
 			return true;
 		}
 	}
