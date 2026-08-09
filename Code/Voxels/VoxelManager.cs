@@ -176,10 +176,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public VoxelGpuTerrainLodPolicy GpuTerrainLodPolicy { get; set; } = VoxelGpuTerrainLodPolicy.FixedLod0;
 
 	[Property, Group( "Rendering" ), Range( 4, 8 )]
-	public int GpuClipboxBlocksPerAxis { get; set; } = 4;
+	public int GpuClipboxBlocksPerAxis { get; set; } = 8;
 
 	[Property, Group( "Rendering" ), Range( 1, 7 )]
-	public int GpuClipboxLevelCount { get; set; } = 2;
+	public int GpuClipboxLevelCount { get; set; } = 4;
 
 	[Property, Group( "Rendering" )]
 	public bool GpuAutoScalePoolToChunkRadius { get; set; } = true;
