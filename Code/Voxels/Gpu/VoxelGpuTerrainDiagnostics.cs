@@ -31,6 +31,12 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	double EmitSubmissionPerBlockMilliseconds,
 	VoxelTimingDistribution RequestToVisible,
 	VoxelTimingDistribution BatchCompletion,
+	int DesiredBlocks,
+	int ResidentCapacity,
+	int PendingRequestCapacity,
+	int PendingRequestCount,
+	int PendingPublicationCount,
+	bool QueuesBounded,
 	string RenderShader,
 	bool ProductionLighting,
 	bool DepthPrepass,
@@ -40,6 +46,12 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
 {
+	public int DesiredBlocks;
+	public int ResidentCapacity;
+	public int PendingRequestCapacity;
+	public int PendingRequestCount;
+	public int PendingPublicationCount;
+	public bool QueuesBounded = true;
 	private double _countReadbackTotalMilliseconds;
 	private int _countReadbackCount;
 	private readonly List<double> _requestToVisibleMilliseconds = new();
@@ -103,6 +115,12 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			RequestedBlocks == 0 ? 0.0 : EmitSubmissionMilliseconds / RequestedBlocks,
 			Summarize( _requestToVisibleMilliseconds ),
 			Summarize( _batchCompletionMilliseconds ),
+			DesiredBlocks,
+			ResidentCapacity,
+			PendingRequestCapacity,
+			PendingRequestCount,
+			PendingPublicationCount,
+			QueuesBounded,
 			VoxelGpuTerrainRenderer.ShaderName,
 			renderer?.UsesProductionLighting == true,
 			renderer?.UsesDepthPrepass == true,

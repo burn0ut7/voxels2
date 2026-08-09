@@ -7,11 +7,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$requiredScenarios = @(
+$fullRequiredScenarios = @(
 	'cold_generation',
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
 	'gpu_production_render_integration',
+	'gpu_player_infinity_streaming',
+	'gpu_player_line_streaming',
+	'gpu_player_diagonal_streaming',
 	'gpu_allocator_churn',
 	'gpu_replacement_failure',
 	'gpu_pool_exhaustion',
@@ -28,6 +31,17 @@ $requiredScenarios = @(
 	'bulk_edit',
 	'sustained_world_sweep_and_depth_dig_20hz',
 	'sustained_world_spiral_place_20hz'
+)
+$gpuRequiredScenarios = @(
+	'gpu_persistent_static_set', 'gpu_production_render_integration',
+	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming',
+	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
+	'gpu_async_readback_saturation', 'gpu_resource_recreation', 'gpu_dedicated_server_startup'
+)
+$cpuRequiredScenarios = @(
+	'cold_generation', 'live_chunk_radius_reconfiguration', 'player_infinity_streaming', 'player_line_streaming',
+	'player_diagonal_streaming', 'chunk_seam_edit_coherence', 'varied_edits', 'bulk_edit',
+	'sustained_world_sweep_and_depth_dig_20hz', 'sustained_world_spiral_place_20hz'
 )
 $requiredMetrics = @(
 	'avg_fps', 'one_percent_low_fps', 'point_one_percent_low_fps', 'frame_p95_ms', 'frame_max_ms',
@@ -58,6 +72,9 @@ $requiredMetrics = @(
 	'gpu_lifecycle_allocation_failures', 'gpu_lifecycle_backpressure_events',
 	'gpu_lifecycle_stale_publications_rejected', 'gpu_lifecycle_retained_delta_percent',
 	'gpu_phase3a_available', 'gpu_phase3a_passed', 'gpu_phase3a_test', 'gpu_phase3a_failure',
+	'gpu_terrain_desired_blocks', 'gpu_terrain_resident_capacity', 'gpu_terrain_pending_request_capacity',
+	'gpu_terrain_pending_request_count', 'gpu_terrain_pending_publication_count', 'gpu_terrain_queues_bounded',
+	'gpu_phase3b_available', 'gpu_phase3b_passed', 'gpu_phase3b_test', 'gpu_phase3b_failure',
 	'stream_chunks_completed', 'stream_chunks_fresh', 'stream_chunks_cached', 'stream_batches_completed',
 	'stream_sdf_generation_avg_ms', 'stream_sdf_generation_p95_ms', 'stream_sdf_generation_max_ms',
 	'stream_mesh_queue_avg_ms', 'stream_mesh_queue_p95_ms', 'stream_mesh_queue_max_ms',
@@ -121,7 +138,14 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 11 ) { Add-Failure "Expected suite version 11, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 12 ) { Add-Failure "Expected suite version 12, found '$($report.suite_version)'" }
+if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
+$requiredScenarios = switch ( [string]$report.benchmark_mode )
+{
+	'GpuOnly' { $gpuRequiredScenarios; break }
+	'CpuOnly' { $cpuRequiredScenarios; break }
+	default { $fullRequiredScenarios }
+}
 if ( $report.suite_complete -ne $true ) { Add-Failure 'Latest run is marked incomplete' }
 foreach ( $property in @(
 	'configuration_id', 'major_outlier_threshold_percent', 'automatic_reproduction', 'reproduction_of_run_id',
@@ -193,6 +217,17 @@ foreach ( $scenario in $scenarios )
 		if ( $scenario.gpu_terrain_depth_prepass -ne $true ) { Add-Failure "$context did not attach a depth prepass" }
 		if ( [int]$scenario.gpu_terrain_depth_command_lists -le 0 -or [int]$scenario.gpu_terrain_opaque_command_lists -le 0 ) { Add-Failure "$context did not attach bounded depth and opaque command lists" }
 		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
+	}
+	elseif ( $scenario.scenario -in @('gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming') )
+	{
+		if ( $scenario.gpu_phase3b_available -ne $true ) { Add-Failure "$context has no Phase 3B movement proof result" }
+		if ( $scenario.gpu_phase3b_passed -ne $true ) { Add-Failure "$context Phase 3B movement proof failed: $($scenario.gpu_phase3b_failure)" }
+		if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no persistent GPU terrain diagnostics" }
+		if ( [long]$scenario.gpu_terrain_resident_blocks -ne [long]$scenario.gpu_terrain_desired_blocks ) { Add-Failure "$context did not publish every desired block" }
+		if ( [long]$scenario.gpu_terrain_pending_request_count -ne 0 -or [long]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending GPU work" }
+		if ( $scenario.gpu_terrain_queues_bounded -ne $true ) { Add-Failure "$context exceeded a bounded GPU queue" }
+		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
+		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
 	}
 	elseif ( $scenario.scenario -like 'gpu_*' )
 	{

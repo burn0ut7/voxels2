@@ -3,10 +3,12 @@ internal sealed class VoxelGpuResidentTable
 	private readonly ResidentEntry[] _entries;
 	private readonly Stack<int> _freeSlots;
 	private readonly Dictionary<VoxelVisualBlockKey, int> _slotsByKey = new();
+	private readonly object _sync = new();
 
 	public int Capacity => _entries.Length;
-	public int Count => _slotsByKey.Count;
-	public int PublishedCount => _entries.Count( entry => entry.Published );
+	public int Count { get { lock ( _sync ) return _slotsByKey.Count; } }
+	public int PublishedCount { get { lock ( _sync ) return _entries.Count( entry => entry.Published ); } }
+	public bool ContainsKey( VoxelVisualBlockKey key ) { lock ( _sync ) return _slotsByKey.ContainsKey( key ); }
 
 	public VoxelGpuResidentTable( int capacity )
 	{
@@ -18,52 +20,66 @@ internal sealed class VoxelGpuResidentTable
 
 	public bool TryReserve( VoxelVisualBlockKey key, uint generation, out int slot )
 	{
-		if ( _slotsByKey.TryGetValue( key, out slot ) )
+		lock ( _sync )
 		{
-			return generation > _entries[slot].Generation;
+			if ( _slotsByKey.TryGetValue( key, out slot ) )
+			{
+				return generation > _entries[slot].Generation;
+			}
+			if ( _freeSlots.Count == 0 ) return false;
+			slot = _freeSlots.Pop();
+			_slotsByKey.Add( key, slot );
+			_entries[slot] = new ResidentEntry( key, generation, default, default, false );
+			return true;
 		}
-		if ( _freeSlots.Count == 0 ) return false;
-		slot = _freeSlots.Pop();
-		_slotsByKey.Add( key, slot );
-		_entries[slot] = new ResidentEntry( key, generation, default, default, false );
-		return true;
 	}
 
 	public bool TryPublish( int slot, VoxelVisualBlockKey key, uint generation, VoxelGpuAllocationHandle allocation, VoxelGpuResidentDescriptor descriptor, out VoxelGpuAllocationHandle replaced )
 	{
-		replaced = default;
-		if ( (uint)slot >= (uint)_entries.Length ) return false;
-		var entry = _entries[slot];
-		if ( entry.Key != key || generation < entry.Generation ) return false;
-		if ( entry.Published ) replaced = entry.Allocation;
-		_entries[slot] = new ResidentEntry( key, generation, allocation, descriptor, true );
-		return true;
+		lock ( _sync )
+		{
+			replaced = default;
+			if ( (uint)slot >= (uint)_entries.Length ) return false;
+			var entry = _entries[slot];
+			if ( entry.Key != key || generation < entry.Generation ) return false;
+			if ( entry.Published ) replaced = entry.Allocation;
+			_entries[slot] = new ResidentEntry( key, generation, allocation, descriptor, true );
+			return true;
+		}
 	}
 
 	public bool TryRemove( VoxelVisualBlockKey key, out VoxelGpuAllocationHandle allocation )
 	{
-		allocation = default;
-		if ( !_slotsByKey.Remove( key, out var slot ) ) return false;
-		var entry = _entries[slot];
-		if ( entry.Published ) allocation = entry.Allocation;
-		_entries[slot] = default;
-		_freeSlots.Push( slot );
-		return true;
+		lock ( _sync )
+		{
+			allocation = default;
+			if ( !_slotsByKey.Remove( key, out var slot ) ) return false;
+			var entry = _entries[slot];
+			if ( entry.Published ) allocation = entry.Allocation;
+			_entries[slot] = default;
+			_freeSlots.Push( slot );
+			return true;
+		}
 	}
 
 	public void CancelUnpublishedReservation( VoxelVisualBlockKey key )
 	{
-		if ( !_slotsByKey.TryGetValue( key, out var slot ) || _entries[slot].Published ) return;
-		_slotsByKey.Remove( key );
-		_entries[slot] = default;
-		_freeSlots.Push( slot );
+		lock ( _sync )
+		{
+			if ( !_slotsByKey.TryGetValue( key, out var slot ) || _entries[slot].Published ) return;
+			_slotsByKey.Remove( key );
+			_entries[slot] = default;
+			_freeSlots.Push( slot );
+		}
 	}
 
 	public IEnumerable<(int Slot, ResidentEntry Entry)> PublishedEntries()
 	{
-		for ( var slot = 0; slot < _entries.Length; slot++ )
+		ResidentEntry[] snapshot;
+		lock ( _sync ) snapshot = _entries.ToArray();
+		for ( var slot = 0; slot < snapshot.Length; slot++ )
 		{
-			if ( _entries[slot].Published ) yield return (slot, _entries[slot]);
+			if ( snapshot[slot].Published ) yield return (slot, snapshot[slot]);
 		}
 	}
 

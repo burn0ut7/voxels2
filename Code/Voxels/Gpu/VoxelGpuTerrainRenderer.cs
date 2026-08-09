@@ -14,7 +14,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private readonly Material _material;
 	private int _attachedDepthCommandListCount;
 	private int _attachedOpaqueCommandListCount;
-	private bool _dirty = true;
+	private int _dirty = 1;
 	private bool _disposed;
 
 	public bool UsesProductionLighting => true;
@@ -40,26 +40,32 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_opaqueCommandLists = Enumerable.Range( 0, commandListCapacity )
 			.Select( index => new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Opaque Multi Draw {index}" ) )
 			.ToArray();
+		_attributes.Set( "TerrainResidents", _residentBuffer );
+		_drawArguments.SetData( new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity], 0 );
+		for ( var index = 0; index < commandListCapacity; index++ )
+		{
+			var offset = index * MaximumCommandsPerSubmission;
+			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, residents.Capacity - offset );
+			BuildAndAttachCommandList( _depthCommandLists[index], offset, commandCount, Sandbox.Rendering.Stage.AfterDepthPrepass );
+			BuildAndAttachCommandList( _opaqueCommandLists[index], offset, commandCount, Sandbox.Rendering.Stage.AfterOpaque );
+		}
+		_attachedDepthCommandListCount = commandListCapacity;
+		_attachedOpaqueCommandListCount = commandListCapacity;
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
 	}
 
-	public void MarkDirty() => _dirty = true;
+	public void MarkDirty() => System.Threading.Interlocked.Exchange( ref _dirty, 1 );
 
 	public override void RenderSceneObject()
 	{
 		if ( _disposed ) return;
-		if ( _dirty ) Rebuild();
+		if ( System.Threading.Interlocked.Exchange( ref _dirty, 0 ) != 0 ) Rebuild();
 	}
 
 	private void Rebuild()
 	{
-		_dirty = false;
-		for ( var index = 0; index < _attachedDepthCommandListCount; index++ ) _camera.RemoveCommandList( _depthCommandLists[index] );
-		for ( var index = 0; index < _attachedOpaqueCommandListCount; index++ ) _camera.RemoveCommandList( _opaqueCommandLists[index] );
-		_attachedDepthCommandListCount = 0;
-		_attachedOpaqueCommandListCount = 0;
 		var descriptorData = new VoxelGpuResidentDescriptor[_residents.Capacity];
-		var arguments = new List<GpuBuffer.IndirectDrawIndexedArguments>( _residents.Count );
+		var arguments = new List<GpuBuffer.IndirectDrawIndexedArguments>( _residents.Capacity );
 		var frustum = _camera.GetFrustum();
 		foreach ( var (slot, entry) in _residents.PublishedEntries() )
 		{
@@ -79,21 +85,11 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			} );
 		}
 
+		var visibleCommandCount = arguments.Count;
+		while ( arguments.Count < _residents.Capacity ) arguments.Add( default );
 		_residentBuffer.SetData( descriptorData );
-		_diagnostics.VisibleDrawCommands = arguments.Count;
-		if ( arguments.Count == 0 )
-		{
-			return;
-		}
-
+		_diagnostics.VisibleDrawCommands = visibleCommandCount;
 		_drawArguments.SetData( arguments, 0 );
-		_attributes.Set( "TerrainResidents", _residentBuffer );
-		for ( var offset = 0; offset < arguments.Count; offset += MaximumCommandsPerSubmission )
-		{
-			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, arguments.Count - offset );
-			BuildAndAttachCommandList( _depthCommandLists[_attachedDepthCommandListCount++], offset, commandCount, Sandbox.Rendering.Stage.AfterDepthPrepass );
-			BuildAndAttachCommandList( _opaqueCommandLists[_attachedOpaqueCommandListCount++], offset, commandCount, Sandbox.Rendering.Stage.AfterOpaque );
-		}
 	}
 
 	private void BuildAndAttachCommandList( Sandbox.Rendering.CommandList commandList, int offset, uint commandCount, Sandbox.Rendering.Stage stage )

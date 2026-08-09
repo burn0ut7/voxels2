@@ -130,10 +130,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public VoxelVisualBackendMode VisualBackend { get; set; } = VoxelVisualBackendMode.CpuChunks;
 
 	[Property, Group( "Rendering" ), Range( 65536, 16777216 )]
-	public int GpuVertexPoolCapacity { get; set; } = 2097152;
+	public int GpuVertexPoolCapacity { get; set; } = 8388608;
 
 	[Property, Group( "Rendering" ), Range( 196608, 50331648 )]
-	public int GpuIndexPoolCapacity { get; set; } = 12582912;
+	public int GpuIndexPoolCapacity { get; set; } = 50331648;
 
 	[Property, Group( "Rendering" ), Range( 0, 1 )]
 	public int GpuTerrainRuleVersion { get; set; }
@@ -194,7 +194,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal VoxelGpuTransvoxelProofResult LastGpuTransvoxelProofResult => _lastGpuTransvoxelProofResult;
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
-	public bool IsTerrainSettled => AreDesiredChunksLoaded() && _chunkStreamingGenerationQueue.Count == 0 &&
+	public bool IsTerrainSettled => (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod || AreDesiredChunksLoaded()) && _chunkStreamingGenerationQueue.Count == 0 &&
 		(Application.IsDedicatedServer || (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod
 			? _gpuTerrainBackend?.IsSettled == true
 			: _cpuChunkStates.Count == DesiredChunkCount && ActiveChunkGameObjectCount == DesiredChunkCount)) &&
@@ -286,7 +286,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		if ( _worldRegenerationRequested && !_worldGenerationPending )
 		{
-			GenerateWorld();
+			if ( VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ) GenerateGpuTerrainWorld();
+			else GenerateWorld();
 		}
 		UpdateWorldGeneration();
 		UpdatePlayerSafety();
@@ -295,6 +296,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			return;
 		}
 		if ( VisualBackend == VoxelVisualBackendMode.CpuChunks ) UpdateChunkStreaming();
+		else UpdateGpuChunkStreaming();
 		UpdateCpuChunkWorld();
 		UpdateCpuCollisionWorld();
 		UpdatePlayerSafety();
@@ -338,6 +340,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	public void GenerateWorld()
 	{
+		if ( VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod )
+		{
+			GenerateGpuTerrainWorld();
+			return;
+		}
 		CountCall( ref _callWorldGenerationRequests );
 		if ( _worldGenerationPending )
 		{
@@ -398,6 +405,29 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		Log.Info( $"Voxel CPU SDF generation scheduled: chunks={coordinates.Count:N0}, workers={workerCount:N0}, authoritative=CPU." );
+	}
+
+	internal void GenerateGpuTerrainWorld()
+	{
+		CountCall( ref _callWorldGenerationRequests );
+		_generationConfiguration = CaptureWorldConfiguration();
+		_worldGenerationPending = false;
+		_worldRegenerationRequested = false;
+		_worldGenerationTasks.Clear();
+		DisposeCpuVisualWorld();
+		DisposeGpuTerrainBackend();
+		ClearChunkColliders();
+		ClearChunkGameObjects();
+		lock ( _sdfLock ) _chunks.Clear();
+		_initialSdfGenerationMilliseconds.Clear();
+		_chunkStreamingGenerationQueue.Clear();
+		_chunkStreamingQueuedCoordinates.Clear();
+		_chunkStreamingRequestTimestamps.Clear();
+		_lastChunkStreamingInterestTimestamp = 0;
+		_desiredChunkCoordinates.Clear();
+		var observers = GetStreamingObserverChunks();
+		PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
+		StartGpuTerrainWorld();
 	}
 
 	private void UpdateWorldGeneration()
@@ -1534,6 +1564,26 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		PumpChunkStreamingGenerationQueue();
+	}
+
+	private void UpdateGpuChunkStreaming()
+	{
+		if ( _gpuTerrainBackend is null ) return;
+		if ( _lastChunkStreamingInterestTimestamp != 0 &&
+			System.Diagnostics.Stopwatch.GetElapsedTime( _lastChunkStreamingInterestTimestamp ).TotalSeconds < 0.1 ) return;
+
+		_lastChunkStreamingInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		var observers = GetStreamingObserverChunks();
+		var desired = new HashSet<Vector3Int>();
+		PopulateDesiredChunkCoordinates( observers, desired );
+		var desiredChanged = !_desiredChunkCoordinates.SetEquals( desired );
+		var previousDesiredCount = _desiredChunkCoordinates.Count;
+		_desiredChunkCoordinates.Clear();
+		_desiredChunkCoordinates.UnionWith( desired );
+		var ordered = desired.ToList();
+		ordered.Sort( (left, right) => GetStreamingPriority( left, observers ).CompareTo( GetStreamingPriority( right, observers ) ) );
+		_gpuTerrainBackend.UpdateDesiredSet( ordered, GpuTerrainRuleVersion );
+		if ( desiredChanged ) Log.Info( $"Voxel GPU fixed-LOD streaming updated: observers={observers.Count:N0}, desired={desired.Count:N0}, previous={previousDesiredCount:N0}, boundedResidentCapacity=backend." );
 	}
 
 	private void RefreshChunkStreamingInterests()
