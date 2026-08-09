@@ -91,6 +91,9 @@ public sealed class VoxelTerrainBenchmark : Component
 	private int _liveConfigurationChunkRadius;
 	private VoxelVisualBackendMode _originalVisualBackend;
 	private int _originalGpuTerrainRuleVersion;
+	private bool _originalGpuClipboxLodEnabled;
+	private int _originalGpuClipboxLodLevels;
+	private int _originalGpuClipboxRadius;
 	private bool _worldSettingsCaptured;
 	private int _gpuLifecycleScenarioIndex;
 	private VoxelGpuPhase2BProofResult _pendingGpuPhase2BProof;
@@ -564,7 +567,14 @@ public sealed class VoxelTerrainBenchmark : Component
 			_originalChunkRadius = _manager.ChunkRadius;
 			_originalVisualBackend = _manager.VisualBackend;
 			_originalGpuTerrainRuleVersion = _manager.GpuTerrainRuleVersion;
+			_originalGpuClipboxLodEnabled = _manager.GpuClipboxLodEnabled;
+			_originalGpuClipboxLodLevels = _manager.GpuClipboxLodLevels;
+			_originalGpuClipboxRadius = _manager.GpuClipboxRadius;
 			_worldSettingsCaptured = true;
+			// The authoritative GPU suite measures the fixed-LOD backend. Clipbox
+			// LOD is an opt-in phase-four path and would change the resident-count
+			// contract for every fixed-LOD scenario.
+			if ( Mode != VoxelTerrainBenchmarkMode.CpuOnly ) _manager.GpuClipboxLodEnabled = false;
 		}
 		if ( Mode != VoxelTerrainBenchmarkMode.GpuOnly && _manager.VisualBackend != VoxelVisualBackendMode.CpuChunks )
 		{
@@ -1152,10 +1162,16 @@ public sealed class VoxelTerrainBenchmark : Component
 		_worldSettingsCaptured = false;
 		var changed = _manager.ChunkRadius != _originalChunkRadius ||
 			_manager.VisualBackend != _originalVisualBackend ||
-			_manager.GpuTerrainRuleVersion != _originalGpuTerrainRuleVersion;
+			_manager.GpuTerrainRuleVersion != _originalGpuTerrainRuleVersion ||
+			_manager.GpuClipboxLodEnabled != _originalGpuClipboxLodEnabled ||
+			_manager.GpuClipboxLodLevels != _originalGpuClipboxLodLevels ||
+			_manager.GpuClipboxRadius != _originalGpuClipboxRadius;
 		_manager.ChunkRadius = _originalChunkRadius;
 		_manager.VisualBackend = _originalVisualBackend;
 		_manager.GpuTerrainRuleVersion = _originalGpuTerrainRuleVersion;
+		_manager.GpuClipboxLodEnabled = _originalGpuClipboxLodEnabled;
+		_manager.GpuClipboxLodLevels = _originalGpuClipboxLodLevels;
+		_manager.GpuClipboxRadius = _originalGpuClipboxRadius;
 		if ( changed ) _manager.GenerateWorld();
 	}
 
