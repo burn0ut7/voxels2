@@ -712,7 +712,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			var clipboxConfig = GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox ? GpuClipboxConfig : (VoxelClipboxConfig?)null;
 			var clipboxResidentCapacity = clipboxConfig.HasValue
-				? checked( clipboxConfig.Value.StableRegularSlotCount + clipboxConfig.Value.StableTransitionSlotCount )
+				// A moving clipbox retains the committed rings while the replacement rings and
+				// their transition seams are generated. Reserve both generations explicitly.
+				? checked( 2 * (clipboxConfig.Value.StableRegularSlotCount + clipboxConfig.Value.StableTransitionSlotCount) )
 				: 0;
 			var residentCapacity = checked( System.Math.Max( DesiredChunkCount, clipboxResidentCapacity ) + GpuStreamingStagingResidentCapacity );
 			_gpuTerrainBackend = new VoxelGpuTerrainBackend(
