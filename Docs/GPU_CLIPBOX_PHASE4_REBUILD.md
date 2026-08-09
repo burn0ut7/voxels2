@@ -68,7 +68,7 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 | 4R-5 transition ownership and residency | Verified; stable seam slots, fine-side ownership, generation dependency metadata, diagnostics, proof, editor visualization, and clean suite v20 runtime gate passed |
 | 4R-6 Transvoxel golden reference and GPU proof | Verified; pinned official transition tables, CPU reference, six orientations, all 512 cases, winding, scale, fixtures, gradient normals, boundary checks, live GPU case proof, and production transition runtime passed |
 | 4R-7 production GPU transition pipeline | Verified on the RTX 5090 reference machine in clean suite v20 run `20260809-101717`; bounded GPU count/emission, exact persistent allocation, shared indirect rendering, zero production geometry readback, and zero CPU transition SDF evaluations |
-| 4R-8 coherent publication and stability | Verified in clean suite v20; exact desired-resident settlement, stale publication rejection, bounded queues, regular LOD gates, and actual-player clipbox oscillation passed |
+| 4R-8 coherent publication and stability | Verified in clean suite v20; exact desired-resident settlement, stale publication rejection, bounded queues, regular LOD gates, actual-player clipbox oscillation, and the built-in structured diagnostics surface passed |
 | 4R-9 performance/adoption campaign | Not started; requires the complete suite on the RTX 5090 and a representative mid-range GPU |
 
 Do not begin Phase 5 editing until every Phase 4 gate passes.
@@ -1470,6 +1470,8 @@ For any frame over 16.67, 33, or 50 ms, preserve a bounded history containing:
 - unaccounted frame time.
 
 Do not synchronously print a large hitch trace.
+
+The runtime implementation exposes this report through `VoxelManager.GpuTerrainStructuredDebugReport`. It is cached at planned and committed revisions, bounded to 32 hitch entries, and persisted with each GPU clipbox scenario in the JSON, JSONL, CSV, Markdown, and HTML benchmark corpus. Values the engine does not expose as measured timings or classifications remain `null`; they are never synthesized.
 
 ---
 

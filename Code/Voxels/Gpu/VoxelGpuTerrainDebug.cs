@@ -39,4 +39,9 @@ internal readonly record struct VoxelGpuClipboxDebugTransition(
 	VoxelGpuDebugBlockState State,
 	uint FineGeneration,
 	uint CoarseGeneration,
-	bool DependenciesValid );
+	bool DependenciesValid,
+	int VertexOffset,
+	int VertexCapacity,
+	int IndexOffset,
+	int IndexCapacity,
+	uint IndexCount );

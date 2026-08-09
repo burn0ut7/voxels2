@@ -254,6 +254,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, ReadOnly, Group( "Diagnostics" )]
 	public string GpuTerrainLiveDiagnostics => _gpuTerrainLiveDiagnostics;
 
+	[Property, ReadOnly, Group( "Diagnostics" )]
+	public string GpuTerrainStructuredDebugReport => _gpuTerrainBackend?.StructuredDebugReportJson ?? "{}";
+
 	[Property, Group( "Diagnostics" ), Range( 0, MaximumDetailedChunkLogs )]
 	public int DetailedChunkLogLimit { get; set; } = 64;
 
@@ -1445,7 +1448,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 						_ => Color.White
 					};
 					Gizmo.Draw.LineBBox( bounds );
-					if ( GpuClipboxDebugLabels ) Gizmo.Draw.Text( $"T{transition.FineLod}->{transition.CoarseLod} {transition.Face} owner={transition.StableSlotId} gen={transition.FineGeneration}/{transition.CoarseGeneration} dep={transition.DependenciesValid}", new Transform( bounds.Center ) );
+					if ( GpuClipboxDebugLabels ) Gizmo.Draw.Text( $"T{transition.FineLod}->{transition.CoarseLod} {transition.Face} owner={transition.StableSlotId} gen={transition.FineGeneration}/{transition.CoarseGeneration} dep={transition.DependenciesValid}\nmesh=V{transition.VertexOffset}+{transition.VertexCapacity}/I{transition.IndexOffset}+{transition.IndexCapacity} idx={transition.IndexCount}", new Transform( bounds.Center ) );
 				}
 			}
 		}

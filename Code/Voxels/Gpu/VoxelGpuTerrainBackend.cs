@@ -64,6 +64,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private bool _clipboxRevisionPending;
 	private int _retireUndesiredRequested;
 	private int _worstPublishedRank = -1;
+	private readonly long _createdTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+	private long _frameCounter;
+	private long _clipboxRevisionPlannedTimestamp;
+	private string _structuredDebugReportJson = "{}";
+	private readonly List<VoxelGpuHitchTrace> _hitchTrace = new( 32 );
+	private readonly long[] _levelCountBatches = System.Array.Empty<long>();
+	private readonly long[] _levelEmitBatches = System.Array.Empty<long>();
+	private readonly long[] _levelLastUpdateFrame = System.Array.Empty<long>();
+	private readonly long[] _levelUpdateCount = System.Array.Empty<long>();
 
 	public bool IsSettled => !_clipboxRevisionPending && IsStreamingWorkIdle && HasExactlyDesiredResidents();
 	public bool IsCapacityLimited => BlockedRequestCount > 0;
@@ -93,6 +102,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public bool IsProcessingEnabled => _processingEnabled;
 	public int DesiredBlockCount => DesiredCount;
 	public bool UsesRegularClipbox => _clipboxPlanner is not null;
+	public string StructuredDebugReportJson => _structuredDebugReportJson;
 
 	public VoxelGpuTerrainBackend(
 		SceneWorld world,
@@ -113,6 +123,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	{
 		_capabilities = VoxelGpuCapabilities.Detect();
 		if ( !_capabilities.Available ) throw new System.InvalidOperationException( _capabilities.Failure );
+		var levelCount = clipboxConfig?.LevelCount ?? 0;
+		_levelCountBatches = new long[levelCount];
+		_levelEmitBatches = new long[levelCount];
+		_levelLastUpdateFrame = new long[levelCount];
+		_levelUpdateCount = new long[levelCount];
 		VoxelGpuContractValidation.AssertLayouts();
 		_chunkSize = chunkSize;
 		_voxelSize = voxelSize;
@@ -205,6 +220,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_clipboxRevisionPending = true;
 		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		Log.Info( $"Voxel GPU transition scheduling: active={_clipboxTransitions.ActiveCount}, desired={TransitionDesiredCount}, dependenciesValid={_clipboxTransitions.DependenciesValid}, dependencyMismatches={_clipboxTransitions.DependencyMismatchCount}, schedulerPending={_transitionScheduler.PendingCount}." );
+		_clipboxRevisionPlannedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		RefreshStructuredDebugReport( "planned" );
 		return true;
 	}
 
@@ -378,7 +395,21 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		{
 			if ( !entry.Active ) continue;
 			var state = !entry.DependenciesValid ? VoxelGpuDebugBlockState.Deferred : entry.Pending ? VoxelGpuDebugBlockState.Pending : VoxelGpuDebugBlockState.Resident;
-			destination.Add( new VoxelGpuClipboxDebugTransition( entry.FineCoordinate, entry.CoarseCoordinate, entry.FineLevel, entry.CoarseLevel, entry.Face, entry.StableSlotId, state, entry.Key.FineGeneration, entry.Key.CoarseGeneration, entry.DependenciesValid ) );
+			var vertexOffset = 0;
+			var vertexCapacity = 0;
+			var indexOffset = 0;
+			var indexCapacity = 0;
+			var indexCount = 0u;
+			var transitionKey = VoxelClipboxTransitionPlanner.GetVisualKey( _clipboxPlanner.DesiredTransitions[entry.StableSlotId] );
+			if ( _residents.TryGetPublished( transitionKey, out var resident ) )
+			{
+				vertexOffset = checked( (int)resident.Descriptor.VertexOffset );
+				vertexCapacity = resident.Allocation.Vertices.Count;
+				indexOffset = checked( (int)resident.Descriptor.IndexOffset );
+				indexCapacity = resident.Allocation.Indices.Count;
+				indexCount = resident.Descriptor.IndexCount;
+			}
+			destination.Add( new VoxelGpuClipboxDebugTransition( entry.FineCoordinate, entry.CoarseCoordinate, entry.FineLevel, entry.CoarseLevel, entry.Face, entry.StableSlotId, state, entry.Key.FineGeneration, entry.Key.CoarseGeneration, entry.DependenciesValid, vertexOffset, vertexCapacity, indexOffset, indexCapacity, indexCount ) );
 		}
 		return destination.Count;
 	}
@@ -392,9 +423,163 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		return _diagnostics.Snapshot( _capabilities, _residents, _pool, _renderer );
 	}
 
+	private void RecordHitchTrace()
+	{
+		var frameMilliseconds = Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0;
+		if ( frameMilliseconds < 16.6667 ) return;
+		if ( _hitchTrace.Count >= 32 ) _hitchTrace.RemoveAt( 0 );
+		_hitchTrace.Add( new VoxelGpuHitchTrace(
+			_frameCounter,
+			frameMilliseconds,
+			Sandbox.Diagnostics.PerformanceStats.GpuFrametime,
+			_diagnostics.ClipboxRevision,
+			_clipboxRevisionPending,
+			_renderer.VisibleRegularCommandCount,
+			_renderer.VisibleTransitionCommandCount,
+			_diagnostics.PendingCountBatches,
+			_diagnostics.PendingEmitBatches,
+			(long)_pool.UsedVertices * 44 + (long)_pool.UsedIndices * sizeof( uint ),
+			_pool.CapacityBytes,
+			Sandbox.Diagnostics.PerformanceStats.GcPause,
+			Sandbox.Diagnostics.PerformanceStats.BytesAllocated ) );
+	}
+
+	private void RefreshStructuredDebugReport( string state )
+	{
+		var builder = new System.Text.StringBuilder( 8192 );
+		builder.Append( "{\"revision_event\":" );
+		AppendRevisionEventJson( builder, state );
+		builder.Append( ",\"levels\":[" );
+		if ( _clipboxPlanner is not null )
+		{
+			for ( var level = 0; level < _clipboxPlanner.DesiredLevels.Length; level++ )
+			{
+				if ( level != 0 ) builder.Append( ',' );
+				AppendLevelDiagnosticsJson( builder, level );
+			}
+		}
+		builder.Append( "],\"renderer\":{\"visible_regular_commands\":" );
+		builder.Append( _renderer.VisibleRegularCommandCount );
+		builder.Append( ",\"visible_transition_commands\":" ).Append( _renderer.VisibleTransitionCommandCount );
+		builder.Append( ",\"culled_regular\":" ).Append( System.Math.Max( 0, _renderer.PublishedRenderableRegularCommandCount - _renderer.VisibleRegularCommandCount ) );
+		builder.Append( ",\"culled_transition\":" ).Append( System.Math.Max( 0, _renderer.PublishedRenderableTransitionCommandCount - _renderer.VisibleTransitionCommandCount ) );
+		builder.Append( ",\"active_command_lists_per_pass\":{\"depth\":" ).Append( _renderer.DepthPrepassCommandListCount ).Append( ",\"opaque\":" ).Append( _renderer.OpaqueCommandListCount ).Append( "}" );
+		builder.Append( ",\"commands_per_submission\":" ).Append( _renderer.CommandsPerSubmission );
+		builder.Append( ",\"argument_upload_bytes\":" ).Append( _renderer.LastArgumentUploadBytes );
+		builder.Append( ",\"culling_cpu_ms\":" ).Append( Number( _renderer.LastCullingMilliseconds ) );
+		builder.Append( ",\"argument_build_cpu_ms\":" ).Append( Number( _renderer.LastArgumentBuildMilliseconds ) );
+		builder.Append( ",\"terrain_depth_gpu_ms\":null,\"terrain_opaque_gpu_ms\":null}" );
+		builder.Append( ",\"transition\":{\"desired_seam_slots\":" ).Append( _clipboxTransitions?.ActiveCount ?? 0 );
+		builder.Append( ",\"published_seam_slots\":" ).Append( _residents.PublishedCountFor( true ) );
+		builder.Append( ",\"pending_seam_slots\":" ).Append( _clipboxTransitions?.PendingCount ?? 0 );
+		builder.Append( ",\"transition_cells_classified\":null,\"active_transition_cells\":null" );
+		builder.Append( ",\"vertices\":" ).Append( _diagnostics.TransitionAllocatedVertexCount );
+		builder.Append( ",\"indices\":" ).Append( _diagnostics.TransitionAllocatedIndexCount );
+		builder.Append( ",\"count_gpu_ms\":null,\"emit_gpu_ms\":null" );
+		builder.Append( ",\"count_readback_latency_ms\":" ).Append( Number( _diagnostics.CountReadbackAverageMilliseconds ) );
+		builder.Append( ",\"generation_mismatch_rejects\":" ).Append( _diagnostics.TransitionStaleSchedulerRejections + _diagnostics.TransitionStaleDependencyRejections );
+		builder.Append( ",\"coherence_wait_ms\":" ).Append( state == "committed" && _clipboxRevisionPlannedTimestamp != 0 ? Number( System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds ) : "null" ).Append( "}" );
+		builder.Append( ",\"memory\":{\"regular_scratch_bytes\":" ).Append( _scratchRing.Sum( scratch => scratch.CapacityBytes ) );
+		builder.Append( ",\"transition_scratch_bytes\":" ).Append( _transitionScratch.CapacityBytes );
+		builder.Append( ",\"vertex_pool_used_bytes\":" ).Append( (long)_pool.UsedVertices * 44 );
+		builder.Append( ",\"vertex_pool_peak_bytes\":" ).Append( (long)_pool.PeakUsedVertices * 44 );
+		builder.Append( ",\"index_pool_used_bytes\":" ).Append( (long)_pool.UsedIndices * sizeof( uint ) );
+		builder.Append( ",\"index_pool_peak_bytes\":" ).Append( (long)_pool.PeakUsedIndices * sizeof( uint ) );
+		builder.Append( ",\"pool_capacity_bytes\":" ).Append( _pool.CapacityBytes );
+		builder.Append( ",\"current_regular_allocations\":" ).Append( _residents.PublishedCountFor( false ) );
+		builder.Append( ",\"pending_regular_allocations\":" ).Append( PendingRequestCount );
+		builder.Append( ",\"current_seam_allocations\":" ).Append( _residents.PublishedCountFor( true ) );
+		builder.Append( ",\"pending_seam_allocations\":" ).Append( PendingTransitionRequestCount );
+		builder.Append( ",\"retired_allocations\":" ).Append( _pool.DeferredAllocationCount );
+		builder.Append( ",\"free_range_count\":{\"vertex\":" ).Append( _pool.VertexFreeRangeCount ).Append( ",\"index\":" ).Append( _pool.IndexFreeRangeCount ).Append( "}" );
+		builder.Append( ",\"largest_free_range\":{\"vertex\":" ).Append( _pool.VertexLargestFree ).Append( ",\"index\":" ).Append( _pool.IndexLargestFree ).Append( "}" );
+		builder.Append( ",\"managed_allocation_bytes_per_sec\":null}" );
+		builder.Append( ",\"hitch_trace\":[" );
+		for ( var index = 0; index < _hitchTrace.Count; index++ )
+		{
+			if ( index != 0 ) builder.Append( ',' );
+			var hitch = _hitchTrace[index];
+			builder.Append( "{\"frame\":" ).Append( hitch.Frame ).Append( ",\"frame_ms\":" ).Append( Number( hitch.FrameMilliseconds ) ).Append( ",\"gpu_ms\":" ).Append( Number( hitch.GpuMilliseconds ) );
+			builder.Append( ",\"clipbox_revision\":" ).Append( hitch.ClipboxRevision ).Append( ",\"revision_pending\":" ).Append( hitch.RevisionPending.ToString().ToLowerInvariant() );
+			builder.Append( ",\"visible_regular\":" ).Append( hitch.VisibleRegularCommands ).Append( ",\"visible_transition\":" ).Append( hitch.VisibleTransitionCommands );
+			builder.Append( ",\"pending_count_batches\":" ).Append( hitch.PendingCountBatches ).Append( ",\"pending_emit_batches\":" ).Append( hitch.PendingEmitBatches );
+			builder.Append( ",\"pool_used_bytes\":" ).Append( hitch.PoolUsedBytes ).Append( ",\"pool_capacity_bytes\":" ).Append( hitch.PoolCapacityBytes );
+			builder.Append( ",\"gc_pause_ticks\":" ).Append( hitch.GcPauseTicks ).Append( ",\"allocated_bytes\":" ).Append( hitch.AllocatedBytes ).Append( "}" );
+		}
+		builder.Append( "]}" );
+		_structuredDebugReportJson = builder.ToString();
+		_diagnostics.StructuredDebugReportJson = _structuredDebugReportJson;
+	}
+
+	private void AppendRevisionEventJson( System.Text.StringBuilder builder, string state )
+	{
+		var revision = _clipboxPlanner?.Revision ?? _diagnostics.ClipboxRevision;
+		var observer = _clipboxPlanner?.ObserverBaseBlock ?? Vector3Int.Zero;
+		builder.Append( "{\"state\":\"" ).Append( state ).Append( "\",\"frame\":" ).Append( _frameCounter );
+		builder.Append( ",\"revision\":" ).Append( revision );
+		builder.Append( ",\"observer_base_block\":[" ).Append( observer.x ).Append( ',' ).Append( observer.y ).Append( ',' ).Append( observer.z ).Append( "]" );
+		builder.Append( ",\"level_origins\":[" );
+		if ( _clipboxPlanner is not null )
+		{
+			for ( var level = 0; level < _clipboxPlanner.DesiredLevels.Length; level++ )
+			{
+				if ( level != 0 ) builder.Append( ',' );
+				var origin = _clipboxPlanner.DesiredLevels[level].Origin;
+				builder.Append( '[' ).Append( origin.x ).Append( ',' ).Append( origin.y ).Append( ',' ).Append( origin.z ).Append( ']' );
+			}
+		}
+		builder.Append( "]" );
+		builder.Append( ",\"regular_active\":" ).Append( _clipboxPlanner?.ActiveRegularCount ?? 0 );
+		builder.Append( ",\"regular_changed\":" ).Append( _diagnostics.ClipboxChangedSlots );
+		builder.Append( ",\"regular_pending\":" ).Append( _diagnostics.ClipboxPendingRevisionCount );
+		builder.Append( ",\"seam_active\":" ).Append( _clipboxPlanner?.ActiveTransitionCount ?? 0 );
+		builder.Append( ",\"seam_changed\":" ).Append( _diagnostics.ClipboxTransitionChangedSlots );
+		builder.Append( ",\"seam_pending\":" ).Append( _diagnostics.ClipboxTransitionPendingSlots );
+		builder.Append( ",\"cancelled_stale\":" ).Append( _diagnostics.StalePublicationsRejected );
+		builder.Append( ",\"deferred_budget\":" ).Append( _diagnostics.CapacityDeferrals );
+		builder.Append( ",\"commit_latency_ms\":" ).Append( state == "committed" && _clipboxRevisionPlannedTimestamp != 0 ? Number( System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds ) : "null" ).Append( '}' );
+	}
+
+	private void AppendLevelDiagnosticsJson( System.Text.StringBuilder builder, int level )
+	{
+		var desired = _clipboxPlanner.DesiredLevels[level];
+		var currentSurface = 0;
+		var currentEmpty = 0;
+		var pending = 0;
+		var entering = 0;
+		var leaving = 0;
+		long meshBytes = 0;
+		var first = desired.StableSlotBase;
+		var end = first + desired.StableSlotCount;
+		for ( var slot = first; slot < end; slot++ )
+		{
+			var desiredAssignment = _clipboxPlanner.DesiredSlots[slot];
+			var currentAssignment = _clipboxPlanner.CurrentSlots[slot];
+			if ( desiredAssignment.Active && ( !currentAssignment.Active || currentAssignment.Key != desiredAssignment.Key ) ) entering++;
+			if ( currentAssignment.Active && ( !desiredAssignment.Active || currentAssignment.Key != desiredAssignment.Key ) ) leaving++;
+			if ( desiredAssignment.Active && !_residents.TryGetPublished( desiredAssignment.Key, out _ ) && ( IsPending( desiredAssignment.Key ) || IsBlocked( desiredAssignment.Key ) ) ) pending++;
+			if ( !currentAssignment.Active || !_residents.TryGetPublished( currentAssignment.Key, out var resident ) ) continue;
+			if ( resident.Descriptor.IndexCount == 0 ) currentEmpty++;
+			else currentSurface++;
+			meshBytes += (long)resident.Allocation.Vertices.Count * 44 + (long)resident.Allocation.Indices.Count * sizeof( uint );
+		}
+		var elapsedSeconds = System.Diagnostics.Stopwatch.GetElapsedTime( _createdTimestamp ).TotalSeconds;
+		var updatesPerSecond = elapsedSeconds <= 0.0 ? 0.0 : _levelUpdateCount[level] / elapsedSeconds;
+		var origin = desired.Origin;
+		builder.Append( "{\"level\":" ).Append( level ).Append( ",\"origin\":[" ).Append( origin.x ).Append( ',' ).Append( origin.y ).Append( ',' ).Append( origin.z ).Append( "]" );
+		builder.Append( ",\"sample_spacing\":" ).Append( desired.SampleSpacing ).Append( ",\"stable_slots\":" ).Append( desired.StableSlotCount ).Append( ",\"active_slots\":" ).Append( desired.ActiveCount );
+		builder.Append( ",\"current_surface\":" ).Append( currentSurface ).Append( ",\"current_empty\":" ).Append( currentEmpty ).Append( ",\"current_solid\":null,\"current_solid_available\":false" );
+		builder.Append( ",\"pending\":" ).Append( pending ).Append( ",\"entering\":" ).Append( entering ).Append( ",\"leaving\":" ).Append( leaving );
+		builder.Append( ",\"count_batches\":" ).Append( _levelCountBatches[level] ).Append( ",\"emit_batches\":" ).Append( _levelEmitBatches[level] ).Append( ",\"mesh_bytes\":" ).Append( meshBytes );
+		builder.Append( ",\"last_update_frame\":" ).Append( _levelLastUpdateFrame[level] ).Append( ",\"updates_per_second\":" ).Append( Number( updatesPerSecond ) ).Append( '}' );
+	}
+
+	private static string Number( double value ) => value.ToString( "0.###", System.Globalization.CultureInfo.InvariantCulture );
+
 	public override void RenderSceneObject()
 	{
 		if ( _disposed || !_processingEnabled ) return;
+		_frameCounter++;
 		var renderStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		try
 		{
@@ -411,6 +596,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			SubmitTransitionCountBatch();
 			LogProgress();
 			var renderMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( renderStart ).TotalMilliseconds;
+			RecordHitchTrace();
 			if ( renderMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowRenderLogCount ) <= 32 )
 				Log.Info( $"Voxel GPU terrain render tick: {renderMilliseconds:F2}ms, pendingCount={_scheduler.PendingCount}, pendingEmit={_publications.Count}, residents={_residents.PublishedCount}/{DesiredCount}." );
 		}
@@ -454,6 +640,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_clipboxPlanner.Commit();
 		_clipboxTransitions.Commit();
 		_clipboxRevisionPending = false;
+		for ( var level = 0; level < _levelUpdateCount.Length; level++ )
+		{
+			_levelUpdateCount[level]++;
+			_levelLastUpdateFrame[level] = _frameCounter;
+		}
 		_clipboxKeyScratch.Clear();
 		foreach ( var assignment in _clipboxPlanner.DesiredSlots ) if ( assignment.Active ) _clipboxKeyScratch.Add( assignment.Key );
 		UpdateDesiredKeys( _clipboxKeyScratch );
@@ -461,6 +652,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ClipboxPendingRevisionCount = 0;
 		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
+		RefreshStructuredDebugReport( "committed" );
+		Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
 	}
 
 	private void SubmitCountBatches()
@@ -504,12 +697,17 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 
 			batch.Count = scheduledCount;
+			var countLevelMask = 0;
+			for ( var index = 0; index < scheduledCount; index++ )
+				if ( (uint)batch.Requests[index].Key.Lod < (uint)_levelCountBatches.Length ) countLevelMask |= 1 << batch.Requests[index].Key.Lod;
 			if ( !_scratchRing[arenaIndex].TrySubmitCount( requests, scheduledCount, out var submissionMilliseconds ) )
 			{
 				batch.Count = 0;
 				throw new System.InvalidOperationException( $"scratch arena {arenaIndex} rejected a count batch while idle" );
 			}
 			_diagnostics.CountSubmissionMilliseconds += submissionMilliseconds;
+			for ( var level = 0; level < _levelCountBatches.Length; level++ )
+				if ( (countLevelMask & (1 << level)) != 0 ) _levelCountBatches[level]++;
 		}
 		UpdatePendingCountBatches();
 	}
@@ -739,6 +937,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		}
 		_diagnostics.EmitSubmissionMilliseconds += emitMilliseconds;
 		_diagnostics.PendingEmitBatches++;
+		var emitLevelMask = 0;
+		for ( var index = 0; index < batchCount; index++ )
+			if ( (uint)activeBatch.Requests[index].Key.Lod < (uint)_levelEmitBatches.Length ) emitLevelMask |= 1 << activeBatch.Requests[index].Key.Lod;
+		for ( var level = 0; level < _levelEmitBatches.Length; level++ )
+			if ( (emitLevelMask & (1 << level)) != 0 ) _levelEmitBatches[level]++;
 		var publicationResidents = _publicationScratch[arenaIndex];
 		System.Array.Copy( pending, publicationResidents, pendingCount );
 		var requestedTimestamp = activeBatch.Requests[0].RequestedTimestamp;

@@ -29,6 +29,13 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	private int _uploadedArgumentCount;
 	private bool _renderingEnabled = true;
 	private bool _disposed;
+	private int _publishedRenderableRegularCommandCount;
+	private int _publishedRenderableTransitionCommandCount;
+	private int _visibleRegularCommandCount;
+	private int _visibleTransitionCommandCount;
+	private double _lastCullingMilliseconds;
+	private double _lastArgumentBuildMilliseconds;
+	private long _lastArgumentUploadBytes;
 
 	public bool UsesProductionLighting => true;
 	public bool UsesDepthPrepass => true;
@@ -38,6 +45,13 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	public long ArgumentUploadCount => _argumentUploadCount;
 	public bool IsTerrainRenderingEnabled => _renderingEnabled;
 	public int CommandsPerSubmission => _commandsPerSubmission;
+	public int PublishedRenderableRegularCommandCount => _publishedRenderableRegularCommandCount;
+	public int PublishedRenderableTransitionCommandCount => _publishedRenderableTransitionCommandCount;
+	public int VisibleRegularCommandCount => _visibleRegularCommandCount;
+	public int VisibleTransitionCommandCount => _visibleTransitionCommandCount;
+	public double LastCullingMilliseconds => _lastCullingMilliseconds;
+	public double LastArgumentBuildMilliseconds => _lastArgumentBuildMilliseconds;
+	public long LastArgumentUploadBytes => _lastArgumentUploadBytes;
 
 	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, int commandsPerSubmission, float cullingPaddingWorld )
 		: base( world )
@@ -103,15 +117,20 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 
 	private void Rebuild()
 	{
+		var rebuildStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		_cullingRebuildCount++;
 		var publishedCount = _residents.CopyPublishedEntries( _residentSnapshot );
 		var frustum = _camera.GetFrustum();
 		var visibleCommandCount = 0;
 		var transitionVisibleCommandCount = 0;
+		var publishedRenderableRegularCount = 0;
+		var publishedRenderableTransitionCount = 0;
 		for ( var index = 0; index < publishedCount; index++ )
 		{
 			var entry = _residentSnapshot[index];
 			if ( entry.Descriptor.IndexCount == 0 ) continue;
+			if ( entry.Key.IsTransition ) publishedRenderableTransitionCount++;
+			else publishedRenderableRegularCount++;
 			var boundsMin = new Vector3( entry.Descriptor.BoundsMin.x, entry.Descriptor.BoundsMin.y, entry.Descriptor.BoundsMin.z );
 			var boundsMax = new Vector3( entry.Descriptor.BoundsMax.x, entry.Descriptor.BoundsMax.y, entry.Descriptor.BoundsMax.z );
 			var padding = Vector3.One * (_cullingPaddingWorld * 0.25f);
@@ -127,11 +146,17 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 				FirstInstance = 0
 			};
 		}
+		_lastCullingMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( rebuildStart ).TotalMilliseconds;
 
 		var visibleUploadCount = visibleCommandCount == 0 ? 0 :
 			System.Math.Min( _argumentData.Length, ((visibleCommandCount + _commandsPerSubmission - 1) / _commandsPerSubmission) * _commandsPerSubmission );
 		var uploadCount = System.Math.Max( visibleUploadCount, _attachedDepthCommandListCount * _commandsPerSubmission );
 		if ( uploadCount > visibleCommandCount ) System.Array.Clear( _argumentData, visibleCommandCount, uploadCount - visibleCommandCount );
+		_lastArgumentBuildMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( rebuildStart ).TotalMilliseconds - _lastCullingMilliseconds;
+		_publishedRenderableRegularCommandCount = publishedRenderableRegularCount;
+		_publishedRenderableTransitionCommandCount = publishedRenderableTransitionCount;
+		_visibleRegularCommandCount = visibleCommandCount - transitionVisibleCommandCount;
+		_visibleTransitionCommandCount = transitionVisibleCommandCount;
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
 		_diagnostics.TransitionVisibleDrawCommands = transitionVisibleCommandCount;
 		if ( ArgumentsChanged( uploadCount ) )
@@ -140,6 +165,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			if ( uploadCount > 0 ) System.Array.Copy( _argumentData, _uploadedArgumentData, uploadCount );
 			_uploadedArgumentCount = uploadCount;
 			_hasUploadedArguments = true;
+			_lastArgumentUploadBytes = (long)uploadCount * 20;
 			if ( uploadCount > 0 )
 			{
 				var argumentUploadStart = System.Diagnostics.Stopwatch.GetTimestamp();
