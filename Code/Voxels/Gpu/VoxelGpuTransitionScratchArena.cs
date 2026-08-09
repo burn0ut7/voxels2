@@ -76,7 +76,10 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		Graphics.ResourceBarrierTransition( _countResults, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_count.Attributes.Set( "BatchSize", count );
 		_emit.Attributes.Set( "BatchSize", count );
-		_count.Dispatch( (count + 63) / 64, 1, 1 );
+		// ComputeShader.Dispatch takes explicit thread counts and divides by the
+		// shader's [numthreads] declaration internally. Passing the group count
+		// here only evaluates the first one or two requests in a normal batch.
+		_count.Dispatch( count, 1, 1 );
 		Graphics.UavBarrier( _samples );
 		Graphics.UavBarrier( _countResults );
 		_readbackTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -114,7 +117,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		Graphics.ResourceBarrierTransition( _samples, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		_emit.Attributes.Set( "OutputVertices", pool.Vertices );
 		_emit.Attributes.Set( "OutputIndices", pool.Indices );
-		_emit.Dispatch( (_batchSize + 63) / 64, 1, 1 );
+		_emit.Dispatch( _batchSize, 1, 1 );
 		Graphics.UavBarrier( pool.Vertices );
 		Graphics.UavBarrier( pool.Indices );
 		submissionMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds;

@@ -31,7 +31,7 @@ internal sealed class VoxelGpuResidentTable
 			{
 				if ( !entry.Published || entry.Key.IsTransition != transitions ) continue;
 				count++;
-				if ( entry.Descriptor.IndexCount != 0 ) renderableCount++;
+				if ( entry.Renderable && entry.Descriptor.IndexCount != 0 ) renderableCount++;
 				vertexCount = checked( vertexCount + entry.Allocation.Vertices.Count );
 				indexCount = checked( indexCount + entry.Allocation.Indices.Count );
 			}
