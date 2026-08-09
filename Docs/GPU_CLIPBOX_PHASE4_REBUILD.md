@@ -1342,6 +1342,8 @@ stale/deferred = red
 transition = separate high-contrast palette
 ```
 
+When the authored world is not running, the Full clipbox gizmo reuses the authoritative planner to draw the editor preview and labels those desired blocks and seams as `Missing`/not resident. In play mode the same gizmo reads the live backend, including current state and persistent regular or transition mesh ranges; the preview never creates terrain or changes residency.
+
 Do not use debug visualization to alter terrain state.
 
 ---

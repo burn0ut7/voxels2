@@ -34,6 +34,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly List<Vector3Int> _gpuOrderedScratch = new();
 	private readonly List<VoxelGpuClipboxDebugBlock> _gpuClipboxDebugScratch = new( 2048 );
 	private readonly List<VoxelGpuClipboxDebugTransition> _gpuClipboxTransitionDebugScratch = new( 2048 );
+	private VoxelClipboxRuntimePlanner _editorClipboxDebugPlanner;
+	private VoxelClipboxConfig _editorClipboxDebugConfiguration;
+	private Vector3Int _editorClipboxDebugObserver;
 	private readonly Queue<Vector3Int> _chunkStreamingGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _chunkStreamingQueuedCoordinates = new();
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
@@ -1409,8 +1412,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	protected override void DrawGizmos()
 	{
 		base.DrawGizmos();
-		if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Off || _gpuTerrainBackend is null || !_gpuTerrainBackend.UsesRegularClipbox ) return;
-		var count = _gpuTerrainBackend.CopyClipboxDebugBlocks( _gpuClipboxDebugScratch );
+		if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Off || !TryPrepareClipboxDebugSnapshot( out var editorPreview ) ) return;
+		var count = _gpuTerrainBackend is not null
+			? _gpuTerrainBackend.CopyClipboxDebugBlocks( _gpuClipboxDebugScratch )
+			: CopyEditorClipboxDebugBlocks();
 		var drawCount = System.Math.Min( count, System.Math.Max( 1, GpuClipboxDebugMaxBlocks ) );
 		using ( Gizmo.Scope( "Voxel GPU Clipbox", GameObject.WorldTransform ) )
 		{
@@ -1423,7 +1428,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				var minimum = new Vector3( block.Coordinate.x * ChunkSize * scale * VoxelSize, block.Coordinate.y * ChunkSize * scale * VoxelSize, (block.Coordinate.z - 1) * ChunkSize * scale * VoxelSize );
 				var extent = ChunkSize * scale * VoxelSize;
 				var bounds = new BBox( minimum, minimum + Vector3.One * extent );
-				Gizmo.Draw.Color = GetClipboxDebugColor( block );
+				Gizmo.Draw.Color = GetClipboxDebugColor( block, editorPreview );
 				Gizmo.Draw.LineBBox( bounds );
 				if ( !GpuClipboxDebugLabels || GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Lod )
 				{
@@ -1432,11 +1437,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				}
 				var label = $"L{block.Lod} slot={block.StableSlotId} {block.State}";
 				if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full ) label += $"\ncoord={block.Coordinate} gen={block.Generation} mesh=V{block.VertexOffset}+{block.VertexCapacity}/I{block.IndexOffset}+{block.IndexCapacity} idx={block.IndexCount}";
+				if ( editorPreview ) label += "\neditor preview: not resident";
 				Gizmo.Draw.Text( label, new Transform( bounds.Center + Vector3.Up * extent * 0.05f ) );
 			}
 			if ( GpuClipboxDebugMode == VoxelGpuClipboxDebugMode.Full )
 			{
-				var transitionCount = _gpuTerrainBackend.CopyClipboxDebugTransitions( _gpuClipboxTransitionDebugScratch );
+				var transitionCount = _gpuTerrainBackend is not null
+					? _gpuTerrainBackend.CopyClipboxDebugTransitions( _gpuClipboxTransitionDebugScratch )
+					: CopyEditorClipboxDebugTransitions();
 				var transitionDrawCount = System.Math.Min( transitionCount, System.Math.Max( 1, GpuClipboxDebugMaxTransitions ) );
 				for ( var index = 0; index < transitionDrawCount; index++ )
 				{
@@ -1453,10 +1461,93 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 						_ => Color.White
 					};
 					Gizmo.Draw.LineBBox( bounds );
-					if ( GpuClipboxDebugLabels ) Gizmo.Draw.Text( $"T{transition.FineLod}->{transition.CoarseLod} {transition.Face} owner={transition.StableSlotId} gen={transition.FineGeneration}/{transition.CoarseGeneration} dep={transition.DependenciesValid}\nmesh=V{transition.VertexOffset}+{transition.VertexCapacity}/I{transition.IndexOffset}+{transition.IndexCapacity} idx={transition.IndexCount}", new Transform( bounds.Center ) );
+					if ( GpuClipboxDebugLabels )
+					{
+						var label = $"T{transition.FineLod}->{transition.CoarseLod} {transition.Face} owner={transition.StableSlotId} gen={transition.FineGeneration}/{transition.CoarseGeneration} dep={transition.DependenciesValid}\nmesh=V{transition.VertexOffset}+{transition.VertexCapacity}/I{transition.IndexOffset}+{transition.IndexCapacity} idx={transition.IndexCount}";
+						if ( editorPreview ) label += "\neditor preview: not resident";
+						Gizmo.Draw.Text( label, new Transform( bounds.Center ) );
+					}
 				}
 			}
 		}
+	}
+
+	private bool TryPrepareClipboxDebugSnapshot( out bool editorPreview )
+	{
+		editorPreview = false;
+		if ( _gpuTerrainBackend is not null ) return _gpuTerrainBackend.UsesRegularClipbox;
+		if ( Scene?.IsEditor != true || VisualBackend != VoxelVisualBackendMode.GpuPersistentFixedLod || GpuTerrainLodPolicy != VoxelGpuTerrainLodPolicy.RegularClipbox ) return false;
+
+		var configuration = GpuClipboxConfig;
+		if ( _editorClipboxDebugPlanner is null || !_editorClipboxDebugConfiguration.Equals( configuration ) )
+		{
+			_editorClipboxDebugConfiguration = configuration;
+			_editorClipboxDebugPlanner = new VoxelClipboxRuntimePlanner( configuration );
+			_editorClipboxDebugObserver = default;
+		}
+
+		var observer = GetGpuObserverCanonicalSample();
+		if ( !_editorClipboxDebugPlanner.HasCurrentPlan || observer != _editorClipboxDebugObserver )
+		{
+			_editorClipboxDebugPlanner.Update( observer );
+			_editorClipboxDebugPlanner.Commit();
+			_editorClipboxDebugObserver = observer;
+		}
+
+		editorPreview = true;
+		return true;
+	}
+
+	private int CopyEditorClipboxDebugBlocks()
+	{
+		_gpuClipboxDebugScratch.Clear();
+		if ( _editorClipboxDebugPlanner is null ) return 0;
+		foreach ( var assignment in _editorClipboxDebugPlanner.DesiredSlots )
+		{
+			if ( !assignment.Active ) continue;
+			_gpuClipboxDebugScratch.Add( new VoxelGpuClipboxDebugBlock(
+				assignment.Coordinate,
+				assignment.Lod,
+				assignment.StableSlotId,
+				VoxelGpuDebugBlockState.Missing,
+				0,
+				0,
+				0,
+				0,
+				0,
+				0,
+				Vector3.Zero,
+				Vector3.Zero,
+				Vector3.Zero ) );
+		}
+		return _gpuClipboxDebugScratch.Count;
+	}
+
+	private int CopyEditorClipboxDebugTransitions()
+	{
+		_gpuClipboxTransitionDebugScratch.Clear();
+		if ( _editorClipboxDebugPlanner is null ) return 0;
+		foreach ( var assignment in _editorClipboxDebugPlanner.DesiredTransitions )
+		{
+			if ( !assignment.Active ) continue;
+			_gpuClipboxTransitionDebugScratch.Add( new VoxelGpuClipboxDebugTransition(
+				assignment.FineCoordinate,
+				assignment.CoarseCoordinate,
+				assignment.FineLevel,
+				assignment.CoarseLevel,
+				assignment.Face,
+				assignment.StableSlotId,
+				VoxelGpuDebugBlockState.Missing,
+				0,
+				0,
+				true,
+				0,
+				0,
+				0,
+				0,
+				0 ) );
+		}
+		return _gpuClipboxTransitionDebugScratch.Count;
 	}
 
 	private static BBox GetTransitionDebugBounds( Vector3 minimum, float extent, float thickness, VoxelClipboxFaceDirection face ) => face switch
@@ -1470,13 +1561,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_ => new BBox( minimum, minimum + Vector3.One * extent )
 	};
 
-	private static Color GetClipboxDebugColor( VoxelGpuClipboxDebugBlock block )
+	private static Color GetClipboxDebugColor( VoxelGpuClipboxDebugBlock block, bool editorPreview )
 	{
+		if ( block.State == VoxelGpuDebugBlockState.Missing && !editorPreview ) return Color.White;
 		return block.State switch
 		{
 			VoxelGpuDebugBlockState.Pending => Color.Yellow,
 			VoxelGpuDebugBlockState.Deferred => Color.Red,
-			VoxelGpuDebugBlockState.Missing => Color.White,
 			_ => block.Lod switch
 			{
 				0 => Color.Cyan,
