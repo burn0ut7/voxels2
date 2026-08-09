@@ -198,7 +198,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				_activeBatches[arenaIndex] = batch;
 			}
 			if ( batch.Count != 0 || !_scratchRing[arenaIndex].IsIdle ) continue;
-			var scheduledCount = _scheduler.TakeBatch( VoxelGpuScratchArena.MaximumBatchSize, batch.Requests );
+			var batchCapacity = System.Math.Min( VoxelGpuScratchArena.MaximumBatchSize, batch.Requests.Length );
+			var scheduledCount = _scheduler.TakeBatch( batchCapacity, batch.Requests );
 			var requests = _requestScratch[arenaIndex];
 			var slots = batch.Slots;
 			for ( var index = 0; index < scheduledCount; index++ )

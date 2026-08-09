@@ -107,7 +107,7 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 				return false;
 			}
 			_state = ArenaState.CountSubmitted;
-			_batchSize = requests.Length;
+			_batchSize = count;
 		}
 
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();

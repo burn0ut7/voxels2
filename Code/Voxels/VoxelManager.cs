@@ -1624,13 +1624,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		if ( _gpuTerrainBackend is null ) return;
 		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		if ( _lastChunkStreamingInterestTimestamp != 0 &&
-			System.Diagnostics.Stopwatch.GetElapsedTime( _lastChunkStreamingInterestTimestamp ).TotalSeconds < 0.1 ) return;
-
 		_lastChunkStreamingInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		_gpuStreamingObservers.Clear();
 		PopulateStreamingObserverChunks( _gpuStreamingObservers );
 		var observersChanged = !_gpuStreamingObserversInitialized || !AreObserverChunksEqual( _gpuStreamingObservers );
+		// The observer is already quantized to chunk coordinates, so unchanged
+		// observers need no desired-set work. When a boundary is crossed, update
+		// in this frame rather than introducing a fixed streaming polling delay.
 		if ( !observersChanged ) return;
 		_gpuStreamingObserversInitialized = true;
 		_gpuPreviousStreamingObservers.Clear();

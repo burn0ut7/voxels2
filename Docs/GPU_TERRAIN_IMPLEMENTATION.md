@@ -189,12 +189,12 @@ If the current code already contains part of a later phase, preserve working cod
 
 | Phase | Required state |
 |---|---|
-| Phase 0 — Baseline and contracts | Maintain a reproducible CPU baseline and versioned request/report contracts. |
-| Phase 1 — Single-block regular-cell proof | Expected complete for conformance. Keep as a test harness. |
-| Phase 2A — Batched scratch proof | Expected complete. Keep as a batch/conformance test. |
-| **Phase 2B — Persistent fixed-LOD GPU backend** | **NEXT REQUIRED PHASE.** |
-| Phase 3A — Production render integration | After Phase 2B. |
-| Phase 3B — Fixed-LOD movement streaming | After Phase 3A. |
+| Phase 0 — Baseline and contracts | Complete. CPU baseline, versioned request/report contracts, and benchmark corpus are maintained. |
+| Phase 1 — Single-block regular-cell proof | Complete. The proof remains an opt-in conformance harness. |
+| Phase 2A — Batched scratch proof | Complete. The proof remains a batch/conformance harness. |
+| Phase 2B — Persistent fixed-LOD GPU backend | Complete. Persistent pools, asynchronous count readback, transactional allocation, generation-safe publication, and bounded multi-draw are live. |
+| **Phase 3A — Production render integration** | **Complete for the current s&box renderer.** Standard lit Forward/Depth terrain rendering is live; the engine's generic indirect path reports `IndirectFirstInstance=false`, so the bounded world-space vertex fallback is retained and explicitly reported. |
+| **Phase 3B — Fixed-LOD movement streaming** | **Complete.** Actual player observers drive same-frame desired-set deltas, bounded queues, persistent residents, CPU frustum culling, and the required GPU traversal scenarios. |
 | Phase 4 — 3D clipbox LOD and transitions | After fixed-LOD streaming passes. |
 | Phase 5 — Sparse edits and CPU collision integration | After LOD correctness. |
 | Phase 6 — Final adoption campaign | After all mandatory behavior exists. |
@@ -1130,7 +1130,12 @@ FirstInstance = ResidentSlot
 SV_InstanceID -> resident descriptor
 ```
 
-Validate this in the multi-draw capability test.
+Validate this in the multi-draw capability test. The current s&box generic
+`DrawIndexedInstancedIndirect` path does not expose `FirstInstance` reliably to
+the vertex-input path (`IndirectFirstInstance=false`), so Phase 3 keeps the
+capacity-bounded world-space vertex fallback. The capability and benchmark
+reports expose this explicitly; block-local/camera-relative addressing remains
+a later engine-capability follow-up rather than silently claiming support.
 
 ## 9.3 Render views
 
