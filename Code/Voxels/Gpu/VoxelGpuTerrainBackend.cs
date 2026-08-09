@@ -244,6 +244,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				{
 					_transitionScheduler.Cancel( transitionKey );
 					_pendingTransitionRequests.Remove( transitionKey );
+					_residents.CancelUnpublishedReservation( transitionKey );
 					_transitionRebuildKeys.Add( transitionKey );
 				}
 				_transitionDependencyKeys[transitionKey] = entry.Key;

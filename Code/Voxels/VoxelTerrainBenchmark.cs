@@ -251,7 +251,16 @@ public sealed class VoxelTerrainBenchmark : Component
 	public bool IsRunning => _phase is not BenchmarkPhase.Idle and not BenchmarkPhase.Complete and not BenchmarkPhase.Failed;
 
 	[Property, ReadOnly, Group( "Run" )]
-	public string Status => $"phase={_phase}; initialized={_initializationComplete}; requested={_runRequested}; scenarios={_results.Count}/{SelectedRequiredScenarios.Length}";
+	public string CurrentScenario => _sampler?.Name ?? _phase.ToString();
+
+	[Property, ReadOnly, Group( "Run" )]
+	public string CurrentScenarioDescription => _sampler?.Description ?? string.Empty;
+
+	[Property, ReadOnly, Group( "Run" )]
+	public double CurrentScenarioElapsedSeconds => _phaseStartTimestamp == 0 ? 0.0 : System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalSeconds;
+
+	[Property, ReadOnly, Group( "Run" )]
+	public string Status => $"phase={_phase}; scenario={CurrentScenario}; elapsed={CurrentScenarioElapsedSeconds:F1}s; initialized={_initializationComplete}; requested={_runRequested}; completed={_results.Count}/{SelectedRequiredScenarios.Length}";
 
 	protected override void OnValidate()
 	{
@@ -352,7 +361,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		}
 		if ( PhaseTimedOut() )
 		{
-			FailRun( $"phase {_phase} exceeded {ScenarioTimeoutSeconds:F0}s" );
+			FailRun( $"phase {_phase} exceeded {ScenarioTimeoutSeconds:F0}s; scenario={CurrentScenario}; settle={_manager.TerrainSettleDiagnostics}; gpu={_manager.GpuTerrainLiveDiagnostics}" );
 			return;
 		}
 
@@ -860,6 +869,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		_sampler = new FrameSampler( name, description, _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), _manager.LatestChunkTimingSequence, _manager.LatestBatchTimingSequence );
 		_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		Log.Info( $"Voxel terrain benchmark scenario started: {name} ({description})." );
 	}
 
 	private void CompleteScenario( VoxelGpuTransvoxelProofResult? gpuProof = null, VoxelGpuTerrainDiagnostics? gpuTerrain = null, VoxelGpuPhase2BProofResult? gpuPhase2BProof = null, VoxelGpuPhase3AProofResult? gpuPhase3AProof = null, VoxelGpuPhase3BProofResult? gpuPhase3BProof = null, VoxelClipboxPlannerProofReport? clipboxPlannerProof = null, VoxelGpuIndirectRenderProofReport? indirectRenderProof = null, VoxelTransvoxelTransitionProofResult? transitionProof = null )
