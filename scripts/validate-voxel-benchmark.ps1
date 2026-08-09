@@ -16,6 +16,10 @@ $fullRequiredScenarios = @(
 	'phase4_regular_coverage',
 	'phase4_no_lod_overlap',
 	'phase4_neighbor_difference',
+	'phase4_indirect_1_to_1024',
+	'phase4_indirect_boundary_49',
+	'phase4_depth_opaque_parity',
+	'phase4_command_list_active_range',
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
 	'gpu_production_render_integration',
@@ -40,14 +44,14 @@ $fullRequiredScenarios = @(
 	'sustained_world_spiral_place_20hz'
 )
 $gpuRequiredScenarios = @(
-	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference',
+	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range',
 	'gpu_persistent_static_set', 'gpu_production_render_integration',
 	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
 	'gpu_async_readback_saturation', 'gpu_resource_recreation', 'gpu_dedicated_server_startup'
 )
 $cpuRequiredScenarios = @(
-	'cold_generation', 'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'live_chunk_radius_reconfiguration', 'player_infinity_streaming', 'player_line_streaming',
+	'cold_generation', 'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'live_chunk_radius_reconfiguration', 'player_infinity_streaming', 'player_line_streaming',
 	'player_diagonal_streaming', 'chunk_seam_edit_coherence', 'varied_edits', 'bulk_edit',
 	'sustained_world_sweep_and_depth_dig_20hz', 'sustained_world_spiral_place_20hz'
 )
@@ -60,6 +64,8 @@ $requiredMetrics = @(
 	'worker_mesh_ms', 'upload_ms',
 	'clipbox_planner_available', 'clipbox_planner_passed', 'clipbox_planner_failure', 'clipbox_planner_cases', 'clipbox_planner_configurations',
 	'clipbox_planner_active_regular_count', 'clipbox_planner_stable_regular_slots', 'clipbox_planner_allocated_after_warmup',
+	'indirect_render_available', 'indirect_render_passed', 'indirect_render_failure', 'indirect_render_tested_command_counts', 'indirect_render_maximum_command_count',
+	'indirect_render_group_size', 'indirect_render_boundary_command_count', 'indirect_render_boundary_active_lists', 'indirect_render_boundary_visible_commands', 'indirect_render_maximum_active_lists',
 	'gpu_transvoxel_available', 'gpu_transvoxel_passed', 'gpu_transvoxel_failure',
 	'gpu_transvoxel_vertices', 'gpu_transvoxel_indices', 'gpu_transvoxel_active_cells',
 	'gpu_transvoxel_overflow_attempts', 'gpu_transvoxel_buffer_bytes', 'gpu_transvoxel_submission_ms',
@@ -151,7 +157,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 14 ) { Add-Failure "Expected suite version 14, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 15 ) { Add-Failure "Expected suite version 15, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -220,13 +226,22 @@ foreach ( $scenario in $scenarios )
 		if ( $scenario.gpu_transvoxel_gpu_publication_passed -ne $true ) { Add-Failure "$context did not publish GPU-authored indirect arguments" }
 		if ( [int]$scenario.gpu_transvoxel_dispatches -ge 128 ) { Add-Failure "$context dispatch count did not demonstrate batching" }
 	}
-	elseif ( $scenario.scenario -like 'phase4_*' )
+	elseif ( $scenario.scenario -in @('phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference') )
 	{
 		if ( $scenario.clipbox_planner_available -ne $true ) { Add-Failure "$context has no Phase 4 planner proof result" }
 		if ( $scenario.clipbox_planner_passed -ne $true ) { Add-Failure "$context Phase 4 planner proof failed: $($scenario.clipbox_planner_failure)" }
 		if ( [int]$scenario.clipbox_planner_cases -le 0 ) { Add-Failure "$context recorded no planner proof cases" }
 		if ( [int]$scenario.clipbox_planner_configurations -lt 0 ) { Add-Failure "$context reported an invalid planner configuration count" }
 		if ( [long]$scenario.clipbox_planner_allocated_after_warmup -ne 0 ) { Add-Failure "$context allocated after planner warm-up" }
+	}
+	elseif ( $scenario.scenario -in @('phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range') )
+	{
+		if ( $scenario.indirect_render_available -ne $true ) { Add-Failure "$context has no Phase 4 indirect-render proof result" }
+		if ( $scenario.indirect_render_passed -ne $true ) { Add-Failure "$context indirect-render proof failed: $($scenario.indirect_render_failure)" }
+		if ( [int]$scenario.indirect_render_tested_command_counts -le 0 ) { Add-Failure "$context recorded no indirect command counts" }
+		if ( [int]$scenario.indirect_render_maximum_command_count -lt 1024 ) { Add-Failure "$context did not cover 1,024 indirect commands" }
+		if ( [int]$scenario.indirect_render_group_size -le 0 ) { Add-Failure "$context has no indirect command-group capability result" }
+		if ( [int]$scenario.indirect_render_boundary_visible_commands -ne 49 ) { Add-Failure "$context did not validate the 49-command boundary" }
 	}
 	elseif ( $scenario.scenario -eq 'gpu_production_render_integration' )
 	{

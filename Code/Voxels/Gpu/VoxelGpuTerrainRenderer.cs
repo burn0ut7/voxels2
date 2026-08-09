@@ -1,7 +1,7 @@
 internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDisposable
 {
-	public const int MaximumCommandsPerSubmission = 16;
 	public const string ShaderName = "shaders/voxel_gpu_terrain.shader";
+	private readonly int _commandsPerSubmission;
 	private readonly CameraComponent _camera;
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
@@ -37,14 +37,17 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 	public long CullingRebuildCount => _cullingRebuildCount;
 	public long ArgumentUploadCount => _argumentUploadCount;
 	public bool IsTerrainRenderingEnabled => _renderingEnabled;
+	public int CommandsPerSubmission => _commandsPerSubmission;
 
-	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, float cullingPaddingWorld )
+	public VoxelGpuTerrainRenderer( SceneWorld world, CameraComponent camera, VoxelGpuMeshPool pool, VoxelGpuResidentTable residents, VoxelGpuTerrainDiagnosticCounters diagnostics, int commandsPerSubmission, float cullingPaddingWorld )
 		: base( world )
 	{
 		_camera = camera ?? throw new System.ArgumentNullException( nameof( camera ) );
 		_pool = pool ?? throw new System.ArgumentNullException( nameof( pool ) );
 		_residents = residents ?? throw new System.ArgumentNullException( nameof( residents ) );
 		_diagnostics = diagnostics ?? throw new System.ArgumentNullException( nameof( diagnostics ) );
+		if ( commandsPerSubmission < 1 ) throw new System.ArgumentOutOfRangeException( nameof( commandsPerSubmission ) );
+		_commandsPerSubmission = commandsPerSubmission;
 		_cullingPaddingWorld = System.MathF.Max( 0.0f, cullingPaddingWorld );
 		_residentSnapshot = new VoxelGpuResidentTable.ResidentEntry[residents.Capacity];
 		_argumentData = new GpuBuffer.IndirectDrawIndexedArguments[residents.Capacity];
@@ -52,7 +55,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		_material = Material.FromShader( ShaderName );
 		_drawArguments = new GpuBuffer<GpuBuffer.IndirectDrawIndexedArguments>( residents.Capacity,
 			GpuBuffer.UsageFlags.Structured | GpuBuffer.UsageFlags.IndirectDrawArguments, "Voxel GPU Draw Commands" );
-		var commandListCapacity = (residents.Capacity + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission;
+		var commandListCapacity = (residents.Capacity + _commandsPerSubmission - 1) / _commandsPerSubmission;
 		_depthCommandLists = new Sandbox.Rendering.CommandList[commandListCapacity];
 		_opaqueCommandLists = new Sandbox.Rendering.CommandList[commandListCapacity];
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
@@ -124,8 +127,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		}
 
 		var visibleUploadCount = visibleCommandCount == 0 ? 0 :
-			System.Math.Min( _argumentData.Length, ((visibleCommandCount + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission) * MaximumCommandsPerSubmission );
-		var uploadCount = System.Math.Max( visibleUploadCount, _attachedDepthCommandListCount * MaximumCommandsPerSubmission );
+			System.Math.Min( _argumentData.Length, ((visibleCommandCount + _commandsPerSubmission - 1) / _commandsPerSubmission) * _commandsPerSubmission );
+		var uploadCount = System.Math.Max( visibleUploadCount, _attachedDepthCommandListCount * _commandsPerSubmission );
 		if ( uploadCount > visibleCommandCount ) System.Array.Clear( _argumentData, visibleCommandCount, uploadCount - visibleCommandCount );
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
 		if ( ArgumentsChanged( uploadCount ) )
@@ -143,7 +146,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 					Log.Info( $"Voxel GPU indirect argument upload: {argumentUploadMilliseconds:F2}ms, commands={visibleCommandCount:N0}, uploaded={uploadCount:N0}." );
 			}
 		}
-		UpdateCommandLists( visibleUploadCount / MaximumCommandsPerSubmission );
+		UpdateCommandLists( visibleUploadCount / _commandsPerSubmission );
 	}
 
 	private bool ArgumentsChanged( int uploadCount )
@@ -167,8 +170,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		{
 			_depthCommandLists[index] ??= new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Depth Multi Draw {index}" );
 			_opaqueCommandLists[index] ??= new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Opaque Multi Draw {index}" );
-			var offset = index * MaximumCommandsPerSubmission;
-			var commandCount = (uint)System.Math.Min( MaximumCommandsPerSubmission, _residents.Capacity - offset );
+			var offset = index * _commandsPerSubmission;
+			var commandCount = (uint)System.Math.Min( _commandsPerSubmission, _residents.Capacity - offset );
 			BuildCommandList( _depthCommandLists[index], offset, commandCount );
 			BuildCommandList( _opaqueCommandLists[index], offset, commandCount );
 			if ( _renderingEnabled )

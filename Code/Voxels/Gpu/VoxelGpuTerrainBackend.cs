@@ -99,7 +99,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_evictionCandidates = new List<EvictionCandidate>( residentCapacity );
 		_diagnostics.ResidentCapacity = residentCapacity;
 		_diagnostics.PendingRequestCapacity = _scheduler.MaximumPendingRequests;
-		_renderer = new VoxelGpuTerrainRenderer( world, camera, _pool, _residents, _diagnostics, System.Math.Max( 0, cullingPaddingChunks ) * chunkSize * voxelSize );
+		_renderer = new VoxelGpuTerrainRenderer( world, camera, _pool, _residents, _diagnostics, _capabilities.IndirectCommandGroupSize, System.Math.Max( 0, cullingPaddingChunks ) * chunkSize * voxelSize );
 		_diagnostics.ScratchBytes = _scratchRing.Sum( scratch => scratch.CapacityBytes );
 		_nextProgressLogTimestamp = System.Diagnostics.Stopwatch.GetTimestamp() + 10 * System.Diagnostics.Stopwatch.Frequency;
 		Bounds = BBox.FromPositionAndSize( Vector3.Zero, Vector3.One * 1_000_000_000.0f );
