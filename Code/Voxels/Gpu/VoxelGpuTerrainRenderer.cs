@@ -123,8 +123,9 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			};
 		}
 
-		var uploadCount = visibleCommandCount == 0 ? 0 :
+		var visibleUploadCount = visibleCommandCount == 0 ? 0 :
 			System.Math.Min( _argumentData.Length, ((visibleCommandCount + MaximumCommandsPerSubmission - 1) / MaximumCommandsPerSubmission) * MaximumCommandsPerSubmission );
+		var uploadCount = System.Math.Max( visibleUploadCount, _attachedDepthCommandListCount * MaximumCommandsPerSubmission );
 		if ( uploadCount > visibleCommandCount ) System.Array.Clear( _argumentData, visibleCommandCount, uploadCount - visibleCommandCount );
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
 		if ( ArgumentsChanged( uploadCount ) )
@@ -142,7 +143,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 					Log.Info( $"Voxel GPU indirect argument upload: {argumentUploadMilliseconds:F2}ms, commands={visibleCommandCount:N0}, uploaded={uploadCount:N0}." );
 			}
 		}
-		UpdateCommandLists( uploadCount / MaximumCommandsPerSubmission );
+		UpdateCommandLists( visibleUploadCount / MaximumCommandsPerSubmission );
 	}
 
 	private bool ArgumentsChanged( int uploadCount )
@@ -160,6 +161,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 
 	private void UpdateCommandLists( int requiredCount )
 	{
+		// Removing and reattaching command lists can rebuild the custom render layer for a frame.
+		// Keep a bounded high-water mark and zero unused indirect commands instead.
 		for ( var index = _attachedDepthCommandListCount; index < requiredCount; index++ )
 		{
 			_depthCommandLists[index] ??= new Sandbox.Rendering.CommandList( $"Voxel GPU Terrain Depth Multi Draw {index}" );
@@ -174,13 +177,8 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 				_camera.AddCommandList( _opaqueCommandLists[index], Sandbox.Rendering.Stage.AfterOpaque );
 			}
 		}
-		if ( _renderingEnabled )
-		{
-			for ( var index = requiredCount; index < _attachedDepthCommandListCount; index++ ) _camera.RemoveCommandList( _depthCommandLists[index] );
-			for ( var index = requiredCount; index < _attachedOpaqueCommandListCount; index++ ) _camera.RemoveCommandList( _opaqueCommandLists[index] );
-		}
-		_attachedDepthCommandListCount = requiredCount;
-		_attachedOpaqueCommandListCount = requiredCount;
+		if ( requiredCount > _attachedDepthCommandListCount ) _attachedDepthCommandListCount = requiredCount;
+		if ( requiredCount > _attachedOpaqueCommandListCount ) _attachedOpaqueCommandListCount = requiredCount;
 	}
 
 	private void BuildCommandList( Sandbox.Rendering.CommandList commandList, int offset, uint commandCount )
