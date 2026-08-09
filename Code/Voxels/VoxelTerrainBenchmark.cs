@@ -104,6 +104,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private bool _callCountSettingCaptured;
 	private GameObject _playerSafetyFixture;
 	private readonly List<BenchmarkGravityState> _benchmarkGravityStates = new();
+	private bool _holdBenchmarkPlayersAtOrigin;
 	private bool _isReproductionRun;
 	private string _reproductionOfRunId;
 	private Dictionary<string, PreviousScenarioMeasurement> _reproductionBaselines;
@@ -316,6 +317,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		{
 			BeginRun( true );
 		}
+		if ( _holdBenchmarkPlayersAtOrigin ) HoldBenchmarkPlayersAtOrigin();
 
 		if ( _sampler?.Sample() == true )
 		{
@@ -457,6 +459,8 @@ public sealed class VoxelTerrainBenchmark : Component
 				StartWarmup();
 				break;
 			case BenchmarkPhase.StartPhase4Regular:
+				_holdBenchmarkPlayersAtOrigin = true;
+				HoldBenchmarkPlayersAtOrigin();
 				_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
 				_manager.GpuClipboxBlocksPerAxis = Phase4RegularBlocksPerAxis[_phase4RegularScenarioIndex];
 				_manager.GpuClipboxLevelCount = Phase4RegularLevelCounts[_phase4RegularScenarioIndex];
@@ -493,6 +497,7 @@ public sealed class VoxelTerrainBenchmark : Component
 						StartWarmup();
 						break;
 					}
+					_holdBenchmarkPlayersAtOrigin = false;
 					_phase = Mode == VoxelTerrainBenchmarkMode.CpuOnly ? BenchmarkPhase.StartLiveConfiguration : BenchmarkPhase.StartGpuTransvoxelProof;
 					StartWarmup();
 				}
@@ -1395,6 +1400,7 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void RestorePlayerProtectionSetting()
 	{
+		_holdBenchmarkPlayersAtOrigin = false;
 		RestoreBenchmarkPlayerGravity();
 		_manager?.SetBenchmarkPlayerProtection( false );
 	}
@@ -1421,6 +1427,17 @@ public sealed class VoxelTerrainBenchmark : Component
 			state.Body.Gravity = state.Gravity;
 		}
 		_benchmarkGravityStates.Clear();
+	}
+
+	private void HoldBenchmarkPlayersAtOrigin()
+	{
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			controller.WorldPosition = Vector3.Zero;
+			if ( controller.Body is not { } body ) continue;
+			body.Velocity = Vector3.Zero;
+			body.AngularVelocity = Vector3.Zero;
+		}
 	}
 
 	private void RestoreWorldSettings()
