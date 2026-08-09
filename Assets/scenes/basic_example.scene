@@ -463,7 +463,7 @@
           "Flags": 0,
           "CaptureCallCounts": false,
           "CaptureFrameStutterDiagnostics": false,
-          "ChunkRadius": 32,
+          "ChunkRadius": 64,
           "ChunkSize": 32,
           "CollisionBuildConcurrency": 2,
           "CollisionBuildsPerFrame": 4,
@@ -495,7 +495,7 @@
           "SimplexFrequency": 0.01,
           "SimplexSeed": 1337,
           "TerrainMaterial": null,
-          "TerrainSettleDiagnostics": "desiredLoaded=False; generationQueue=0; gpuSettled=True; cpuStates=0/4096; activeObjects=0; pendingVisual=0; pendingCollision=0; worldPending=False; batchSummaryPending=False; safety=False",
+          "TerrainSettleDiagnostics": "desiredLoaded=False; generationQueue=0; gpuSettled=False; cpuStates=0/16384; activeObjects=0; pendingVisual=0; pendingCollision=0; worldPending=False; batchSummaryPending=False; safety=False",
           "VisualBackend": "GpuPersistentFixedLod",
           "VoxelSize": 32
         },

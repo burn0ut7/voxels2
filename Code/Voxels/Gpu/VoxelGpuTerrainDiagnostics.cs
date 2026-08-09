@@ -42,7 +42,17 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	bool DepthPrepass,
 	int DepthPrepassCommandLists,
 	int OpaqueCommandLists,
-	string Failure );
+	string Failure,
+	bool CapacityLimited,
+	int BlockedRequests,
+	int CapacityEvictions,
+	int CapacityDeferrals,
+	int VertexFree,
+	int IndexFree,
+	int VertexLargestFree,
+	int IndexLargestFree,
+	int VertexFreeRangeCount,
+	int IndexFreeRangeCount );
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
 {
@@ -68,6 +78,10 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	public double CountSubmissionMilliseconds;
 	public double EmitSubmissionMilliseconds;
 	public string Failure = string.Empty;
+	public bool CapacityLimited;
+	public int BlockedRequests;
+	public int CapacityEvictions;
+	public int CapacityDeferrals;
 
 	public void RecordCountReadback( double milliseconds )
 	{
@@ -126,7 +140,17 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			renderer?.UsesDepthPrepass == true,
 			renderer?.DepthPrepassCommandListCount ?? 0,
 			renderer?.OpaqueCommandListCount ?? 0,
-			Failure.Length > 0 ? Failure : capabilities.Failure );
+			Failure.Length > 0 ? Failure : capabilities.Failure,
+			CapacityLimited,
+			BlockedRequests,
+			CapacityEvictions,
+			CapacityDeferrals,
+			pool?.VertexFree ?? 0,
+			pool?.IndexFree ?? 0,
+			pool?.VertexLargestFree ?? 0,
+			pool?.IndexLargestFree ?? 0,
+			pool?.VertexFreeRangeCount ?? 0,
+			pool?.IndexFreeRangeCount ?? 0 );
 	}
 
 	private static VoxelTimingDistribution Summarize( List<double> values )

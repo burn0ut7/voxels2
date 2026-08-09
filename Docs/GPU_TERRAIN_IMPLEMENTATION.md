@@ -1550,6 +1550,8 @@ Clamp configured budget against current reported GPU memory budget where the eng
 5. preserve nearby LOD0 and recently edited terrain;
 6. never overrun, synchronously wait, corrupt geometry, or activate CPU visual generation.
 
+When fixed-LOD desired coverage exceeds the configured persistent pools, the backend enters an explicit `CapacityLimited` state. Desired coverage remains the authoritative logical set; published residents are the highest-priority capacity-safe subset. A count result that cannot be admitted is recorded once as a blocked request, lower-priority residents may be retired to make room, and the request is retried only after safe GPU reclamation or a desired-set change. The state is settled when active work drains, even if blocked requests remain. Persistent retry storms, arbitrary hash-set admission order, and undesired published residents are failures of the streaming policy.
+
 ## 14.3 Frame budgets
 
 Expose configurable budgets for:

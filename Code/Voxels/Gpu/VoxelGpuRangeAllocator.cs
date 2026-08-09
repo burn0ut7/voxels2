@@ -6,6 +6,7 @@ internal sealed class VoxelGpuRangeAllocator
 	public int FreeCount => _free.Sum( range => range.Count );
 	public int UsedCount => Capacity - FreeCount;
 	public int LargestFreeRange => _free.Count == 0 ? 0 : _free.Max( range => range.Count );
+	public int FreeRangeCount => _free.Count;
 
 	public VoxelGpuRangeAllocator( int capacity )
 	{

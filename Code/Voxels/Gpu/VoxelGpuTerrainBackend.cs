@@ -19,8 +19,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly PendingResident[][] _publicationScratch;
 	private readonly HashSet<VoxelVisualBlockKey> _desiredKeys = new();
 	private readonly HashSet<VoxelVisualBlockKey> _desiredScratch = new();
+	private readonly List<VoxelVisualBlockKey> _desiredOrder = new();
+	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
+	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
 	private readonly HashSet<VoxelVisualBlockKey> _pendingRequests = new();
+	private readonly HashSet<VoxelVisualBlockKey> _blockedRequests = new();
+	private readonly Dictionary<VoxelVisualBlockKey, BlockedRequest> _blockedDetails = new();
+	private readonly List<VoxelVisualBlockKey> _wakeScratch = new();
 	private readonly object _desiredSync = new();
 	private ulong _epoch;
 	private long _nextProgressLogTimestamp;
@@ -30,10 +36,13 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private int _slowDesiredSetLogCount;
 	private bool _processingEnabled = true;
 
-	public bool IsSettled => DesiredCount == _residents.PublishedCount && _scheduler.PendingCount == 0 && PendingRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle );
+	public bool IsSettled => IsStreamingWorkIdle && (DesiredCount == _residents.PublishedCount || BlockedRequestCount >= System.Math.Max( 0, DesiredCount - _residents.PublishedCount ));
+	public bool IsCapacityLimited => BlockedRequestCount > 0;
 	private int DesiredCount { get { lock ( _desiredSync ) return _desiredKeys.Count; } }
 	private int PendingRequestCount { get { lock ( _desiredSync ) return _pendingRequests.Count; } }
+	private int BlockedRequestCount { get { lock ( _desiredSync ) return _blockedRequests.Count; } }
 	private bool IsDesired( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _desiredKeys.Contains( key ); }
+	private bool IsStreamingWorkIdle => _scheduler.PendingCount == 0 && PendingRequestCount == 0 && _activeBatches.All( batch => batch is null || batch.Count == 0 ) && _publications.Count == 0 && _scratchRing.All( scratch => scratch.IsIdle );
 	public bool IsAvailable => _capabilities.Available;
 	public bool IsTerrainRenderingEnabled => _renderer.IsTerrainRenderingEnabled;
 	public bool IsProcessingEnabled => _processingEnabled;
@@ -103,6 +112,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		lock ( _desiredSync )
 		{
 			_desiredScratch.Clear();
+			_desiredOrderScratch.Clear();
 			foreach ( var coordinate in coordinates )
 			{
 				if ( _desiredScratch.Count >= _residents.Capacity )
@@ -110,7 +120,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					_diagnostics.BackpressureEvents++;
 					break;
 				}
-				_desiredScratch.Add( new VoxelVisualBlockKey( coordinate, 0, ruleVersion ) );
+				var key = new VoxelVisualBlockKey( coordinate, 0, ruleVersion );
+				if ( _desiredScratch.Add( key ) ) _desiredOrderScratch.Add( key );
 			}
 			desiredCount = _desiredScratch.Count;
 
@@ -121,22 +132,30 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			{
 				_scheduler.Cancel( key );
 				_pendingRequests.Remove( key );
+				_blockedRequests.Remove( key );
+				_blockedDetails.Remove( key );
 				_residents.CancelUnpublishedReservation( key );
 				_desiredKeys.Remove( key );
 			}
+			_desiredOrder.Clear();
+			_desiredOrder.AddRange( _desiredOrderScratch );
+			_desiredRanks.Clear();
+			for ( var index = 0; index < _desiredOrder.Count; index++ ) _desiredRanks[_desiredOrder[index]] = index;
 
-			foreach ( var key in _desiredScratch )
+			foreach ( var key in _desiredOrder )
 			{
 				if ( !_desiredKeys.Add( key ) ) continue;
 				if ( _residents.ContainsKey( key ) || !_pendingRequests.Add( key ) ) continue;
 				if ( !_scheduler.TryEnqueue( key, out _ ) )
 				{
 					_pendingRequests.Remove( key );
+					_blockedRequests.Add( key );
 					_diagnostics.BackpressureEvents++;
 				}
 			}
 			UpdateQueueDiagnostics();
 			UpdatePendingCountBatches();
+			_settledLogged = false;
 		}
 		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
 		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowDesiredSetLogCount ) <= 32 )
@@ -156,10 +175,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		try
 		{
 			_epoch++;
-			_pool.Reclaim( _epoch );
+			RetireUndesiredResidents();
+			var reclaimed = _pool.Reclaim( _epoch );
+			if ( reclaimed > 0 ) WakeBlockedRequests();
 			UpdateQueueDiagnostics();
 			PublishCompletedEmits();
-			RetireUndesiredResidents();
 			for ( var index = 0; index < _scratchRing.Length; index++ ) ProcessCountReadback( index );
 			SubmitCountBatches();
 			LogProgress();
@@ -188,7 +208,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		}
 		_nextProgressLogTimestamp = now + 10 * System.Diagnostics.Stopwatch.Frequency;
 		var diagnostics = CaptureDiagnostics();
-		Log.Info( $"Voxel GPU terrain progress: settled={IsSettled}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, readbacks={diagnostics.CountReadbackCount:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, cullingRebuilds={_renderer.CullingRebuildCount:N0}, argumentUploads={_renderer.ArgumentUploadCount:N0}, poolUsed={diagnostics.PoolUsedBytes:N0}/{diagnostics.PoolCapacityBytes:N0}B, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, failure={diagnostics.Failure}." );
+			Log.Info( $"Voxel GPU terrain progress: settled={IsSettled}, capacityLimited={diagnostics.CapacityLimited}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, blocked={diagnostics.BlockedRequests:N0}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, readbacks={diagnostics.CountReadbackCount:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, cullingRebuilds={_renderer.CullingRebuildCount:N0}, argumentUploads={_renderer.ArgumentUploadCount:N0}, poolUsed={diagnostics.PoolUsedBytes:N0}/{diagnostics.PoolCapacityBytes:N0}B, vertexFree/largest={diagnostics.VertexFree:N0}/{diagnostics.VertexLargestFree:N0}, indexFree/largest={diagnostics.IndexFree:N0}/{diagnostics.IndexLargestFree:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, deferrals={diagnostics.CapacityDeferrals:N0}, failure={diagnostics.Failure}." );
 	}
 
 	private void SubmitCountBatches()
@@ -266,13 +286,30 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				_diagnostics.StalePublicationsRejected++;
 				continue;
 			}
-			if ( countResult.Overflow != 0 || countResult.VertexCount > int.MaxValue || countResult.IndexCount > int.MaxValue ||
-				!_pool.TryAllocate( (int)countResult.VertexCount, (int)countResult.IndexCount, countResult.Generation, out var handle ) )
+			if ( countResult.Overflow != 0 || countResult.VertexCount > int.MaxValue || countResult.IndexCount > int.MaxValue )
 			{
 				RemovePendingRequest( scheduled.Key );
-				_diagnostics.BackpressureEvents++;
 				_residents.CancelUnpublishedReservation( scheduled.Key );
-				RetryDesiredRequest( scheduled.Key );
+				_diagnostics.Failure = $"GPU terrain count overflow for {scheduled.Key.Coordinate}";
+				_scheduler.Cancel( scheduled.Key );
+				continue;
+			}
+			if ( !_pool.TryAllocate( (int)countResult.VertexCount, (int)countResult.IndexCount, countResult.Generation, out var handle, out var allocationFailure ) )
+			{
+				RemovePendingRequest( scheduled.Key );
+				_residents.CancelUnpublishedReservation( scheduled.Key );
+				_diagnostics.BackpressureEvents++;
+				_diagnostics.CapacityDeferrals++;
+				if ( allocationFailure is VoxelGpuAllocationFailureReason.OversizedVertex or VoxelGpuAllocationFailureReason.OversizedIndex )
+				{
+					_diagnostics.Failure = $"GPU terrain block {scheduled.Key.Coordinate} exceeds the persistent mesh pool";
+					_scheduler.Cancel( scheduled.Key );
+				}
+				else
+				{
+					EvictForCapacity( scheduled.Key, (int)countResult.VertexCount, (int)countResult.IndexCount );
+					BlockRequest( scheduled.Key, (int)countResult.VertexCount, (int)countResult.IndexCount );
+				}
 				continue;
 			}
 
@@ -365,18 +402,17 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.RequestedBlocks = DesiredCount;
 		_diagnostics.PendingRequestCount = _scheduler.PendingCount;
 		_diagnostics.PendingPublicationCount = _publications.Count;
+		_diagnostics.BlockedRequests = BlockedRequestCount;
+		_diagnostics.CapacityLimited = BlockedRequestCount > 0;
 		_diagnostics.QueuesBounded = _scheduler.PendingCount <= _scheduler.MaximumPendingRequests && _publications.Count <= VoxelGpuScratchArena.RingSize;
 	}
 
 	private void RetireUndesiredResidents()
 	{
-		var desiredCount = DesiredCount;
-		if ( _residents.Count <= desiredCount ) return;
-
 		var retired = 0;
 		foreach ( var (_, entry) in _residents.PublishedEntries() )
 		{
-			if ( _residents.Count - retired <= desiredCount || IsDesired( entry.Key ) ) continue;
+			if ( IsDesired( entry.Key ) ) continue;
 			if ( !_residents.TryRemove( entry.Key, out var allocation ) ) continue;
 			if ( !allocation.IsEmpty ) _pool.Retire( allocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
 			retired++;
@@ -386,18 +422,77 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	private void RemovePendingRequest( VoxelVisualBlockKey key ) { lock ( _desiredSync ) _pendingRequests.Remove( key ); }
 
-	private void RetryDesiredRequest( VoxelVisualBlockKey key )
+	private void BlockRequest( VoxelVisualBlockKey key, int vertexCount, int indexCount )
+	{
+		lock ( _desiredSync )
+			if ( _desiredKeys.Contains( key ) )
+			{
+				_blockedRequests.Add( key );
+				_blockedDetails[key] = new BlockedRequest( vertexCount, indexCount );
+			}
+	}
+
+	private void WakeBlockedRequests()
 	{
 		lock ( _desiredSync )
 		{
-			if ( !_desiredKeys.Contains( key ) || !_pendingRequests.Add( key ) ) return;
-			if ( !_scheduler.TryEnqueue( key, out _ ) )
+			if ( _blockedRequests.Count == 0 ) return;
+			_wakeScratch.Clear();
+			foreach ( var key in _desiredOrder )
 			{
-				_pendingRequests.Remove( key );
-				_diagnostics.BackpressureEvents++;
+				if ( !_blockedRequests.Contains( key ) || _residents.ContainsKey( key ) || !_blockedDetails.TryGetValue( key, out var blocked ) ) continue;
+				if ( _pool.VertexLargestFree < blocked.VertexCount || _pool.IndexLargestFree < blocked.IndexCount ) continue;
+				_wakeScratch.Add( key );
+				if ( _wakeScratch.Count >= VoxelGpuScratchArena.MaximumBatchSize ) break;
+			}
+			foreach ( var key in _wakeScratch )
+			{
+				if ( !_blockedRequests.Contains( key ) || !_blockedDetails.TryGetValue( key, out var blocked ) ) continue;
+				_blockedRequests.Remove( key );
+				if ( !_pendingRequests.Add( key ) ) continue;
+				_blockedDetails.Remove( key );
+				if ( !_scheduler.TryEnqueue( key, out _ ) )
+				{
+					_pendingRequests.Remove( key );
+					_blockedRequests.Add( key );
+					_blockedDetails[key] = blocked;
+					break;
+				}
 			}
 		}
 	}
+
+	private void EvictForCapacity( VoxelVisualBlockKey requestedKey, int vertexCount, int indexCount )
+	{
+		var requestedRank = PriorityRank( requestedKey );
+		var availableVertices = _pool.VertexFree;
+		var availableIndices = _pool.IndexFree;
+		var candidates = _residents.PublishedEntries()
+			.Where( item => IsDesired( item.Entry.Key ) && item.Entry.Key != requestedKey && PriorityRank( item.Entry.Key ) > requestedRank )
+			.OrderByDescending( item => PriorityRank( item.Entry.Key ) )
+			.ToArray();
+		foreach ( var (_, entry) in candidates )
+		{
+			var needsContiguousSpace = _pool.VertexLargestFree < vertexCount || _pool.IndexLargestFree < indexCount;
+			if ( !needsContiguousSpace && availableVertices >= vertexCount && availableIndices >= indexCount ) break;
+			if ( !_residents.TryRemove( entry.Key, out var allocation ) ) continue;
+			if ( !allocation.IsEmpty )
+			{
+				_pool.Retire( allocation, _epoch + VoxelGpuCapabilities.RetirementEpochs );
+				availableVertices += allocation.Vertices.Count;
+				availableIndices += allocation.Indices.Count;
+			}
+			_diagnostics.CapacityEvictions++;
+			_renderer.MarkDirty();
+		}
+	}
+
+	private int PriorityRank( VoxelVisualBlockKey key )
+	{
+		lock ( _desiredSync ) return _desiredRanks.TryGetValue( key, out var rank ) ? rank : int.MaxValue;
+	}
+
+	private readonly record struct BlockedRequest( int VertexCount, int IndexCount );
 
 	public void Dispose()
 	{

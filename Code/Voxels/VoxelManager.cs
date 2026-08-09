@@ -474,6 +474,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_gpuPreviousStreamingObservers.Clear();
 		var observers = GetStreamingObserverChunks();
 		PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
+		_gpuStreamingObservers.AddRange( observers );
 		StartGpuTerrainWorld();
 	}
 
@@ -651,7 +652,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				System.Math.Max( 1, residentCapacity ),
 				GpuVertexPoolCapacity,
 				GpuIndexPoolCapacity );
-			_gpuTerrainBackend.QueueStaticSet( _desiredChunkCoordinates, GpuTerrainRuleVersion );
+			var orderedCoordinates = new List<Vector3Int>( _desiredChunkCoordinates );
+			orderedCoordinates.Sort( (left, right) => GetStreamingPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingPriority( right, _gpuStreamingObservers ) ) );
+			_gpuTerrainBackend.QueueStaticSet( orderedCoordinates, GpuTerrainRuleVersion );
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
 			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, vertexPool={FormatBytes( (long)GpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)GpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
@@ -672,7 +675,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void RefreshGpuTerrainLiveDiagnostics( VoxelGpuTerrainDiagnostics diagnostics )
 	{
-		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
+		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargestFree={diagnostics.VertexLargestFree}; indexLargestFree={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
 	}
 
 	internal static double ComputeUnaccountedFrameMilliseconds( double frameMilliseconds, params double[] timingMilliseconds )
@@ -687,7 +690,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		var diagnostics = CaptureGpuTerrainDiagnostics();
 		RefreshGpuTerrainLiveDiagnostics( diagnostics );
-		Log.Info( $"Voxel GPU terrain diagnostics: backend={diagnostics.Backend}, available={diagnostics.Available}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, staleRejected={diagnostics.StalePublicationsRejected:N0}, scratch={FormatBytes( diagnostics.ScratchBytes )}, poolUsed/peak/capacity={FormatBytes( diagnostics.PoolUsedBytes )}/{FormatBytes( diagnostics.PeakPoolUsedBytes )}/{FormatBytes( diagnostics.PoolCapacityBytes )}, countSubmit={diagnostics.CountSubmissionMilliseconds:F3}ms total/{diagnostics.CountSubmissionPerBlockMilliseconds:F4}ms per block, countReadback={diagnostics.CountReadbackCount:N0} batches at {diagnostics.CountReadbackAverageMilliseconds:F3}ms avg, emitSubmit={diagnostics.EmitSubmissionMilliseconds:F3}ms total/{diagnostics.EmitSubmissionPerBlockMilliseconds:F4}ms per block, requestToVisible(avg/p95/max)={diagnostics.RequestToVisible.AverageMilliseconds:F2}/{diagnostics.RequestToVisible.P95Milliseconds:F2}/{diagnostics.RequestToVisible.MaximumMilliseconds:F2}ms, batchComplete(avg/p95/max)={diagnostics.BatchCompletion.AverageMilliseconds:F2}/{diagnostics.BatchCompletion.P95Milliseconds:F2}/{diagnostics.BatchCompletion.MaximumMilliseconds:F2}ms, geometryReadback={diagnostics.GeometryReadbackBytes:N0}B, failure={diagnostics.Failure}." );
+		Log.Info( $"Voxel GPU terrain diagnostics: backend={diagnostics.Backend}, available={diagnostics.Available}, requested={diagnostics.RequestedBlocks:N0}, residents={diagnostics.ResidentBlocks:N0}, blocked={diagnostics.BlockedRequests:N0}, capacityLimited={diagnostics.CapacityLimited}, pendingCount={diagnostics.PendingCountBatches:N0}, pendingEmit={diagnostics.PendingEmitBatches:N0}, visibleDraws={diagnostics.VisibleDrawCommands:N0}, backpressure={diagnostics.BackpressureEvents:N0}, allocationFailures={diagnostics.AllocationFailures:N0}, deferrals={diagnostics.CapacityDeferrals:N0}, evictions={diagnostics.CapacityEvictions:N0}, staleRejected={diagnostics.StalePublicationsRejected:N0}, scratch={FormatBytes( diagnostics.ScratchBytes )}, poolUsed/peak/capacity={FormatBytes( diagnostics.PoolUsedBytes )}/{FormatBytes( diagnostics.PeakPoolUsedBytes )}/{FormatBytes( diagnostics.PoolCapacityBytes )}, vertexFree/largest={diagnostics.VertexFree:N0}/{diagnostics.VertexLargestFree:N0}, indexFree/largest={diagnostics.IndexFree:N0}/{diagnostics.IndexLargestFree:N0}, countSubmit={diagnostics.CountSubmissionMilliseconds:F3}ms total/{diagnostics.CountSubmissionPerBlockMilliseconds:F4}ms per block, countReadback={diagnostics.CountReadbackCount:N0} batches at {diagnostics.CountReadbackAverageMilliseconds:F3}ms avg, emitSubmit={diagnostics.EmitSubmissionMilliseconds:F3}ms total/{diagnostics.EmitSubmissionPerBlockMilliseconds:F4}ms per block, requestToVisible(avg/p95/max)={diagnostics.RequestToVisible.AverageMilliseconds:F2}/{diagnostics.RequestToVisible.P95Milliseconds:F2}/{diagnostics.RequestToVisible.MaximumMilliseconds:F2}ms, batchComplete(avg/p95/max)={diagnostics.BatchCompletion.AverageMilliseconds:F2}/{diagnostics.BatchCompletion.P95Milliseconds:F2}/{diagnostics.BatchCompletion.MaximumMilliseconds:F2}ms, geometryReadback={diagnostics.GeometryReadbackBytes:N0}B, failure={diagnostics.Failure}." );
 	}
 
 	private void DisposeGpuTerrainBackend()

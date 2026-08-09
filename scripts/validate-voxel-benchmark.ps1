@@ -61,6 +61,9 @@ $requiredMetrics = @(
 	'gpu_terrain_depth_command_lists', 'gpu_terrain_opaque_command_lists',
 	'gpu_terrain_pending_count_batches', 'gpu_terrain_pending_emit_batches', 'gpu_terrain_backpressure_events',
 	'gpu_terrain_allocation_failures', 'gpu_terrain_stale_publications_rejected', 'gpu_terrain_visible_draw_commands',
+	'gpu_terrain_capacity_limited', 'gpu_terrain_blocked_requests', 'gpu_terrain_capacity_evictions', 'gpu_terrain_capacity_deferrals',
+	'gpu_terrain_vertex_free', 'gpu_terrain_index_free', 'gpu_terrain_vertex_largest_free', 'gpu_terrain_index_largest_free',
+	'gpu_terrain_vertex_free_ranges', 'gpu_terrain_index_free_ranges',
 	'gpu_terrain_scratch_bytes', 'gpu_terrain_pool_capacity_bytes', 'gpu_terrain_pool_used_bytes', 'gpu_terrain_pool_peak_bytes',
 	'gpu_terrain_geometry_readback_bytes', 'gpu_terrain_count_submission_ms', 'gpu_terrain_count_readback_avg_ms',
 	'gpu_terrain_count_readback_count', 'gpu_terrain_emit_submission_ms', 'gpu_terrain_failure',
@@ -223,7 +226,8 @@ foreach ( $scenario in $scenarios )
 		if ( $scenario.gpu_phase3b_available -ne $true ) { Add-Failure "$context has no Phase 3B movement proof result" }
 		if ( $scenario.gpu_phase3b_passed -ne $true ) { Add-Failure "$context Phase 3B movement proof failed: $($scenario.gpu_phase3b_failure)" }
 		if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no persistent GPU terrain diagnostics" }
-		if ( [long]$scenario.gpu_terrain_resident_blocks -ne [long]$scenario.gpu_terrain_desired_blocks ) { Add-Failure "$context did not publish every desired block" }
+		if ( $scenario.gpu_terrain_capacity_limited -ne $true -and [long]$scenario.gpu_terrain_resident_blocks -ne [long]$scenario.gpu_terrain_desired_blocks ) { Add-Failure "$context did not publish every desired block" }
+		if ( $scenario.gpu_terrain_capacity_limited -eq $true -and [long]$scenario.gpu_terrain_blocked_requests -ne ([long]$scenario.gpu_terrain_desired_blocks - [long]$scenario.gpu_terrain_resident_blocks) ) { Add-Failure "$context capacity-limited admission does not account for all missing residents" }
 		if ( [long]$scenario.gpu_terrain_pending_request_count -ne 0 -or [long]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending GPU work" }
 		if ( $scenario.gpu_terrain_queues_bounded -ne $true ) { Add-Failure "$context exceeded a bounded GPU queue" }
 		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
@@ -236,9 +240,10 @@ foreach ( $scenario in $scenarios )
 		if ( $scenario.scenario -in @('gpu_persistent_static_set', 'gpu_async_readback_saturation', 'gpu_resource_recreation') )
 		{
 			if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no persistent GPU terrain diagnostics" }
-			if ([long]$scenario.gpu_terrain_resident_blocks -ne [long]$scenario.gpu_terrain_requested_blocks) { Add-Failure "$context did not publish every requested block" }
+			if ($scenario.gpu_terrain_capacity_limited -ne $true -and [long]$scenario.gpu_terrain_resident_blocks -ne [long]$scenario.gpu_terrain_requested_blocks) { Add-Failure "$context did not publish every requested block" }
+			if ($scenario.gpu_terrain_capacity_limited -eq $true -and [long]$scenario.gpu_terrain_blocked_requests -ne ([long]$scenario.gpu_terrain_requested_blocks - [long]$scenario.gpu_terrain_resident_blocks)) { Add-Failure "$context capacity-limited admission does not account for all missing residents" }
 			if ([long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0) { Add-Failure "$context read back production geometry" }
-			if ([long]$scenario.gpu_terrain_allocation_failures -ne 0) { Add-Failure "$context exhausted its configured production pool" }
+			if ($scenario.gpu_terrain_capacity_limited -ne $true -and [long]$scenario.gpu_terrain_allocation_failures -ne 0) { Add-Failure "$context exhausted its configured production pool" }
 			if ([long]$scenario.gpu_terrain_pool_used_bytes -gt [long]$scenario.gpu_terrain_pool_capacity_bytes) { Add-Failure "$context exceeded persistent pool capacity" }
 			if ([double]$scenario.gpu_terrain_request_to_visible_p95_ms -le 0) { Add-Failure "$context recorded no request-to-visible latency" }
 			if ([double]$scenario.gpu_terrain_batch_completion_p95_ms -le 0) { Add-Failure "$context recorded no batch completion latency" }
