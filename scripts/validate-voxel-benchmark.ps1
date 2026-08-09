@@ -61,7 +61,7 @@ $fullRequiredScenarios = @(
 $gpuRequiredScenarios = @(
 	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_b8_l4_stationary',
 	'gpu_persistent_static_set', 'gpu_production_render_integration',
-	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming',
+	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming', 'gpu_player_clipbox_oscillation',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
 	'gpu_async_readback_saturation', 'gpu_resource_recreation', 'gpu_dedicated_server_startup'
 )
@@ -326,7 +326,7 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.gpu_terrain_depth_command_lists -le 0 -or [int]$scenario.gpu_terrain_opaque_command_lists -le 0 ) { Add-Failure "$context did not attach bounded depth and opaque command lists" }
 		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
 	}
-	elseif ( $scenario.scenario -in @('gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming') )
+	elseif ( $scenario.scenario -in @('gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming', 'gpu_player_clipbox_oscillation') )
 	{
 		if ( $scenario.gpu_phase3b_available -ne $true ) { Add-Failure "$context has no Phase 3B movement proof result" }
 		if ( $scenario.gpu_phase3b_passed -ne $true ) { Add-Failure "$context Phase 3B movement proof failed: $($scenario.gpu_phase3b_failure)" }
@@ -336,6 +336,9 @@ foreach ( $scenario in $scenarios )
 		if ( [long]$scenario.gpu_terrain_pending_request_count -ne 0 -or [long]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending GPU work" }
 		if ( $scenario.gpu_terrain_queues_bounded -ne $true ) { Add-Failure "$context exceeded a bounded GPU queue" }
 		if ( [long]$scenario.gpu_terrain_geometry_readback_bytes -ne 0 ) { Add-Failure "$context read back production geometry" }
+		if ( [long]$scenario.gpu_terrain_transition_resident_blocks -ne [long]$scenario.gpu_terrain_clipbox_transition_active_slots ) { Add-Failure "$context did not settle all active transition residents" }
+		if ( [long]$scenario.gpu_terrain_transition_pending_requests -ne 0 -or [long]$scenario.gpu_terrain_transition_blocked_requests -ne 0 ) { Add-Failure "$context completed with pending or blocked transition work" }
+		if ( [long]$scenario.gpu_terrain_transition_geometry_readback_bytes -ne 0 -or [long]$scenario.gpu_terrain_transition_cpu_sdf_evaluations -ne 0 ) { Add-Failure "$context used a forbidden production transition path" }
 		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
 	}
 	elseif ( $scenario.scenario -like 'gpu_*' )

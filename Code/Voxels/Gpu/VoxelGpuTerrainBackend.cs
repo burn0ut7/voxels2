@@ -447,6 +447,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		UpdateDesiredKeys( _clipboxKeyScratch );
 		UpdateDesiredTransitions( false );
 		_diagnostics.ClipboxPendingRevisionCount = 0;
+		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
+		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
 	}
 
 	private void SubmitCountBatches()

@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 19;
+	private const int SuiteVersion = 20;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
@@ -50,6 +50,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"gpu_player_infinity_streaming",
 		"gpu_player_line_streaming",
 		"gpu_player_diagonal_streaming",
+		"gpu_player_clipbox_oscillation",
 		"gpu_allocator_churn",
 		"gpu_replacement_failure",
 		"gpu_pool_exhaustion",
@@ -102,6 +103,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private bool _originalCaptureCallCounts;
 	private bool _callCountSettingCaptured;
 	private GameObject _playerSafetyFixture;
+	private readonly List<BenchmarkGravityState> _benchmarkGravityStates = new();
 	private bool _isReproductionRun;
 	private string _reproductionOfRunId;
 	private Dictionary<string, PreviousScenarioMeasurement> _reproductionBaselines;
@@ -201,6 +203,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_b8_l4_stationary",
 			"gpu_persistent_static_set", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
+			"gpu_player_clipbox_oscillation",
 			"gpu_allocator_churn", "gpu_replacement_failure", "gpu_pool_exhaustion", "gpu_return_origin_stability",
 			"gpu_async_readback_saturation", "gpu_resource_recreation", "gpu_dedicated_server_startup"
 		},
@@ -583,7 +586,17 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementDiagonal );
 				break;
 			case BenchmarkPhase.WaitGpuMovementDiagonal:
-				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_diagonal_streaming", BenchmarkPhase.StartGpuLifecycleScenario );
+				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_diagonal_streaming", BenchmarkPhase.StartGpuMovementVertical );
+				break;
+			case BenchmarkPhase.StartGpuMovementVertical:
+				BeginPlayerTraversal( TraversalPath.Vertical, "gpu_player_clipbox_oscillation", "Actual player moves vertically across clipbox boundaries and back while coherent regular and transition revisions settle" );
+				_phase = BenchmarkPhase.RunGpuMovementVertical;
+				break;
+			case BenchmarkPhase.RunGpuMovementVertical:
+				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementVertical );
+				break;
+			case BenchmarkPhase.WaitGpuMovementVertical:
+				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_clipbox_oscillation", BenchmarkPhase.StartGpuLifecycleScenario );
 				break;
 			case BenchmarkPhase.StartGpuLifecycleScenario:
 				BeginScenario( GpuLifecycleScenarioNames[_gpuLifecycleScenarioIndex], "Production range allocation, transactional replacement, exhaustion backpressure, deferred reclaim, and return-origin stability" );
@@ -777,6 +790,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		Revision = gitIdentity.Revision;
 		WorkingTreeDirty = gitIdentity.WorkingTreeDirty;
 		_manager.SetBenchmarkPlayerProtection( true );
+		CaptureAndFreezeBenchmarkPlayers();
 		if ( !automaticReproduction || !_worldSettingsCaptured )
 		{
 			_originalChunkRadius = _manager.ChunkRadius;
@@ -923,6 +937,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		{
 			TraversalPath.Infinity => BenchmarkPhase.RunInfinityTraversal,
 			TraversalPath.Line => BenchmarkPhase.RunLineTraversal,
+			TraversalPath.Vertical => BenchmarkPhase.RunGpuMovementVertical,
 			_ => BenchmarkPhase.RunDiagonalTraversal
 		};
 	}
@@ -943,7 +958,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		{
 			TraversalPath.Infinity => SampleInfinityPath( loopDistance ),
 			TraversalPath.Line => SampleOutAndBackPath( loopDistance, false ),
-			_ => SampleOutAndBackPath( loopDistance, true )
+			TraversalPath.Vertical => SampleOutAndBackPath( loopDistance, false, true ),
+			_ => SampleOutAndBackPath( loopDistance, true, false )
 		};
 		MoveTraversalPlayer( _manager.GameObject.WorldTransform.PointToWorld( _traversalStartLocalPosition + offset ) );
 	}
@@ -981,7 +997,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		return _infinityPathPositions[lower] + (_infinityPathPositions[upper] - _infinityPathPositions[lower]) * fraction;
 	}
 
-	private Vector3 SampleOutAndBackPath( float distance, bool diagonal )
+	private Vector3 SampleOutAndBackPath( float distance, bool diagonal, bool vertical = false )
 	{
 		var halfDistance = TraversalDistance * 0.5f;
 		float signedDistance;
@@ -989,6 +1005,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		else if ( distance < halfDistance + TraversalDistance ) signedDistance = halfDistance - (distance - halfDistance);
 		else signedDistance = -halfDistance + (distance - halfDistance - TraversalDistance);
 
+		if ( vertical ) return new Vector3( 0.0f, 0.0f, signedDistance );
 		if ( !diagonal ) return new Vector3( signedDistance, 0.0f, 0.0f );
 		const float inverseSquareRootOfTwo = 0.70710678118f;
 		return new Vector3( signedDistance * inverseSquareRootOfTwo, signedDistance * inverseSquareRootOfTwo, 0.0f );
@@ -1028,6 +1045,16 @@ public sealed class VoxelTerrainBenchmark : Component
 	private void CompleteGpuPlayerTraversal( string scenarioName, BenchmarkPhase nextPhase )
 	{
 		var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
+		if ( diagnostics.ClipboxTransitionCapacity > 0 &&
+			(diagnostics.TransitionResidentBlocks != diagnostics.ClipboxTransitionActiveSlotCount ||
+			 diagnostics.TransitionPendingRequests != 0 ||
+			 diagnostics.TransitionBlockedRequests != 0 ||
+			 diagnostics.TransitionGeometryReadbackBytes != 0 ||
+			 diagnostics.TransitionCpuSdfEvaluations != 0) )
+		{
+			FailRun( $"{scenarioName} did not settle coherent transition residency: residents={diagnostics.TransitionResidentBlocks}, active={diagnostics.ClipboxTransitionActiveSlotCount}, pending={diagnostics.TransitionPendingRequests}, blocked={diagnostics.TransitionBlockedRequests}." );
+			return;
+		}
 		_pendingGpuPhase3BProof = VoxelGpuPhase3BProof.ValidateMovement( scenarioName, diagnostics, _manager.CaptureTerrainDiagnostics() );
 		CompleteScenario( gpuTerrain: diagnostics, gpuPhase3BProof: _pendingGpuPhase3BProof );
 		if ( !_pendingGpuPhase3BProof.Passed )
@@ -1368,7 +1395,32 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void RestorePlayerProtectionSetting()
 	{
+		RestoreBenchmarkPlayerGravity();
 		_manager?.SetBenchmarkPlayerProtection( false );
+	}
+
+	private void CaptureAndFreezeBenchmarkPlayers()
+	{
+		if ( _benchmarkGravityStates.Count > 0 ) return;
+
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			if ( controller.Body is not { } body ) continue;
+			_benchmarkGravityStates.Add( new BenchmarkGravityState( body, body.Gravity ) );
+			body.Gravity = false;
+			body.Velocity = Vector3.Zero;
+			body.AngularVelocity = Vector3.Zero;
+		}
+	}
+
+	private void RestoreBenchmarkPlayerGravity()
+	{
+		foreach ( var state in _benchmarkGravityStates )
+		{
+			if ( state.Body is null ) continue;
+			state.Body.Gravity = state.Gravity;
+		}
+		_benchmarkGravityStates.Clear();
 	}
 
 	private void RestoreWorldSettings()
@@ -1895,6 +1947,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	}
 
 	private readonly record struct EditCommand( Vector3 LocalPosition, float Radius, float Displacement );
+	private readonly record struct BenchmarkGravityState( Rigidbody Body, bool Gravity );
 	private readonly record struct ComparisonMetric( string Name, bool TriggersRerun );
 
 	private sealed class PreviousScenarioMeasurement
@@ -1944,6 +1997,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		StartGpuMovementDiagonal,
 		RunGpuMovementDiagonal,
 		WaitGpuMovementDiagonal,
+		StartGpuMovementVertical,
+		RunGpuMovementVertical,
+		WaitGpuMovementVertical,
 		StartGpuLifecycleScenario,
 		WaitGpuLifecycleScenario,
 		StartGpuAsyncReadbackSaturation,
@@ -1985,7 +2041,8 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		Infinity,
 		Line,
-		Diagonal
+		Diagonal,
+		Vertical
 	}
 
 	private sealed class FrameSampler
