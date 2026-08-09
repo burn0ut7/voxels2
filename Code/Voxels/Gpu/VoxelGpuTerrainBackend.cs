@@ -7,6 +7,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainRenderer _renderer;
+	private readonly VoxelClipboxRuntimePlanner _clipboxPlanner;
+	private readonly List<VoxelVisualBlockKey> _clipboxKeyScratch;
 	private readonly Queue<PendingPublication> _publications = new();
 	private readonly int _chunkSize;
 	private readonly float _voxelSize;
@@ -21,6 +23,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly HashSet<VoxelVisualBlockKey> _desiredScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrder = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
+	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
 	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
 	private readonly HashSet<VoxelVisualBlockKey> _pendingRequests = new();
@@ -50,6 +53,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public bool IsAvailable => _capabilities.Available;
 	public bool IsTerrainRenderingEnabled => _renderer.IsTerrainRenderingEnabled;
 	public bool IsProcessingEnabled => _processingEnabled;
+	public int DesiredBlockCount => DesiredCount;
+	public bool UsesRegularClipbox => _clipboxPlanner is not null;
 
 	public VoxelGpuTerrainBackend(
 		SceneWorld world,
@@ -64,7 +69,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		int cullingPaddingChunks,
 		int residentCapacity,
 		int vertexCapacity,
-		int indexCapacity )
+		int indexCapacity,
+		VoxelClipboxConfig? clipboxConfig = null )
 		: base( world )
 	{
 		_capabilities = VoxelGpuCapabilities.Detect();
@@ -95,6 +101,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		}
 		_pool = new VoxelGpuMeshPool( vertexCapacity, indexCapacity );
 		_residents = new VoxelGpuResidentTable( residentCapacity );
+		if ( clipboxConfig.HasValue )
+		{
+			_clipboxPlanner = new VoxelClipboxRuntimePlanner( clipboxConfig.Value );
+			_clipboxKeyScratch = new List<VoxelVisualBlockKey>( clipboxConfig.Value.ExpectedActiveRegularCount );
+			_diagnostics.LodPolicy = $"regular_clipbox_b{clipboxConfig.Value.BlocksPerAxis}_l{clipboxConfig.Value.LevelCount}";
+		}
 		_publishedScratch = new VoxelGpuResidentTable.ResidentEntry[residentCapacity];
 		_evictionCandidates = new List<EvictionCandidate>( residentCapacity );
 		_diagnostics.ResidentCapacity = residentCapacity;
@@ -107,28 +119,46 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	public void QueueStaticSet( IEnumerable<Vector3Int> coordinates, int ruleVersion ) => UpdateDesiredSet( coordinates, ruleVersion );
 
+	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )
+	{
+		if ( _clipboxPlanner is null ) throw new System.InvalidOperationException( "Regular clipbox residency was not enabled for this GPU backend." );
+		if ( !_clipboxPlanner.Update( observerCanonicalSample ) ) return false;
+		_clipboxKeyScratch.Clear();
+		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
+			if ( assignment.Active ) _clipboxKeyScratch.Add( assignment.Key );
+		UpdateDesiredKeys( _clipboxKeyScratch );
+		_clipboxPlanner.Commit();
+		return true;
+	}
+
 	public void SetRenderingEnabled( bool enabled ) => _renderer.SetRenderingEnabled( enabled );
 	public void SetProcessingEnabled( bool enabled ) => _processingEnabled = enabled;
 
 	public void UpdateDesiredSet( IEnumerable<Vector3Int> coordinates, int ruleVersion )
 	{
+		_desiredKeyInputScratch.Clear();
+		foreach ( var coordinate in coordinates ) _desiredKeyInputScratch.Add( new VoxelVisualBlockKey( coordinate, 0, ruleVersion ) );
+		UpdateDesiredKeys( _desiredKeyInputScratch );
+	}
+
+	private void UpdateDesiredKeys( IEnumerable<VoxelVisualBlockKey> keys )
+	{
 		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		_diagnostics.RuleVersion = ruleVersion;
 		var desiredCount = 0;
 		lock ( _desiredSync )
 		{
 			_desiredScratch.Clear();
 			_desiredOrderScratch.Clear();
-			foreach ( var coordinate in coordinates )
+			foreach ( var key in keys )
 			{
 				if ( _desiredScratch.Count >= _residents.Capacity )
 				{
 					_diagnostics.BackpressureEvents++;
 					break;
 				}
-				var key = new VoxelVisualBlockKey( coordinate, 0, ruleVersion );
 				if ( _desiredScratch.Add( key ) ) _desiredOrderScratch.Add( key );
 			}
+			if ( _desiredOrderScratch.Count > 0 ) _diagnostics.RuleVersion = _desiredOrderScratch[0].RuleVersion;
 			desiredCount = _desiredScratch.Count;
 
 			_leavingScratch.Clear();
@@ -243,10 +273,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					throw new System.InvalidOperationException( $"resident table exhausted while reserving {item.Key}" );
 				}
 				slots[index] = slot;
-				var sampleOrigin = new Vector3( item.Key.Coordinate.x * _chunkSize, item.Key.Coordinate.y * _chunkSize, (item.Key.Coordinate.z - 1) * _chunkSize );
+				var sampleScale = 1 << item.Key.Lod;
+				var sampleOrigin = new Vector3( item.Key.Coordinate.x * _chunkSize * sampleScale, item.Key.Coordinate.y * _chunkSize * sampleScale, (item.Key.Coordinate.z - 1) * _chunkSize * sampleScale );
 				requests[index] = new VoxelGpuBlockRequest
 				{
 					SampleOrigin = new Vector4( sampleOrigin, 0.0f ),
+					SampleScale = new Vector4( sampleScale, sampleScale, sampleScale, 0.0f ),
 					CoordinateX = item.Key.Coordinate.x,
 					CoordinateY = item.Key.Coordinate.y,
 					CoordinateZ = item.Key.Coordinate.z,
@@ -321,10 +353,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				continue;
 			}
 
+			var drawScale = 1 << scheduled.Key.Lod;
 			var drawOrigin = new Vector3(
-				scheduled.Key.Coordinate.x * _chunkSize * _voxelSize,
-				scheduled.Key.Coordinate.y * _chunkSize * _voxelSize,
-				(scheduled.Key.Coordinate.z - 1) * _chunkSize * _voxelSize );
+				scheduled.Key.Coordinate.x * _chunkSize * drawScale * _voxelSize,
+				scheduled.Key.Coordinate.y * _chunkSize * drawScale * _voxelSize,
+				(scheduled.Key.Coordinate.z - 1) * _chunkSize * drawScale * _voxelSize );
 			allocations[index] = new VoxelGpuAllocationDescriptor
 			{
 				VertexOffset = (uint)handle.Vertices.Offset,
@@ -335,14 +368,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				ResidentSlot = (uint)activeBatch.Slots[index],
 				RequestIndex = (uint)index,
 				Flags = 1,
-				DrawOrigin = new Vector4( drawOrigin, 0.0f )
+				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
+				DrawScale = new Vector4( drawScale, drawScale, drawScale, 0.0f )
 			};
-			var extent = _chunkSize * _voxelSize;
+			var extent = _chunkSize * drawScale * _voxelSize;
 			var descriptor = new VoxelGpuResidentDescriptor
 			{
 				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
-				BoundsMin = new Vector4( drawOrigin - Vector3.One * _voxelSize * 4.0f, 0.0f ),
-				BoundsMax = new Vector4( drawOrigin + new Vector3( extent, extent, extent ) + Vector3.One * _voxelSize * 4.0f, 0.0f ),
+				BoundsMin = new Vector4( drawOrigin - Vector3.One * _voxelSize * drawScale * 4.0f, 0.0f ),
+				BoundsMax = new Vector4( drawOrigin + new Vector3( extent, extent, extent ) + Vector3.One * _voxelSize * drawScale * 4.0f, 0.0f ),
 				Generation = scheduled.Generation,
 				VertexOffset = (uint)handle.Vertices.Offset,
 				IndexOffset = (uint)handle.Indices.Offset,

@@ -70,6 +70,7 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 
 	public int RequestedBlocks;
 	public int RuleVersion;
+	public string LodPolicy = "fixed_lod_0";
 	public int PendingCountBatches;
 	public int PendingEmitBatches;
 	public int BackpressureEvents;
@@ -101,7 +102,7 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			"gpu_persistent_fixed_lod",
 			capabilities.Available,
 			RuleVersion,
-			"fixed_lod_0",
+			LodPolicy,
 			VoxelGpuScratchArena.MaximumBatchSize,
 			VoxelGpuScratchArena.RingSize,
 			capabilities.VertexAddressing,

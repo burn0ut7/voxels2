@@ -41,4 +41,14 @@ internal static class VoxelGpuPhase2BProof
 		if ( string.IsNullOrEmpty( failure ) && !diagnostics.CapacityLimited && diagnostics.AllocationFailures != 0 ) failure = $"mesh pool reported {diagnostics.AllocationFailures} allocation failures";
 		return new VoxelGpuPhase2BProofResult( string.IsNullOrEmpty( failure ), test, failure ?? string.Empty );
 	}
+
+	public static VoxelGpuPhase2BProofResult ValidateRegularClipbox( string test, VoxelGpuTerrainDiagnostics diagnostics, int expectedActiveBlocks, string expectedPolicy )
+	{
+		var proof = ValidateStatic( test, diagnostics, expectedActiveBlocks );
+		var failure = proof.Failure;
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.LodPolicy != expectedPolicy ) failure = $"reported LOD policy '{diagnostics.LodPolicy}', expected '{expectedPolicy}'";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.DepthPrepassCommandLists != diagnostics.OpaqueCommandLists ) failure = $"depth command lists {diagnostics.DepthPrepassCommandLists} differ from opaque command lists {diagnostics.OpaqueCommandLists}";
+		if ( string.IsNullOrEmpty( failure ) && diagnostics.VisibleDrawCommands == 0 ) failure = "regular clipbox settled without visible indexed commands";
+		return new VoxelGpuPhase2BProofResult( string.IsNullOrEmpty( failure ), test, failure ?? string.Empty );
+	}
 }

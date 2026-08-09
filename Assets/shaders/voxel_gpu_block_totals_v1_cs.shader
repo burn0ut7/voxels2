@@ -9,7 +9,7 @@ CS
 	struct BlockRequest
 	{
 		float4 SampleOrigin;
-		float4 ReservedOrigin;
+		float4 SampleScale;
 		int CoordinateX;
 		int CoordinateY;
 		int CoordinateZ;

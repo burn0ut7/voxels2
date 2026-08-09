@@ -6,7 +6,7 @@ internal readonly record struct VoxelVisualBlockKey( Vector3Int Coordinate, int 
 internal struct VoxelGpuBlockRequest
 {
 	public Vector4 SampleOrigin;
-	public Vector4 ReservedOrigin;
+	public Vector4 SampleScale;
 	public int CoordinateX;
 	public int CoordinateY;
 	public int CoordinateZ;
@@ -42,7 +42,7 @@ internal struct VoxelGpuAllocationDescriptor
 	public uint RequestIndex;
 	public uint Flags;
 	public Vector4 DrawOrigin;
-	public Vector4 Reserved;
+	public Vector4 DrawScale;
 }
 
 [StructLayout( LayoutKind.Sequential, Pack = 4, Size = 64 )]

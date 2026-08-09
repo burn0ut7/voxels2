@@ -154,16 +154,13 @@ internal static class VoxelClipboxPlannerProof
 			planner.Commit();
 		}
 
-		GC.Collect();
-		GC.WaitForPendingFinalizers();
-		GC.Collect();
-		var before = GC.GetAllocatedBytesForCurrentThread();
+		var before = Sandbox.Diagnostics.PerformanceStats.BytesAllocated;
 		for ( var index = 0; index < 1024; index++ )
 		{
 			planner.Update( new Vector3Int( NextCoordinate( ref state ), NextCoordinate( ref state ), NextCoordinate( ref state ) ) );
 			planner.Commit();
 		}
-		var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+		var allocated = System.Math.Max( 0L, Sandbox.Diagnostics.PerformanceStats.BytesAllocated - before );
 		if ( allocated != 0 ) throw new InvalidOperationException( $"Runtime clipbox planner allocated {allocated} bytes after warm-up." );
 		cases++;
 		return allocated;

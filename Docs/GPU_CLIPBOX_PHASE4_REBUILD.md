@@ -63,7 +63,7 @@ Do not delete the first attempt. It remains useful for tests, lookup tables, and
 | 4R-0 baseline restoration and archive | Next |
 | 4R-1 mathematical clipbox planner | Implemented; standalone proof passed, live editor gate pending |
 | 4R-2 renderer-capacity proof | Implemented; standalone proof passed, live editor gate pending |
-| 4R-3 regular two-level clipbox | Not started |
+| 4R-3 regular two-level clipbox | Implemented; static integration and live compiler gates passed, runtime benchmark gate pending |
 | 4R-4 four-level toroidal streaming | Not started |
 | 4R-5 transition ownership and residency | Not started |
 | 4R-6 Transvoxel golden reference and GPU proof | Not started |

@@ -9,7 +9,7 @@ CS
 	struct BlockRequest
 	{
 		float4 SampleOrigin;
-		float4 ReservedOrigin;
+		float4 SampleScale;
 		int CoordinateX;
 		int CoordinateY;
 		int CoordinateZ;
@@ -86,7 +86,7 @@ CS
 		uint block = id.x / (uint)HaloSampleCount;
 		uint localIndex = id.x - block * (uint)HaloSampleCount;
 		float3 localSample = float3( Decode3D( localIndex, HaloSize ) ) - 1.0f;
-		float3 sample = BlockRequests[block].SampleOrigin.xyz + localSample;
+		float3 sample = BlockRequests[block].SampleOrigin.xyz + localSample * BlockRequests[block].SampleScale.xyz;
 		DensitySamples[id.x] = clamp( TerrainDensity( sample ), -SdfClampDistance, SdfClampDistance );
 	}
 }

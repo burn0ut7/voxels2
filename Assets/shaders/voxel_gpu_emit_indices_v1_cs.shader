@@ -7,7 +7,7 @@ CS
 {
 	#include "system.fxc"
 	struct VoxelGpuVertex { float3 Position; float3 Normal; float3 Tangent; float2 TexCoord; };
-	struct AllocationDescriptor { uint VertexOffset; uint VertexCapacity; uint IndexOffset; uint IndexCapacity; uint Generation; uint ResidentSlot; uint RequestIndex; uint Flags; float4 DrawOrigin; float4 Reserved; };
+	struct AllocationDescriptor { uint VertexOffset; uint VertexCapacity; uint IndexOffset; uint IndexCapacity; uint Generation; uint ResidentSlot; uint RequestIndex; uint Flags; float4 DrawOrigin; float4 DrawScale; };
 	StructuredBuffer<uint> RegularLookup < Attribute( "RegularLookup" ); >; StructuredBuffer<uint3> Cells < Attribute( "Cells" ); >;
 	StructuredBuffer<uint> EdgeVertexIds < Attribute( "EdgeVertexIds" ); >; StructuredBuffer<VoxelGpuVertex> OutputVertices < Attribute( "OutputVertices" ); >;
 	StructuredBuffer<uint> EdgeGroupSums < Attribute( "EdgeGroupSums" ); >; StructuredBuffer<uint> CellGroupSums < Attribute( "CellGroupSums" ); >; StructuredBuffer<AllocationDescriptor> Allocations < Attribute( "Allocations" ); >;

@@ -458,7 +458,7 @@
       "Components": [
         {
           "__type": "VoxelManager",
-          "__guid": "56dd2da8-81ec-47f7-bb97-20c376ec9f92",
+          "__guid": "8f88a9a0-e06f-4113-8ecf-657931d615e2",
           "__enabled": true,
           "Flags": 0,
           "CaptureCallCounts": false,
@@ -474,9 +474,12 @@
           "DetailedChunkLogLimit": 64,
           "GenerateInEditor": true,
           "GpuAutoScalePoolToChunkRadius": true,
+          "GpuClipboxBlocksPerAxis": 4,
+          "GpuClipboxLevelCount": 2,
           "GpuFrustumPaddingChunks": 1,
           "GpuIndexPoolCapacity": 50331648,
           "GpuTerrainLiveDiagnostics": "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=",
+          "GpuTerrainLodPolicy": "FixedLod0",
           "GpuTerrainProcessingEnabled": true,
           "GpuTerrainRenderingEnabled": true,
           "GpuTerrainRuleVersion": 0,
@@ -502,7 +505,7 @@
         },
         {
           "__type": "VoxelBrush",
-          "__guid": "f237ea5a-3f28-4b21-9168-402289cd85da",
+          "__guid": "d9715f51-9df6-4004-84c4-000a6e97194f",
           "__enabled": true,
           "Flags": 0,
           "ApplyOnStart": false,
@@ -523,7 +526,7 @@
         },
         {
           "__type": "VoxelTerrainBenchmark",
-          "__guid": "9bd52706-a9d5-4b6d-b096-39efa5019189",
+          "__guid": "71ae29f5-5e49-40eb-8bec-eb6ae927a516",
           "__enabled": true,
           "Flags": 0,
           "MajorOutlierThresholdPercent": 20,

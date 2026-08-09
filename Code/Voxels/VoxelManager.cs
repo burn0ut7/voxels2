@@ -66,6 +66,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private long _lastChunkStreamingInterestTimestamp;
 	private long _lastGpuStreamingLogTimestamp;
 	private bool _gpuStreamingObserversInitialized;
+	private bool _gpuClipboxObserverInitialized;
+	private Vector3Int _gpuClipboxObserverCanonicalSample;
+	private int _gpuDesiredBlockCount;
 	private int _slowGpuStreamingLogCount;
 	private int _idleStutterDiagnosticCount;
 	private string _gpuTerrainLiveDiagnostics = "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=";
@@ -162,6 +165,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public VoxelVisualBackendMode VisualBackend { get; set; } = VoxelVisualBackendMode.CpuChunks;
 
 	[Property, Group( "Rendering" )]
+	public VoxelGpuTerrainLodPolicy GpuTerrainLodPolicy { get; set; } = VoxelGpuTerrainLodPolicy.FixedLod0;
+
+	[Property, Group( "Rendering" ), Range( 4, 8 )]
+	public int GpuClipboxBlocksPerAxis { get; set; } = 4;
+
+	[Property, Group( "Rendering" ), Range( 1, 4 )]
+	public int GpuClipboxLevelCount { get; set; } = 2;
+
+	[Property, Group( "Rendering" )]
 	public bool GpuAutoScalePoolToChunkRadius { get; set; } = true;
 
 	[Property, Group( "Rendering" ), Range( 65536, MaximumGpuVertexPoolCapacity )]
@@ -227,10 +239,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	public IReadOnlyDictionary<Vector3Int, VoxelChunk> Chunks => _chunks;
 	public int LoadedChunkCount => _chunks.Count;
-	public int DesiredChunkCount => _desiredChunkCoordinates.Count;
+	public int DesiredChunkCount => GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox && VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ? _gpuDesiredBlockCount : _desiredChunkCoordinates.Count;
 	public int ActiveChunkGameObjectCount => _chunkGameObjects.Count;
 	public int ChunkDiameter => ChunkRadius * 2;
-	public int ConfiguredChunkCount => checked( ChunkDiameter * ChunkDiameter );
+	public int ConfiguredChunkCount => GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox && VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ? GpuClipboxConfig.ExpectedActiveRegularCount : checked( ChunkDiameter * ChunkDiameter );
+	private VoxelClipboxConfig GpuClipboxConfig => new( GpuClipboxBlocksPerAxis, GpuClipboxLevelCount, checked( (ushort)GpuTerrainRuleVersion ) );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
 	public bool IsPlayerSafetyActive => _playerSafetyActive;
 	internal bool IsGpuTransvoxelProofRunning => _gpuTransvoxelProof?.IsRunning == true;
@@ -306,6 +319,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuVertexPoolCapacity = System.Math.Clamp( GpuVertexPoolCapacity, 65536, MaximumGpuVertexPoolCapacity );
 		GpuIndexPoolCapacity = System.Math.Clamp( GpuIndexPoolCapacity, 196608, MaximumGpuIndexPoolCapacity );
 		GpuTerrainRuleVersion = System.Math.Clamp( GpuTerrainRuleVersion, 0, 1 );
+		GpuClipboxBlocksPerAxis = GpuClipboxBlocksPerAxis <= 4 ? 4 : 8;
+		GpuClipboxLevelCount = System.Math.Clamp( GpuClipboxLevelCount, 1, VoxelClipboxConfig.MaximumLevelCount );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
@@ -488,10 +503,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_lastChunkStreamingInterestTimestamp = 0;
 		_desiredChunkCoordinates.Clear();
 		_gpuStreamingObserversInitialized = false;
+		_gpuClipboxObserverInitialized = false;
+		_gpuDesiredBlockCount = 0;
 		_gpuStreamingObservers.Clear();
 		_gpuPreviousStreamingObservers.Clear();
 		var observers = GetStreamingObserverChunks();
-		PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
+		if ( GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.FixedLod0 ) PopulateDesiredChunkCoordinates( observers, _desiredChunkCoordinates );
 		_gpuStreamingObservers.AddRange( observers );
 		StartGpuTerrainWorld();
 	}
@@ -655,7 +672,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		try
 		{
-			var residentCapacity = checked( DesiredChunkCount + GpuStreamingStagingResidentCapacity );
+			var clipboxConfig = GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox ? GpuClipboxConfig : (VoxelClipboxConfig?)null;
+			var residentCapacity = checked( System.Math.Max( DesiredChunkCount, clipboxConfig?.StableRegularSlotCount ?? 0 ) + GpuStreamingStagingResidentCapacity );
 			_gpuTerrainBackend = new VoxelGpuTerrainBackend(
 				Scene.SceneWorld,
 				Scene.Camera,
@@ -669,13 +687,22 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				GpuFrustumPaddingChunks,
 				System.Math.Max( 1, residentCapacity ),
 				EffectiveGpuVertexPoolCapacity,
-				EffectiveGpuIndexPoolCapacity );
-			var orderedCoordinates = new List<Vector3Int>( _desiredChunkCoordinates );
-			orderedCoordinates.Sort( (left, right) => GetStreamingPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingPriority( right, _gpuStreamingObservers ) ) );
-			_gpuTerrainBackend.QueueStaticSet( orderedCoordinates, GpuTerrainRuleVersion );
+				EffectiveGpuIndexPoolCapacity,
+				clipboxConfig );
+			if ( clipboxConfig.HasValue )
+			{
+				_gpuDesiredBlockCount = clipboxConfig.Value.ExpectedActiveRegularCount;
+				_gpuTerrainBackend.QueueClipboxObserver( GetGpuObserverCanonicalSample() );
+			}
+			else
+			{
+				var orderedCoordinates = new List<Vector3Int>( _desiredChunkCoordinates );
+				orderedCoordinates.Sort( (left, right) => GetStreamingPriority( left, _gpuStreamingObservers ).CompareTo( GetStreamingPriority( right, _gpuStreamingObservers ) ) );
+				_gpuTerrainBackend.QueueStaticSet( orderedCoordinates, GpuTerrainRuleVersion );
+			}
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
-			Log.Info( $"Voxel persistent GPU fixed-LOD world scheduled: chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU terrain world scheduled: policy={GpuTerrainLodPolicy}, chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), clipbox={GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis} levels={GpuClipboxLevelCount}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
@@ -693,7 +720,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void RefreshGpuTerrainLiveDiagnostics( VoxelGpuTerrainDiagnostics diagnostics )
 	{
-		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargestFree={diagnostics.VertexLargestFree}; indexLargestFree={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
+		_gpuTerrainLiveDiagnostics = $"available={diagnostics.Available}; policy={diagnostics.LodPolicy}; indirectGroup={diagnostics.IndirectCommandGroupSize}; requested={diagnostics.RequestedBlocks}; residents={diagnostics.ResidentBlocks}; blocked={diagnostics.BlockedRequests}; capacityLimited={diagnostics.CapacityLimited}; pendingCount={diagnostics.PendingCountBatches}; pendingEmit={diagnostics.PendingEmitBatches}; readbacks={diagnostics.CountReadbackCount}; visibleDraws={diagnostics.VisibleDrawCommands}; poolUsed={diagnostics.PoolUsedBytes}; vertexFree={diagnostics.VertexFree}; indexFree={diagnostics.IndexFree}; vertexLargestFree={diagnostics.VertexLargestFree}; indexLargestFree={diagnostics.IndexLargestFree}; requestToVisibleP95Ms={diagnostics.RequestToVisible.P95Milliseconds:F2}; failure={diagnostics.Failure}";
 	}
 
 	internal static double ComputeUnaccountedFrameMilliseconds( double frameMilliseconds, params double[] timingMilliseconds )
@@ -1685,6 +1712,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void UpdateGpuChunkStreaming()
 	{
 		if ( _gpuTerrainBackend is null ) return;
+		if ( GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox )
+		{
+			UpdateGpuClipboxStreaming();
+			return;
+		}
 		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		_lastChunkStreamingInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		_gpuStreamingObservers.Clear();
@@ -1715,6 +1747,40 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
 		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowGpuStreamingLogCount ) <= 32 )
 			Log.Info( $"Voxel GPU streaming hitch trace: {updateMilliseconds:F2}ms, observers={_gpuStreamingObservers.Count:N0}, desired={_gpuDesiredScratch.Count:N0}, changed={desiredChanged}." );
+	}
+
+	private void UpdateGpuClipboxStreaming()
+	{
+		var observer = GetGpuObserverCanonicalSample();
+		if ( _gpuClipboxObserverInitialized && observer == _gpuClipboxObserverCanonicalSample ) return;
+		_gpuClipboxObserverInitialized = true;
+		_gpuClipboxObserverCanonicalSample = observer;
+		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
+		if ( !_gpuTerrainBackend.QueueClipboxObserver( observer ) ) return;
+		_gpuDesiredBlockCount = _gpuTerrainBackend.DesiredBlockCount;
+		if ( _lastGpuStreamingLogTimestamp == 0 || System.Diagnostics.Stopwatch.GetElapsedTime( _lastGpuStreamingLogTimestamp ).TotalSeconds >= 5.0 )
+		{
+			_lastGpuStreamingLogTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+			Log.Info( $"Voxel GPU regular clipbox streaming updated: observer={observer}, active={_gpuDesiredBlockCount:N0}, policy={GpuTerrainLodPolicy}." );
+		}
+		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
+		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowGpuStreamingLogCount ) <= 32 )
+			Log.Info( $"Voxel GPU clipbox streaming hitch trace: {updateMilliseconds:F2}ms, observer={observer}, active={_gpuDesiredBlockCount:N0}." );
+	}
+
+	private Vector3Int GetGpuObserverCanonicalSample()
+	{
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() ) return GetCanonicalSample( controller.WorldPosition );
+		return Scene.Camera is null ? Vector3Int.Zero : GetCanonicalSample( Scene.Camera.WorldPosition );
+	}
+
+	private Vector3Int GetCanonicalSample( Vector3 worldPosition )
+	{
+		var localVoxelPosition = GameObject.WorldTransform.PointToLocal( worldPosition ) / VoxelSize;
+		return new Vector3Int(
+			(int)System.MathF.Floor( localVoxelPosition.x ),
+			(int)System.MathF.Floor( localVoxelPosition.y ),
+			(int)System.MathF.Floor( localVoxelPosition.z ) );
 	}
 
 	private void PopulateStreamingObserverChunks( List<Vector3Int> destination )
@@ -2573,7 +2639,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private WorldConfiguration CaptureWorldConfiguration()
 	{
-		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuAutoScalePoolToChunkRadius, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
+		return new WorldConfiguration( ChunkSize, ChunkRadius, VoxelSize, SdfClampDistance, CaptureTerrainConfiguration(), TerrainMaterial, VisualBackend, GpuTerrainLodPolicy, GpuClipboxBlocksPerAxis, GpuClipboxLevelCount, GpuAutoScalePoolToChunkRadius, GpuVertexPoolCapacity, GpuIndexPoolCapacity, GpuTerrainRuleVersion );
 	}
 
 	private TerrainConfiguration CaptureTerrainConfiguration() => new( SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
@@ -2624,7 +2690,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
 	private readonly record struct TerrainConfiguration( float Frequency, float Amplitude, float BaseHeight, int Seed );
-	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, bool GpuAutoScalePoolToChunkRadius, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
+	private readonly record struct WorldConfiguration( int ChunkSize, int ChunkRadius, float VoxelSize, float SdfClampDistance, TerrainConfiguration Terrain, Material TerrainMaterial, VoxelVisualBackendMode VisualBackend, VoxelGpuTerrainLodPolicy GpuTerrainLodPolicy, int GpuClipboxBlocksPerAxis, int GpuClipboxLevelCount, bool GpuAutoScalePoolToChunkRadius, int GpuVertexPoolCapacity, int GpuIndexPoolCapacity, int GpuTerrainRuleVersion );
 
 	private sealed class WorldGenerationWorkerResult
 	{

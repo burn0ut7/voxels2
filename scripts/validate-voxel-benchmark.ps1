@@ -20,6 +20,7 @@ $fullRequiredScenarios = @(
 	'phase4_indirect_boundary_49',
 	'phase4_depth_opaque_parity',
 	'phase4_command_list_active_range',
+	'phase4_regular_b4_l2_stationary',
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
 	'gpu_production_render_integration',
@@ -44,7 +45,7 @@ $fullRequiredScenarios = @(
 	'sustained_world_spiral_place_20hz'
 )
 $gpuRequiredScenarios = @(
-	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range',
+	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary',
 	'gpu_persistent_static_set', 'gpu_production_render_integration',
 	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
@@ -157,7 +158,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 15 ) { Add-Failure "Expected suite version 15, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 16 ) { Add-Failure "Expected suite version 16, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -242,6 +243,14 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.indirect_render_maximum_command_count -lt 1024 ) { Add-Failure "$context did not cover 1,024 indirect commands" }
 		if ( [int]$scenario.indirect_render_group_size -le 0 ) { Add-Failure "$context has no indirect command-group capability result" }
 		if ( [int]$scenario.indirect_render_boundary_visible_commands -ne 49 ) { Add-Failure "$context did not validate the 49-command boundary" }
+	}
+	elseif ( $scenario.scenario -eq 'phase4_regular_b4_l2_stationary' )
+	{
+		if ( $scenario.gpu_phase2b_available -ne $true ) { Add-Failure "$context has no GPU regular clipbox proof result" }
+		if ( $scenario.gpu_phase2b_passed -ne $true ) { Add-Failure "$context regular clipbox proof failed: $($scenario.gpu_phase2b_failure)" }
+		if ( $scenario.gpu_terrain_lod_policy -ne 'regular_clipbox_b4_l2' ) { Add-Failure "$context reported LOD policy '$($scenario.gpu_terrain_lod_policy)'" }
+		if ( [long]$scenario.gpu_terrain_requested_blocks -ne 120 -or [long]$scenario.gpu_terrain_resident_blocks -ne 120 ) { Add-Failure "$context did not settle 120 active regular residents" }
+		if ( [long]$scenario.gpu_terrain_pending_request_count -ne 0 -or [long]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending regular clipbox work" }
 	}
 	elseif ( $scenario.scenario -eq 'gpu_production_render_integration' )
 	{
