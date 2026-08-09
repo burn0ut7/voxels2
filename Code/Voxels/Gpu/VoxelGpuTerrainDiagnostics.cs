@@ -67,7 +67,19 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	int ClipboxTransitionChangedSlots,
 	int ClipboxTransitionPendingSlots,
 	int ClipboxTransitionDependencyMismatches,
-	int ClipboxTransitionStationaryUpdates );
+	int ClipboxTransitionStationaryUpdates,
+	int TransitionResidentBlocks,
+	int TransitionRenderableResidents,
+	int TransitionVisibleDrawCommands,
+	int TransitionPendingRequests,
+	int TransitionBlockedRequests,
+	int TransitionAllocatedVertexCount,
+	int TransitionAllocatedIndexCount,
+	long TransitionAllocatedBytes,
+	long TransitionGeometryReadbackBytes,
+	long TransitionCpuSdfEvaluations,
+	int TransitionStaleSchedulerRejections,
+	int TransitionStaleDependencyRejections );
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
 {
@@ -76,6 +88,8 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	public int PendingRequestCapacity;
 	public int PendingRequestCount;
 	public int PendingPublicationCount;
+	public int TransitionPendingRequests;
+	public int TransitionBlockedRequests;
 	public bool QueuesBounded = true;
 	private double _countReadbackTotalMilliseconds;
 	private int _countReadbackCount;
@@ -112,6 +126,9 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	public int ClipboxTransitionPendingSlots;
 	public int ClipboxTransitionDependencyMismatches;
 	public int ClipboxTransitionStationaryUpdates;
+	public int TransitionVisibleDrawCommands;
+	public int TransitionStaleSchedulerRejections;
+	public int TransitionStaleDependencyRejections;
 
 	public void RecordCountReadback( double milliseconds )
 	{
@@ -126,6 +143,11 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	{
 		var usedBytes = pool is null ? 0 : (long)pool.UsedVertices * 44 + (long)pool.UsedIndices * sizeof( uint );
 		var peakBytes = pool is null ? 0 : (long)pool.PeakUsedVertices * 44 + (long)pool.PeakUsedIndices * sizeof( uint );
+		var transitionResidents = 0;
+		var transitionRenderable = 0;
+		var transitionVertices = 0;
+		var transitionIndices = 0;
+		residents?.GetPublishedAllocationTotals( true, out transitionResidents, out transitionRenderable, out transitionVertices, out transitionIndices );
 		return new VoxelGpuTerrainDiagnostics(
 			"gpu_persistent_fixed_lod",
 			capabilities.Available,
@@ -195,7 +217,19 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			ClipboxTransitionChangedSlots,
 			ClipboxTransitionPendingSlots,
 			ClipboxTransitionDependencyMismatches,
-			ClipboxTransitionStationaryUpdates );
+			ClipboxTransitionStationaryUpdates,
+			transitionResidents,
+			transitionRenderable,
+			TransitionVisibleDrawCommands,
+			TransitionPendingRequests,
+			TransitionBlockedRequests,
+			transitionVertices,
+			transitionIndices,
+			(long)transitionVertices * 44 + (long)transitionIndices * sizeof( uint ),
+			0,
+			0,
+			TransitionStaleSchedulerRejections,
+			TransitionStaleDependencyRejections );
 	}
 
 	private static VoxelTimingDistribution Summarize( List<double> values )

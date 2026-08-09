@@ -107,6 +107,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		var publishedCount = _residents.CopyPublishedEntries( _residentSnapshot );
 		var frustum = _camera.GetFrustum();
 		var visibleCommandCount = 0;
+		var transitionVisibleCommandCount = 0;
 		for ( var index = 0; index < publishedCount; index++ )
 		{
 			var entry = _residentSnapshot[index];
@@ -116,6 +117,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 			var padding = Vector3.One * (_cullingPaddingWorld * 0.25f);
 			var bounds = new BBox( boundsMin - padding, boundsMax + padding );
 			if ( !frustum.IsInside( bounds, true ) ) continue;
+			if ( entry.Key.IsTransition ) transitionVisibleCommandCount++;
 			_argumentData[visibleCommandCount++] = new GpuBuffer.IndirectDrawIndexedArguments
 			{
 				IndexCount = entry.Descriptor.IndexCount,
@@ -131,6 +133,7 @@ internal sealed class VoxelGpuTerrainRenderer : SceneCustomObject, System.IDispo
 		var uploadCount = System.Math.Max( visibleUploadCount, _attachedDepthCommandListCount * _commandsPerSubmission );
 		if ( uploadCount > visibleCommandCount ) System.Array.Clear( _argumentData, visibleCommandCount, uploadCount - visibleCommandCount );
 		_diagnostics.VisibleDrawCommands = visibleCommandCount;
+		_diagnostics.TransitionVisibleDrawCommands = transitionVisibleCommandCount;
 		if ( ArgumentsChanged( uploadCount ) )
 		{
 			_argumentUploadCount++;

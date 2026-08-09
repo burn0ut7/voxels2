@@ -104,6 +104,10 @@ $requiredMetrics = @(
 	'gpu_terrain_count_submission_per_block_ms', 'gpu_terrain_emit_submission_per_block_ms',
 	'gpu_terrain_request_to_visible_avg_ms', 'gpu_terrain_request_to_visible_p95_ms', 'gpu_terrain_request_to_visible_max_ms',
 	'gpu_terrain_batch_completion_avg_ms', 'gpu_terrain_batch_completion_p95_ms', 'gpu_terrain_batch_completion_max_ms',
+	'gpu_terrain_transition_resident_blocks', 'gpu_terrain_transition_renderable_residents', 'gpu_terrain_transition_visible_draw_commands',
+	'gpu_terrain_transition_pending_requests', 'gpu_terrain_transition_blocked_requests', 'gpu_terrain_transition_allocated_vertex_count',
+	'gpu_terrain_transition_allocated_index_count', 'gpu_terrain_transition_allocated_bytes', 'gpu_terrain_transition_geometry_readback_bytes',
+	'gpu_terrain_transition_cpu_sdf_evaluations', 'gpu_terrain_transition_stale_scheduler_rejections', 'gpu_terrain_transition_stale_dependency_rejections',
 	'gpu_phase2b_available', 'gpu_phase2b_passed', 'gpu_phase2b_test', 'gpu_phase2b_failure',
 	'gpu_lifecycle_budget_bytes', 'gpu_lifecycle_peak_used_bytes', 'gpu_lifecycle_churn_operations',
 	'gpu_lifecycle_allocation_failures', 'gpu_lifecycle_backpressure_events',
@@ -305,6 +309,11 @@ foreach ( $scenario in $scenarios )
 		if ( [long]$scenario.gpu_terrain_clipbox_dropped_work -ne 0 ) { Add-Failure "$context dropped clipbox work" }
 		if ( [long]$scenario.gpu_terrain_clipbox_max_pending_revision_count -gt 1 ) { Add-Failure "$context exceeded one pending clipbox revision" }
 		if ( [long]$scenario.gpu_terrain_pending_request_count -ne 0 -or [long]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending regular clipbox work" }
+		if ( [long]$scenario.gpu_terrain_transition_resident_blocks -ne [long]$scenario.gpu_terrain_clipbox_transition_active_slots ) { Add-Failure "$context did not publish every active transition resident" }
+		if ( [long]$scenario.gpu_terrain_transition_pending_requests -ne 0 -or [long]$scenario.gpu_terrain_transition_blocked_requests -ne 0 ) { Add-Failure "$context completed with pending transition work" }
+		if ( [long]$scenario.gpu_terrain_transition_geometry_readback_bytes -ne 0 -or [long]$scenario.gpu_terrain_transition_cpu_sdf_evaluations -ne 0 ) { Add-Failure "$context used a forbidden production transition readback or CPU SDF path" }
+		if ( [long]$scenario.gpu_terrain_transition_allocated_bytes -lt 0 ) { Add-Failure "$context reported a negative transition allocation" }
+		if ( $scenario.scenario -eq 'phase4_regular_b4_l2_stationary' -and [long]$scenario.gpu_terrain_transition_renderable_residents -le 0 ) { Add-Failure "$context did not emit production transition geometry" }
 	}
 	elseif ( $scenario.scenario -eq 'gpu_production_render_integration' )
 	{

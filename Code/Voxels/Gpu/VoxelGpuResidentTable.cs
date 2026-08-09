@@ -18,6 +18,25 @@ internal sealed class VoxelGpuResidentTable
 			return count;
 		}
 	}
+
+	public void GetPublishedAllocationTotals( bool transitions, out int count, out int renderableCount, out int vertexCount, out int indexCount )
+	{
+		lock ( _sync )
+		{
+			count = 0;
+			renderableCount = 0;
+			vertexCount = 0;
+			indexCount = 0;
+			foreach ( var entry in _entries )
+			{
+				if ( !entry.Published || entry.Key.IsTransition != transitions ) continue;
+				count++;
+				if ( entry.Descriptor.IndexCount != 0 ) renderableCount++;
+				vertexCount = checked( vertexCount + entry.Allocation.Vertices.Count );
+				indexCount = checked( indexCount + entry.Allocation.Indices.Count );
+			}
+		}
+	}
 	public bool ContainsKey( VoxelVisualBlockKey key ) { lock ( _sync ) return _slotsByKey.ContainsKey( key ); }
 	public bool TryGetPublished( VoxelVisualBlockKey key, out ResidentEntry entry )
 	{
