@@ -13,12 +13,13 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 27;
+	private const int SuiteVersion = 30;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
 		"cold_generation",
 		"collision_backlog_frame_budget",
+		"collision_proximity_edit_filter",
 		"phase4_planner_counts",
 		"phase4_planner_reference_equivalence",
 		"phase4_negative_coordinates",
@@ -75,6 +76,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"bulk_edit",
 		"sustained_world_sweep_and_depth_dig_20hz",
 		"sustained_world_spiral_place_20hz",
+		"player_post_edit_line_streaming",
 		"phase4_regular_b8_l4_stationary"
 	};
 	private static readonly ComparisonMetric[] ComparisonMetrics =
@@ -152,6 +154,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private int _phase4RegularScenarioIndex;
 	private long _phase4RegularSoakStartTimestamp;
 	private VoxelGpuPhase2BProofResult _pendingRegularClipboxProof;
+	private VoxelCallCountSnapshot _collisionProximityBaseline;
 	private static readonly string[] GpuLifecycleScenarioNames =
 	{
 		"gpu_allocator_churn",
@@ -234,9 +237,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
-			"cold_generation", "collision_backlog_frame_budget", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
+			"cold_generation", "collision_backlog_frame_budget", "collision_proximity_edit_filter", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
 			"player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
-			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz"
+			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz", "player_post_edit_line_streaming"
 		},
 		_ => AllRequiredScenarios
 	};
@@ -402,7 +405,45 @@ public sealed class VoxelTerrainBenchmark : Component
 				break;
 			case BenchmarkPhase.WaitCollisionBacklog:
 				if ( _manager.IsTerrainSettled )
-					CompleteScenarioAndWarmup( BenchmarkPhase.StartPhase4Planner );
+					CompleteScenarioAndWarmup( BenchmarkPhase.StartCollisionProximityEdit );
+				break;
+			case BenchmarkPhase.StartCollisionProximityEdit:
+				BeginScenario( "collision_proximity_edit_filter", "Edit a loaded terrain chunk outside every player collision radius without queuing CPU collision work" );
+				_collisionProximityBaseline = _manager.CaptureCallCountSnapshot();
+				var farChunk = _manager.ChunkRadius - 1;
+				if ( farChunk <= _manager.CollisionChunkRadius )
+				{
+					_sampler.RecordFailure();
+					CompleteScenario();
+					FailRun( $"collision proximity proof requires ChunkRadius > CollisionChunkRadius + 1; configured={_manager.ChunkRadius}/{_manager.CollisionChunkRadius}" );
+					break;
+				}
+				var farLocalPosition = new Vector3( (farChunk + 0.5f) * _manager.ChunkSize * _manager.VoxelSize, 0.0f, 0.0f );
+				var editStart = System.Diagnostics.Stopwatch.GetTimestamp();
+				var changedChunks = _manager.DisplaceSdf( _manager.GameObject.WorldTransform.PointToWorld( farLocalPosition ), _manager.VoxelSize * 3.0f, _manager.VoxelSize * 4.0f );
+				_sampler.RecordEdit( changedChunks, System.Diagnostics.Stopwatch.GetElapsedTime( editStart ).TotalMilliseconds );
+				if ( changedChunks == 0 )
+				{
+					_sampler.RecordFailure();
+					CompleteScenario();
+					FailRun( $"collision proximity proof edit changed no chunks at local position {farLocalPosition}" );
+					break;
+				}
+				_phase = BenchmarkPhase.WaitCollisionProximityEdit;
+				break;
+			case BenchmarkPhase.WaitCollisionProximityEdit:
+				if ( !_manager.IsTerrainSettled ) break;
+				var collisionCalls = _manager.CaptureCallCountSnapshot().Subtract( _collisionProximityBaseline );
+				var collisionWork = collisionCalls.CollisionBuildsQueued + collisionCalls.CollisionBuildsStarted + collisionCalls.CollisionBuildsCompleted + collisionCalls.CollisionUploads;
+				if ( collisionWork > 0 ) _sampler.RecordFailure();
+				CompleteScenario();
+				if ( collisionWork > 0 )
+				{
+					FailRun( $"distant terrain edit escaped the collision proximity filter: queued={collisionCalls.CollisionBuildsQueued}, started={collisionCalls.CollisionBuildsStarted}, completed={collisionCalls.CollisionBuildsCompleted}, uploads={collisionCalls.CollisionUploads}" );
+					break;
+				}
+				_phase = BenchmarkPhase.StartPhase4Planner;
+				StartWarmup();
 				break;
 			case BenchmarkPhase.Warmup:
 				if ( --_warmupFramesRemaining <= 0 ) AdvanceAfterWarmup();
@@ -845,14 +886,19 @@ public sealed class VoxelTerrainBenchmark : Component
 				if ( _manager.IsTerrainSettled )
 				{
 					CompleteScenario();
-					if ( Mode == VoxelTerrainBenchmarkMode.CpuOnly )
-					{
-						FinalizeCompletedRun();
-						break;
-					}
-					_phase = BenchmarkPhase.StartFinalStationarySoak;
+					_phase = BenchmarkPhase.StartPostEditLineTraversal;
 					StartWarmup();
 				}
+				break;
+			case BenchmarkPhase.StartPostEditLineTraversal:
+				BeginPlayerTraversal( TraversalPath.Line, "player_post_edit_line_streaming", "Actual player crosses streamed terrain after the complete edit workload; historical edits must remain spatially bounded" );
+				if ( _phase != BenchmarkPhase.Failed ) _phase = BenchmarkPhase.RunPostEditLineTraversal;
+				break;
+			case BenchmarkPhase.RunPostEditLineTraversal:
+				RunPlayerTraversal( BenchmarkPhase.WaitPostEditLineTraversal );
+				break;
+			case BenchmarkPhase.WaitPostEditLineTraversal:
+				if ( _manager.IsTerrainSettled ) CompletePostEditPlayerTraversal();
 				break;
 			case BenchmarkPhase.StartFinalStationarySoak:
 				BeginFinalStationarySoak();
@@ -1173,24 +1219,44 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void CompletePlayerTraversalAndReset( BenchmarkPhase nextPhase )
 	{
+		if ( !ValidatePlayerTraversal() ) return;
+		CompleteScenarioAndReset( nextPhase );
+	}
+
+	private void CompletePostEditPlayerTraversal()
+	{
+		if ( !ValidatePlayerTraversal() ) return;
+		CompleteScenario();
+		if ( Mode == VoxelTerrainBenchmarkMode.CpuOnly )
+		{
+			FinalizeCompletedRun();
+			return;
+		}
+
+		_phase = BenchmarkPhase.StartFinalStationarySoak;
+		StartWarmup();
+	}
+
+	private bool ValidatePlayerTraversal()
+	{
 		var scenarioName = _sampler?.Name ?? _traversalPath.ToString();
 		var diagnostics = _manager.CaptureTerrainDiagnostics();
 		if ( _manager.LoadedChunkCount <= _traversalInitialCachedChunkCount )
 		{
 			FailRun( $"{scenarioName} did not generate chunks beyond the starting radius" );
-			return;
+			return false;
 		}
 		if ( diagnostics.ActiveVisualChunks != _manager.DesiredChunkCount )
 		{
 			FailRun( $"{scenarioName} active mesh count {diagnostics.ActiveVisualChunks} did not match desired count {_manager.DesiredChunkCount}" );
-			return;
+			return false;
 		}
 		if ( _manager.ActiveChunkGameObjectCount != _manager.DesiredChunkCount )
 		{
 			FailRun( $"{scenarioName} chunk object count {_manager.ActiveChunkGameObjectCount} did not match desired count {_manager.DesiredChunkCount}" );
-			return;
+			return false;
 		}
-		CompleteScenarioAndReset( nextPhase );
+		return true;
 	}
 
 	private void CompleteGpuPlayerTraversal( string scenarioName, BenchmarkPhase nextPhase )
@@ -2164,6 +2230,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		Warmup,
 		StartCollisionBacklog,
 		WaitCollisionBacklog,
+		StartCollisionProximityEdit,
+		WaitCollisionProximityEdit,
 		StartPhase4Planner,
 		WaitPhase4Planner,
 		StartPhase5EditProof,
@@ -2228,6 +2296,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		StartSustainedPlace,
 		RunSustainedPlace,
 		WaitSustainedPlace,
+		StartPostEditLineTraversal,
+		RunPostEditLineTraversal,
+		WaitPostEditLineTraversal,
 		Complete,
 		Failed
 	}
@@ -2255,6 +2326,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		private int _gen1Collections;
 		private int _gen2Collections;
 		private int _exceptions;
+		private bool _failed;
 		private ulong _peakMemoryBytes;
 		private uint _lastGpuFrameNumber;
 		private bool _hasGpuFrameNumber;
@@ -2313,6 +2385,11 @@ public sealed class VoxelTerrainBenchmark : Component
 		public void RecordVisualCoherenceViolation()
 		{
 			_visualCoherenceViolationFrames++;
+		}
+
+		public void RecordFailure()
+		{
+			_failed = true;
 		}
 
 		public bool Sample()
@@ -2420,7 +2497,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			{
 				Name = Name,
 				Description = Description,
-				Passed = diagnostics.FailedVisualChunks == 0 && diagnostics.PendingVisualBuilds == 0 && diagnostics.PendingCollisionBuilds == 0 && !diagnostics.PlayerSafetyActive && _exceptions == 0 && _visualCoherenceViolationFrames == 0 && (!gpuProof.HasValue || gpuProof.Value.Passed) && (!gpuPhase2BProof.HasValue || gpuPhase2BProof.Value.Passed) && (!gpuPhase3AProof.HasValue || gpuPhase3AProof.Value.Passed) && (!gpuPhase3BProof.HasValue || gpuPhase3BProof.Value.Passed) && (!clipboxPlannerProof.HasValue || clipboxPlannerProof.Value.Passed) && (!indirectRenderProof.HasValue || indirectRenderProof.Value.Passed) && (!transitionProof.HasValue || transitionProof.Value.Passed) && (!transitionProof.HasValue || !transitionProof.Value.GpuCaseProofAvailable || transitionProof.Value.GpuCaseProofPassed),
+				Passed = !_failed && diagnostics.FailedVisualChunks == 0 && diagnostics.PendingVisualBuilds == 0 && diagnostics.PendingCollisionBuilds == 0 && !diagnostics.PlayerSafetyActive && _exceptions == 0 && _visualCoherenceViolationFrames == 0 && (!gpuProof.HasValue || gpuProof.Value.Passed) && (!gpuPhase2BProof.HasValue || gpuPhase2BProof.Value.Passed) && (!gpuPhase3AProof.HasValue || gpuPhase3AProof.Value.Passed) && (!gpuPhase3BProof.HasValue || gpuPhase3BProof.Value.Passed) && (!clipboxPlannerProof.HasValue || clipboxPlannerProof.Value.Passed) && (!indirectRenderProof.HasValue || indirectRenderProof.Value.Passed) && (!transitionProof.HasValue || transitionProof.Value.Passed) && (!transitionProof.HasValue || !transitionProof.Value.GpuCaseProofAvailable || transitionProof.Value.GpuCaseProofPassed),
 				EditCount = EditCount,
 				ChangedChunkEvents = ChangedChunkEvents,
 				VisualCoherenceViolationFrames = _visualCoherenceViolationFrames,

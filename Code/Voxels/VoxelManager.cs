@@ -11,7 +11,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumCpuMeshUploadsPerFrame = 16;
 	private const int MaximumCollisionChunkRadius = 16;
 	private const int MaximumCollisionBuildsPerFrame = 1;
-	private const int MaximumConcurrentCollisionBuilds = 8;
+	private const int MaximumConcurrentCollisionBuilds = 1;
 	private const int MaximumChunkTimingHistory = 65536;
 	private const int MaximumBatchTimingHistory = 4096;
 	private const int GpuPoolReferenceRadius = 32;
@@ -48,6 +48,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Queue<Vector3Int> _collisionBuildQueue = new();
 	private readonly HashSet<Vector3Int> _collisionQueuedChunks = new();
 	private readonly HashSet<Vector3Int> _collisionDesiredChunks = new();
+	private readonly HashSet<Vector3Int> _staleCollisionChunks = new();
 	private readonly Dictionary<Vector3Int, CpuChunkRuntime> _cpuChunkStates = new();
 	private readonly Queue<Vector3Int> _cpuChunkBuildQueue = new();
 	private readonly HashSet<Vector3Int> _cpuQueuedChunks = new();
@@ -230,7 +231,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int CollisionBuildsPerFrame { get; set; } = 1;
 
 	[Property, Group( "Collision" ), Range( 1, MaximumConcurrentCollisionBuilds )]
-	public int CollisionBuildConcurrency { get; set; } = 2;
+	public int CollisionBuildConcurrency { get; set; } = 1;
 
 	[Property, Group( "Diagnostics" )]
 	public bool LogGeneration { get; set; }
@@ -1448,13 +1449,19 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		var cpuQueueStart = System.Diagnostics.Stopwatch.GetTimestamp();
+		var collisionDirtyCount = 0;
 		foreach ( var coordinate in changedChunks )
 		{
 			if ( _cpuChunkStates.TryGetValue( coordinate, out var cpuState ) )
 			{
 				MarkCpuChunkDirty( cpuState );
 			}
-			MarkCollisionDirty( coordinate );
+			_staleCollisionChunks.Add( coordinate );
+			if ( _collisionDesiredChunks.Contains( coordinate ) )
+			{
+				MarkCollisionDirty( coordinate );
+				collisionDirtyCount++;
+			}
 		}
 		MergeCoherentVisualEditBatch( changedChunks );
 		MergeCoherentCollisionEditBatch( changedChunks );
@@ -1474,7 +1481,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		Log.Info(
 			$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
 			$"dirtyCpuChunks={changedChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
-			$"cpuCollisionQueued={changedChunks.Count:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
+			$"cpuCollisionDirtyNearby={collisionDirtyCount:N0}, collisionStaleDeferred={changedChunks.Count - collisionDirtyCount:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
 			$"sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, sdfMutation={sdfMutationElapsed.TotalMilliseconds:F2}ms, " +
 			$"cpuQueue={cpuQueueElapsed.TotalMilliseconds:F2}ms, gpuQueue={gpuQueueElapsed.TotalMilliseconds:F2}ms, total={elapsed.TotalMilliseconds:F2}ms."
 		);
@@ -1575,7 +1582,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				chunk.SetVoxel( x, y, z, new Voxel( distance, distance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air ) );
 			}
 		}
-		var operations = _editJournal.CreateOperationSnapshot();
+		var chunkMinimum = new Vector3( chunkOrigin.x, chunkOrigin.y, chunkOrigin.z );
+		var chunkMaximum = chunkMinimum + new Vector3( chunk.Size );
+		var operations = _editJournal.CreateOperationSnapshot( new BBox( chunkMinimum, chunkMaximum ) );
 		if ( operations.Length == 0 ) return;
 		for ( var z = 0; z < sampleSize; z++ )
 		for ( var y = 0; y < sampleSize; y++ )
@@ -1878,6 +1887,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		CountCall( ref _callSdfHaloSnapshots );
 		CountCall( ref _callSdfHaloSamplesCopied, halo.Length );
 		var origin = GetChunkVoxelOrigin( chunk.Coordinate );
+		var haloMinimum = new Vector3( origin.x - 1, origin.y - 1, origin.z - 1 );
+		var haloMaximum = new Vector3( origin.x + chunk.Size + 1, origin.y + chunk.Size + 1, origin.z + chunk.Size + 1 );
+		var localOperations = _editJournal.CreateOperationSnapshot( new BBox( haloMinimum, haloMaximum ) );
 		for ( var z = -1; z <= chunk.Size + 1; z++ )
 		{
 			for ( var y = -1; y <= chunk.Size + 1; y++ )
@@ -1886,22 +1898,22 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				if ( y >= 0 && y <= chunk.Size && z >= 0 && z <= chunk.Size )
 				{
 					chunk.CopyDistanceRowTo( y, z, halo, rowStart + 1 );
-					halo[rowStart] = GetWorldSdfSample( origin + new Vector3Int( -1, y, z ), chunk );
-					halo[rowStart + haloSize - 1] = GetWorldSdfSample( origin + new Vector3Int( chunk.Size + 1, y, z ), chunk );
+					halo[rowStart] = GetWorldSdfSample( origin + new Vector3Int( -1, y, z ), chunk, localOperations );
+					halo[rowStart + haloSize - 1] = GetWorldSdfSample( origin + new Vector3Int( chunk.Size + 1, y, z ), chunk, localOperations );
 					continue;
 				}
 
 				for ( var x = -1; x <= chunk.Size + 1; x++ )
 				{
 					var worldSample = origin + new Vector3Int( x, y, z );
-					halo[rowStart + x + 1] = GetWorldSdfSample( worldSample, chunk );
+					halo[rowStart + x + 1] = GetWorldSdfSample( worldSample, chunk, localOperations );
 				}
 			}
 		}
 		return halo;
 	}
 
-	private float GetWorldSdfSample( Vector3Int worldSample, VoxelChunk preferredChunk )
+	private float GetWorldSdfSample( Vector3Int worldSample, VoxelChunk preferredChunk, IReadOnlyList<VoxelEditOp> localOperations )
 	{
 		var preferredOrigin = GetChunkVoxelOrigin( preferredChunk.Coordinate );
 		var local = worldSample - preferredOrigin;
@@ -1923,7 +1935,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		var canonicalSample = new Vector3( worldSample.x, worldSample.y, worldSample.z );
-		return _editJournal.EvaluateDistance( canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
+		return VoxelEditJournal.EvaluateDistance( localOperations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
 	}
 
 	private static int FloorDiv( int value, int divisor )
@@ -1991,8 +2003,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		state.Dirty = false;
 		state.Queued = false;
 		state.ReadyResult = null;
-		state.PinnedByEdit = false;
 		state.CompletedGeneration = generation;
+		_staleCollisionChunks.Remove( state.Coordinate );
 		state.VertexCount = meshData.Vertices.Count;
 		state.TriangleCount = meshData.Indices.Count / 3;
 		state.SnapshotWaitTime = snapshotWaitTime;
@@ -2180,6 +2192,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_collisionBuildQueue.Clear();
 		_collisionQueuedChunks.Clear();
 		_collisionDesiredChunks.Clear();
+		_staleCollisionChunks.Clear();
 		_lastCollisionInterestTimestamp = 0;
 	}
 
@@ -2527,15 +2540,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 		foreach ( var pair in _chunkColliders )
 		{
-			if ( pair.Value.PinnedByEdit )
+			if ( !_collisionDesiredChunks.Contains( pair.Key ) )
 			{
-				_collisionDesiredChunks.Add( pair.Key );
-			}
-			else if ( !_collisionDesiredChunks.Contains( pair.Key ) )
-			{
-				pair.Value.Collider.Enabled = false;
+				DeactivateCollisionState( pair.Value );
 			}
 		}
+		PruneCollisionEditBatches();
 
 		var ordered = new List<Vector3Int>( _collisionDesiredChunks );
 		ordered.Sort( (left, right) => GetCollisionPriority( left, observers ).CompareTo( GetCollisionPriority( right, observers ) ) );
@@ -2546,6 +2556,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				QueueCollisionChunkGeneration( coordinate );
 				continue;
 			}
+			if ( _staleCollisionChunks.Contains( coordinate ) ) MarkDesiredCollisionStale( coordinate );
 			if ( _chunkColliders.TryGetValue( coordinate, out var state ) )
 			{
 				if ( !Application.IsDedicatedServer && TryStagePublishedVisualCollider( state ) )
@@ -2563,6 +2574,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 	}
 
+	private static void DeactivateCollisionState( ChunkCollisionState state )
+	{
+		state.Collider.Enabled = false;
+		state.ReadyResult = null;
+		state.Dirty = false;
+		state.Queued = false;
+	}
+
 	private void QueueCollisionChunkGeneration( Vector3Int coordinate )
 	{
 		if ( _collisionGenerationQueuedChunks.Add( coordinate ) ) _collisionGenerationQueue.Enqueue( coordinate );
@@ -2577,6 +2596,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_collisionGenerationQueuedChunks.Remove( coordinate );
 			if ( !_collisionDesiredChunks.Contains( coordinate ) || _chunks.ContainsKey( coordinate ) ) continue;
 			GenerateChunk( coordinate );
+			if ( _staleCollisionChunks.Contains( coordinate ) ) MarkDesiredCollisionStale( coordinate );
 			QueueCollisionBuild( coordinate );
 			generated++;
 			if ( generated >= 1 || System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
@@ -2611,9 +2631,17 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		state.DesiredGeneration++;
 		state.Dirty = true;
 		state.ReadyResult = null;
-		state.PinnedByEdit = true;
 		state.DirtyTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-		_collisionDesiredChunks.Add( coordinate );
+	}
+
+	private void MarkDesiredCollisionStale( Vector3Int coordinate )
+	{
+		var state = GetOrCreateChunkCollider( coordinate );
+		if ( state.Dirty ) return;
+		state.DesiredGeneration++;
+		state.Dirty = true;
+		state.ReadyResult = null;
+		state.DirtyTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 	}
 
 	private void QueueCollisionBuild( Vector3Int coordinate )
@@ -2648,6 +2676,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		CountCall( ref _callCollisionQueuePumps );
 		var publicationLimit = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
+		var workerLimit = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
 
 		// Worker completion is cheap to harvest. Physics model creation is not, so keep
 		// completed meshes staged until the bounded publication pass below.
@@ -2716,7 +2745,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			inFlight += state.Task is not null ? 1 : 0;
 		}
 
-		while ( inFlight < CollisionBuildConcurrency && _collisionBuildQueue.TryDequeue( out var coordinate ) )
+		while ( inFlight < workerLimit && _collisionBuildQueue.TryDequeue( out var coordinate ) )
 		{
 			_collisionQueuedChunks.Remove( coordinate );
 			if ( !_collisionDesiredChunks.Contains( coordinate ) || !_chunks.ContainsKey( coordinate ) )
@@ -2840,7 +2869,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var mergedBatch = new HashSet<Vector3Int>();
 		foreach ( var coordinate in changedChunks )
 		{
-			if ( _cpuChunkStates.ContainsKey( coordinate ) && _chunkColliders.ContainsKey( coordinate ) ) mergedBatch.Add( coordinate );
+			if ( _collisionDesiredChunks.Contains( coordinate ) && _cpuChunkStates.ContainsKey( coordinate ) && _chunkColliders.ContainsKey( coordinate ) ) mergedBatch.Add( coordinate );
 		}
 		if ( mergedBatch.Count == 0 ) return;
 
@@ -2852,6 +2881,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_coherentCollisionEditBatches.RemoveAt( index );
 		}
 		_coherentCollisionEditBatches.Add( mergedBatch );
+	}
+
+	private void PruneCollisionEditBatches()
+	{
+		for ( var batchIndex = _coherentCollisionEditBatches.Count - 1; batchIndex >= 0; batchIndex-- )
+		{
+			_coherentCollisionEditBatches[batchIndex].RemoveWhere( coordinate => !_collisionDesiredChunks.Contains( coordinate ) );
+			if ( _coherentCollisionEditBatches[batchIndex].Count == 0 ) _coherentCollisionEditBatches.RemoveAt( batchIndex );
+		}
 	}
 
 	private int UploadCoherentCollisionEditBatches()
@@ -3056,7 +3094,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		state.PublishedMeshData = result.Mesh;
 		if ( _chunkColliders.TryGetValue( state.Coordinate, out var collisionState ) &&
-			(_collisionDesiredChunks.Contains( state.Coordinate ) || collisionState.PinnedByEdit) )
+			_collisionDesiredChunks.Contains( state.Coordinate ) )
 		{
 			StageChunkCollider( collisionState, result.Mesh, result.Generation, result.SnapshotWaitTime, result.SnapshotTime, result.MeshingTime );
 		}
@@ -3356,7 +3394,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		public bool Built { get; set; }
 		public bool Dirty { get; set; }
 		public bool Queued { get; set; }
-		public bool PinnedByEdit { get; set; }
 		public long DirtyTimestamp { get; set; }
 		public int VertexCount { get; set; }
 		public int TriangleCount { get; set; }

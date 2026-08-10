@@ -138,6 +138,19 @@ internal sealed class VoxelEditJournal
 		lock ( _gate ) return _operations.ToArray();
 	}
 
+	public VoxelEditOp[] CreateOperationSnapshot( BBox bounds )
+	{
+		lock ( _gate )
+		{
+			var matching = new List<VoxelEditOp>();
+			foreach ( var operation in _operations )
+			{
+				if ( BoundsIntersect( GetBounds( operation ), bounds ) ) matching.Add( operation );
+			}
+			return matching.ToArray();
+		}
+	}
+
 	public static BBox GetBounds( VoxelEditOp operation )
 	{
 		var radius = operation.Shape switch
@@ -149,6 +162,11 @@ internal sealed class VoxelEditJournal
 		radius += operation.Smoothness;
 		return new BBox( operation.Position - Vector3.One * radius, operation.Position + Vector3.One * radius );
 	}
+
+	private static bool BoundsIntersect( BBox left, BBox right ) =>
+		left.Mins.x <= right.Maxs.x && left.Maxs.x >= right.Mins.x &&
+		left.Mins.y <= right.Maxs.y && left.Maxs.y >= right.Mins.y &&
+		left.Mins.z <= right.Maxs.z && left.Maxs.z >= right.Mins.z;
 
 	private static bool Contains( VoxelEditOp operation, Vector3 point ) => GetBounds( operation ).Contains( point );
 
