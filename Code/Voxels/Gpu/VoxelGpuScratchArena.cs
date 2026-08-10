@@ -25,7 +25,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	private readonly GpuBuffer<VoxelGpuCountResult> _countResults;
 	private readonly GpuBuffer<VoxelGpuAllocationDescriptor> _allocations;
 	private readonly GpuBuffer<VoxelGpuEditOp> _editOperations;
-	private readonly GpuBuffer<uint> _editIndices;
 	private readonly int _chunkSize;
 	private readonly int _sampleSize;
 	private readonly int _haloSize;
@@ -88,7 +87,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_countResults = new GpuBuffer<VoxelGpuCountResult>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Count Results" );
 		_allocations = new GpuBuffer<VoxelGpuAllocationDescriptor>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Batch Allocations" );
 		_editOperations = new GpuBuffer<VoxelGpuEditOp>( VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Active Edits" );
-		_editIndices = new GpuBuffer<uint>( MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Batch Edit Indices" );
 
 		_clear = new ComputeShader( "shaders/voxel_gpu_count_clear_cs.shader" );
 		_density = new ComputeShader( "shaders/voxel_gpu_density_material_v1_cs.shader" );
@@ -107,7 +105,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			(long)(_edgeGroupCount + _cellGroupCount) * MaximumBatchSize * sizeof( uint ) +
 			(long)MaximumBatchSize * (sizeof( uint ) * 2 + 32 + 64) +
 			(long)VoxelEditJournal.MaximumGpuOperations * 80 +
-			(long)MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations * sizeof( uint ) +
 			(long)_regularLookup.ElementCount * sizeof( uint );
 	}
 
@@ -117,11 +114,11 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
 	}
 
-	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, uint[] editIndices, int editIndexCount, out double submissionMilliseconds )
+	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, out double submissionMilliseconds )
 	{
 		lock ( _stateLock )
 		{
-			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count || editIndices is null || editIndexCount < 0 || editIndexCount > editIndices.Length || editIndexCount > _editIndices.ElementCount )
+			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count )
 			{
 				submissionMilliseconds = 0.0;
 				return false;
@@ -132,11 +129,9 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		_requests.SetData( new System.Span<VoxelGpuBlockRequest>( requests, 0, count ) );
-		if ( editIndexCount > 0 ) _editIndices.SetData( new System.Span<uint>( editIndices, 0, editIndexCount ) );
 		SetBatchSize( count );
 		_statistics.Clear();
 		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
-		Graphics.ResourceBarrierTransition( _editIndices, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _densitySamples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		foreach ( var buffer in new GpuBuffer[] { _cells, _edgeFlags, _edgeVertexIds, _statistics, _edgeGroupSums, _cellGroupSums, _blockCounts, _countResults } )
@@ -264,7 +259,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_density.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
 		_density.Attributes.Set( "SimplexSeed", _simplexSeed );
 		_density.Attributes.Set( "VoxelEditOperations", _editOperations );
-		_density.Attributes.Set( "VoxelEditIndices", _editIndices );
 	}
 
 	private void SetBatchSize( int batchSize )
@@ -300,7 +294,7 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		}
 		_requests.Dispose(); _densitySamples.Dispose(); _regularLookup.Dispose(); _cells.Dispose(); _edgeFlags.Dispose();
 		_edgeVertexIds.Dispose(); _statistics.Dispose(); _edgeGroupSums.Dispose(); _cellGroupSums.Dispose(); _blockCounts.Dispose();
-		_unusedDrawCounter.Dispose(); _countResults.Dispose(); _allocations.Dispose(); _editOperations.Dispose(); _editIndices.Dispose();
+		_unusedDrawCounter.Dispose(); _countResults.Dispose(); _allocations.Dispose(); _editOperations.Dispose();
 	}
 
 	private enum ArenaState { Idle, CountSubmitted, CountReady, EmitReady }
