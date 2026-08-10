@@ -10,7 +10,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumConcurrentCpuChunkBuilds = 32;
 	private const int MaximumCpuMeshUploadsPerFrame = 16;
 	private const int MaximumCollisionChunkRadius = 16;
-	private const int MaximumCollisionBuildsPerFrame = 16;
+	private const int MaximumCollisionBuildsPerFrame = 1;
 	private const int MaximumConcurrentCollisionBuilds = 8;
 	private const int MaximumChunkTimingHistory = 65536;
 	private const int MaximumBatchTimingHistory = 4096;
@@ -43,6 +43,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Dictionary<Vector3Int, long> _chunkStreamingRequestTimestamps = new();
 	private readonly object _sdfLock = new();
 	private readonly Dictionary<Vector3Int, ChunkCollisionState> _chunkColliders = new();
+	private readonly Queue<Vector3Int> _collisionGenerationQueue = new();
+	private readonly HashSet<Vector3Int> _collisionGenerationQueuedChunks = new();
 	private readonly Queue<Vector3Int> _collisionBuildQueue = new();
 	private readonly HashSet<Vector3Int> _collisionQueuedChunks = new();
 	private readonly HashSet<Vector3Int> _collisionDesiredChunks = new();
@@ -50,6 +52,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Queue<Vector3Int> _cpuChunkBuildQueue = new();
 	private readonly HashSet<Vector3Int> _cpuQueuedChunks = new();
 	private readonly List<HashSet<Vector3Int>> _coherentVisualEditBatches = new();
+	private readonly List<HashSet<Vector3Int>> _coherentCollisionEditBatches = new();
 	private readonly HashSet<System.Guid> _protectedPlayerIds = new();
 	private readonly List<double> _cpuBatchFrameMilliseconds = new( 4096 );
 	private readonly List<System.Threading.Tasks.Task<WorldGenerationWorkerResult>> _worldGenerationTasks = new();
@@ -224,7 +227,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int CollisionChunkRadius { get; set; } = 2;
 
 	[Property, Group( "Collision" ), Range( 1, MaximumCollisionBuildsPerFrame )]
-	public int CollisionBuildsPerFrame { get; set; } = 4;
+	public int CollisionBuildsPerFrame { get; set; } = 1;
 
 	[Property, Group( "Collision" ), Range( 1, MaximumConcurrentCollisionBuilds )]
 	public int CollisionBuildConcurrency { get; set; } = 2;
@@ -704,6 +707,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		DisposeCpuVisualWorld();
 		DisposeGpuTerrainBackend();
 		StartVisualWorld();
+	}
+
+	internal void RebuildCollisionWorldForBenchmark()
+	{
+		ActivatePlayerSafety();
+		ClearChunkColliders();
+		RefreshCollisionInterests();
 	}
 
 	private void StartVisualWorld()
@@ -1344,10 +1354,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private int GetPendingCollisionBuildCount()
 	{
-		var pending = _collisionBuildQueue.Count;
+		var pending = _collisionGenerationQueue.Count + _collisionBuildQueue.Count;
 		foreach ( var state in _chunkColliders.Values )
 		{
-			if ( state.Task is not null || state.Dirty ||
+			if ( state.Task is not null || state.ReadyResult.HasValue || state.Dirty ||
 				(_collisionDesiredChunks.Contains( state.Coordinate ) && state.CompletedGeneration < state.DesiredGeneration) )
 			{
 				pending++;
@@ -1447,6 +1457,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			MarkCollisionDirty( coordinate );
 		}
 		MergeCoherentVisualEditBatch( changedChunks );
+		MergeCoherentCollisionEditBatch( changedChunks );
 		ActivatePlayerSafetyForEdit( changedChunks );
 		PumpCpuChunkBuildQueue();
 		var cpuQueueElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( cpuQueueStart );
@@ -1979,6 +1990,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		state.Built = true;
 		state.Dirty = false;
 		state.Queued = false;
+		state.ReadyResult = null;
 		state.PinnedByEdit = false;
 		state.CompletedGeneration = generation;
 		state.VertexCount = meshData.Vertices.Count;
@@ -2162,6 +2174,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		_chunkColliders.Clear();
+		_coherentCollisionEditBatches.Clear();
+		_collisionGenerationQueue.Clear();
+		_collisionGenerationQueuedChunks.Clear();
 		_collisionBuildQueue.Clear();
 		_collisionQueuedChunks.Clear();
 		_collisionDesiredChunks.Clear();
@@ -2477,6 +2492,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			RefreshCollisionInterests();
 		}
 
+		PumpCollisionGenerationQueue();
 		PumpCollisionBuildQueue();
 	}
 
@@ -2505,7 +2521,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			for ( var x = -CollisionChunkRadius; x < CollisionChunkRadius; x++ )
 			{
 				var coordinate = new Vector3Int( observer.x + x, observer.y + y, 0 );
-				if ( !_chunks.ContainsKey( coordinate ) ) GenerateChunk( coordinate );
 				_collisionDesiredChunks.Add( coordinate );
 			}
 		}
@@ -2526,9 +2541,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		ordered.Sort( (left, right) => GetCollisionPriority( left, observers ).CompareTo( GetCollisionPriority( right, observers ) ) );
 		foreach ( var coordinate in ordered )
 		{
+			if ( !_chunks.ContainsKey( coordinate ) )
+			{
+				QueueCollisionChunkGeneration( coordinate );
+				continue;
+			}
 			if ( _chunkColliders.TryGetValue( coordinate, out var state ) )
 			{
-				if ( !Application.IsDedicatedServer && TryUploadPublishedVisualCollider( state ) )
+				if ( !Application.IsDedicatedServer && TryStagePublishedVisualCollider( state ) )
 				{
 					continue;
 				}
@@ -2540,6 +2560,26 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			}
 
 			QueueCollisionBuild( coordinate );
+		}
+	}
+
+	private void QueueCollisionChunkGeneration( Vector3Int coordinate )
+	{
+		if ( _collisionGenerationQueuedChunks.Add( coordinate ) ) _collisionGenerationQueue.Enqueue( coordinate );
+	}
+
+	private void PumpCollisionGenerationQueue()
+	{
+		var start = System.Diagnostics.Stopwatch.GetTimestamp();
+		var generated = 0;
+		while ( _collisionGenerationQueue.TryDequeue( out var coordinate ) )
+		{
+			_collisionGenerationQueuedChunks.Remove( coordinate );
+			if ( !_collisionDesiredChunks.Contains( coordinate ) || _chunks.ContainsKey( coordinate ) ) continue;
+			GenerateChunk( coordinate );
+			QueueCollisionBuild( coordinate );
+			generated++;
+			if ( generated >= 1 || System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
 		}
 	}
 
@@ -2570,6 +2610,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var state = GetOrCreateChunkCollider( coordinate );
 		state.DesiredGeneration++;
 		state.Dirty = true;
+		state.ReadyResult = null;
 		state.PinnedByEdit = true;
 		state.DirtyTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		_collisionDesiredChunks.Add( coordinate );
@@ -2584,9 +2625,14 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		if ( !Application.IsDedicatedServer )
 		{
-			if ( TryUploadPublishedVisualCollider( state ) ) return;
+			if ( TryStagePublishedVisualCollider( state ) ) return;
 		}
-		if ( state.Task is not null )
+		if ( _cpuChunkStates.TryGetValue( coordinate, out var visualState ) &&
+			(visualState.Task is not null || visualState.ReadyResult.HasValue || visualState.CompletedGeneration < visualState.DesiredGeneration) )
+		{
+			return;
+		}
+		if ( state.Task is not null || state.ReadyResult.HasValue )
 		{
 			return;
 		}
@@ -2601,18 +2647,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void PumpCollisionBuildQueue()
 	{
 		CountCall( ref _callCollisionQueuePumps );
-		var mainThreadStart = System.Diagnostics.Stopwatch.GetTimestamp();
-		var uploads = 0;
+		var publicationLimit = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
+
+		// Worker completion is cheap to harvest. Physics model creation is not, so keep
+		// completed meshes staged until the bounded publication pass below.
 		foreach ( var state in _chunkColliders.Values )
 		{
-			if ( uploads >= CollisionBuildsPerFrame )
-			{
-				break;
-			}
-			if ( uploads > 0 && System.Diagnostics.Stopwatch.GetElapsedTime( mainThreadStart ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds )
-			{
-				break;
-			}
 			if ( state.Task is null || !state.Task.IsCompleted )
 			{
 				continue;
@@ -2624,20 +2664,46 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			if ( task.IsFaulted )
 			{
 				Log.Error( $"Voxel CPU collision build failed for chunk {state.Coordinate}: {task.Exception?.GetBaseException().Message}" );
+				if ( state.Dirty && _collisionDesiredChunks.Contains( state.Coordinate ) ) QueueCollisionBuild( state.Coordinate );
 				continue;
 			}
 			if ( task.IsCanceled )
 			{
+				if ( state.Dirty && _collisionDesiredChunks.Contains( state.Coordinate ) ) QueueCollisionBuild( state.Coordinate );
 				continue;
 			}
 
 			var result = task.Result;
-			if ( result.Generation != state.DesiredGeneration )
+			if ( result.Generation != state.DesiredGeneration || result.Generation <= state.CompletedGeneration )
 			{
+				if ( state.Dirty && _collisionDesiredChunks.Contains( state.Coordinate ) ) QueueCollisionBuild( state.Coordinate );
 				continue;
 			}
 			if ( !_collisionDesiredChunks.Contains( state.Coordinate ) )
 			{
+				continue;
+			}
+			state.ReadyResult = result;
+		}
+
+		var mainThreadStart = System.Diagnostics.Stopwatch.GetTimestamp();
+		var uploads = UploadCoherentCollisionEditBatches();
+		foreach ( var state in _chunkColliders.Values )
+		{
+			if ( uploads >= publicationLimit ||
+				(uploads > 0 && System.Diagnostics.Stopwatch.GetElapsedTime( mainThreadStart ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds) )
+			{
+				break;
+			}
+			if ( !state.ReadyResult.HasValue ) continue;
+			if ( IsInCoherentCollisionEditBatch( state.Coordinate ) ) continue;
+
+			var result = state.ReadyResult.Value;
+			if ( !_collisionDesiredChunks.Contains( state.Coordinate ) || result.Generation != state.DesiredGeneration ||
+				result.Generation <= state.CompletedGeneration )
+			{
+				state.ReadyResult = null;
+				if ( state.Dirty && _collisionDesiredChunks.Contains( state.Coordinate ) ) QueueCollisionBuild( state.Coordinate );
 				continue;
 			}
 			UploadChunkCollider( state, result );
@@ -2658,7 +2724,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				continue;
 			}
 
-			if ( !_chunkColliders.TryGetValue( coordinate, out var state ) || state.Task is not null )
+			if ( !_chunkColliders.TryGetValue( coordinate, out var state ) || state.Task is not null || state.ReadyResult.HasValue )
 			{
 				continue;
 			}
@@ -2767,6 +2833,65 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_coherentVisualEditBatches.RemoveAt( index );
 		}
 		_coherentVisualEditBatches.Add( mergedBatch );
+	}
+
+	private void MergeCoherentCollisionEditBatch( List<Vector3Int> changedChunks )
+	{
+		var mergedBatch = new HashSet<Vector3Int>();
+		foreach ( var coordinate in changedChunks )
+		{
+			if ( _cpuChunkStates.ContainsKey( coordinate ) && _chunkColliders.ContainsKey( coordinate ) ) mergedBatch.Add( coordinate );
+		}
+		if ( mergedBatch.Count == 0 ) return;
+
+		for ( var index = _coherentCollisionEditBatches.Count - 1; index >= 0; index-- )
+		{
+			var existingBatch = _coherentCollisionEditBatches[index];
+			if ( !existingBatch.Overlaps( mergedBatch ) ) continue;
+			mergedBatch.UnionWith( existingBatch );
+			_coherentCollisionEditBatches.RemoveAt( index );
+		}
+		_coherentCollisionEditBatches.Add( mergedBatch );
+	}
+
+	private int UploadCoherentCollisionEditBatches()
+	{
+		var uploads = 0;
+		for ( var batchIndex = _coherentCollisionEditBatches.Count - 1; batchIndex >= 0; batchIndex-- )
+		{
+			var batch = _coherentCollisionEditBatches[batchIndex];
+			var ready = true;
+			foreach ( var coordinate in batch )
+			{
+				if ( !_chunkColliders.TryGetValue( coordinate, out var state ) ||
+					(state.CompletedGeneration < state.DesiredGeneration &&
+					(!state.ReadyResult.HasValue || state.ReadyResult.Value.Generation != state.DesiredGeneration)) )
+				{
+					ready = false;
+					break;
+				}
+			}
+			if ( !ready ) continue;
+
+			foreach ( var coordinate in batch )
+			{
+				var state = _chunkColliders[coordinate];
+				if ( !state.ReadyResult.HasValue ) continue;
+				UploadChunkCollider( state, state.ReadyResult.Value );
+				uploads++;
+			}
+			_coherentCollisionEditBatches.RemoveAt( batchIndex );
+		}
+		return uploads;
+	}
+
+	private bool IsInCoherentCollisionEditBatch( Vector3Int coordinate )
+	{
+		foreach ( var batch in _coherentCollisionEditBatches )
+		{
+			if ( batch.Contains( coordinate ) ) return true;
+		}
+		return false;
 	}
 
 	private void QueueCpuChunkBuild( CpuChunkRuntime state )
@@ -2933,7 +3058,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		if ( _chunkColliders.TryGetValue( state.Coordinate, out var collisionState ) &&
 			(_collisionDesiredChunks.Contains( state.Coordinate ) || collisionState.PinnedByEdit) )
 		{
-			UploadChunkCollider( collisionState, result.Mesh, result.Generation, result.SnapshotWaitTime, result.SnapshotTime, result.MeshingTime );
+			StageChunkCollider( collisionState, result.Mesh, result.Generation, result.SnapshotWaitTime, result.SnapshotTime, result.MeshingTime );
 		}
 
 		if ( state.GameObject is null )
@@ -3020,7 +3145,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 	}
 
-	private bool TryUploadPublishedVisualCollider( ChunkCollisionState collisionState )
+	private bool TryStagePublishedVisualCollider( ChunkCollisionState collisionState )
 	{
 		if ( !_cpuChunkStates.TryGetValue( collisionState.Coordinate, out var visualState ) ||
 			visualState.PublishedMeshData is null || visualState.CompletedGeneration < visualState.DesiredGeneration ||
@@ -3030,9 +3155,19 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		collisionState.DesiredGeneration = visualState.CompletedGeneration;
-		UploadChunkCollider( collisionState, visualState.PublishedMeshData, visualState.CompletedGeneration,
+		StageChunkCollider( collisionState, visualState.PublishedMeshData, visualState.CompletedGeneration,
 			visualState.SnapshotWaitTime, visualState.SnapshotTime, visualState.MeshingTime );
 		return true;
+	}
+
+	private static void StageChunkCollider( ChunkCollisionState state, VoxelMeshData meshData, int generation,
+		System.TimeSpan snapshotWaitTime, System.TimeSpan snapshotTime, System.TimeSpan meshingTime )
+	{
+		if ( generation < state.DesiredGeneration || generation <= state.CompletedGeneration ) return;
+		state.DesiredGeneration = generation;
+		state.Dirty = true;
+		state.Queued = false;
+		state.ReadyResult = new CollisionBuildResult( generation, meshData, snapshotWaitTime, snapshotTime, meshingTime );
 	}
 
 	private void TryLogCpuBatchSummary()
@@ -3214,6 +3349,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		public GameObject GameObject { get; }
 		public ModelCollider Collider { get; }
 		public System.Threading.Tasks.Task<CollisionBuildResult> Task { get; set; }
+		public CollisionBuildResult? ReadyResult { get; set; }
 		public int DesiredGeneration { get; set; }
 		public int TaskGeneration { get; set; }
 		public int CompletedGeneration { get; set; }

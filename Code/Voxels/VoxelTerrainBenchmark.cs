@@ -13,11 +13,12 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 26;
+	private const int SuiteVersion = 27;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
 		"cold_generation",
+		"collision_backlog_frame_budget",
 		"phase4_planner_counts",
 		"phase4_planner_reference_equivalence",
 		"phase4_negative_coordinates",
@@ -233,7 +234,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
-			"cold_generation", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
+			"cold_generation", "collision_backlog_frame_budget", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
 			"player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
 			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz"
 		},
@@ -392,6 +393,15 @@ public sealed class VoxelTerrainBenchmark : Component
 				// its first world-generation request is processed. Treating that empty
 				// state as settled lets the GPU proof run without an origin chunk.
 				if ( _manager.DesiredChunkCount == _manager.ConfiguredChunkCount && _manager.IsTerrainSettled )
+					CompleteScenarioAndWarmup( BenchmarkPhase.StartCollisionBacklog );
+				break;
+			case BenchmarkPhase.StartCollisionBacklog:
+				BeginScenario( "collision_backlog_frame_budget", "Rebuild every nearby collider through the bounded physics publication queue" );
+				_manager.RebuildCollisionWorldForBenchmark();
+				_phase = BenchmarkPhase.WaitCollisionBacklog;
+				break;
+			case BenchmarkPhase.WaitCollisionBacklog:
+				if ( _manager.IsTerrainSettled )
 					CompleteScenarioAndWarmup( BenchmarkPhase.StartPhase4Planner );
 				break;
 			case BenchmarkPhase.Warmup:
@@ -2152,6 +2162,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		Idle,
 		WaitInitialGeneration,
 		Warmup,
+		StartCollisionBacklog,
+		WaitCollisionBacklog,
 		StartPhase4Planner,
 		WaitPhase4Planner,
 		StartPhase5EditProof,
