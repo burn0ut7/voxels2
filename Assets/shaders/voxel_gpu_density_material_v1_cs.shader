@@ -46,16 +46,35 @@ CS
 		uint localColumn = id.x - block * columnSampleCount;
 		uint localY = localColumn / (uint)HaloSize;
 		uint localX = localColumn - localY * (uint)HaloSize;
+		BlockRequest request = BlockRequests[block];
 		float2 localSampleXY = float2( localX, localY ) - 1.0f;
-		float2 sampleXY = BlockRequests[block].SampleOrigin.xy + localSampleXY * BlockRequests[block].SampleScale.xy;
+		float2 sampleXY = request.SampleOrigin.xy + localSampleXY * request.SampleScale.xy;
 		float surfaceHeight = SimplexBaseHeight + VoxelTerrainSimplexNoise( sampleXY * SimplexFrequency, SimplexSeed ) * SimplexAmplitude;
+		float densities[35];
 		[loop] for ( uint localZ = 0; localZ < (uint)HaloSize; localZ++ )
 		{
-			float sampleZ = BlockRequests[block].SampleOrigin.z + ((float)localZ - 1.0f) * BlockRequests[block].SampleScale.z;
-			float3 sample = float3( sampleXY, sampleZ );
+			float sampleZ = request.SampleOrigin.z + ((float)localZ - 1.0f) * request.SampleScale.z;
+			densities[localZ] = EvaluateTerrainDensityFromSurfaceHeight( sampleZ, surfaceHeight, SdfClampDistance );
+		}
+		uint editOperationCount = (uint)request.SampleScale.w;
+		[loop] for ( uint editIndex = 0; editIndex < editOperationCount; editIndex++ )
+		{
+			VoxelEditOperation edit = VoxelEditOperations[editIndex];
+			if ( edit.Operation == 4 ) continue;
+			float boundsRadius = edit.BoundsMin.w;
+			if ( any( abs( sampleXY - edit.PositionAndSmoothness.xy ) > boundsRadius ) ) continue;
+			[loop] for ( uint localZ = 0; localZ < (uint)HaloSize; localZ++ )
+			{
+				float sampleZ = request.SampleOrigin.z + ((float)localZ - 1.0f) * request.SampleScale.z;
+				if ( abs( sampleZ - edit.PositionAndSmoothness.z ) > boundsRadius ) continue;
+				densities[localZ] = ApplyTerrainEditShape( edit, float3( sampleXY, sampleZ ), densities[localZ] );
+			}
+		}
+		[loop] for ( uint localZ = 0; localZ < (uint)HaloSize; localZ++ )
+		{
 			uint localIndex = localX + localY * (uint)HaloSize + localZ * (uint)HaloSize * (uint)HaloSize;
 			uint outputIndex = block * (uint)HaloSampleCount + localIndex;
-			DensitySamples[outputIndex] = EvaluateEditedTerrainDensityFromSurfaceHeight( sample, (uint)BlockRequests[block].SampleScale.w, surfaceHeight, SdfClampDistance );
+			DensitySamples[outputIndex] = FinalizeEditedTerrainDensity( densities[localZ], SdfClampDistance );
 		}
 	}
 }
