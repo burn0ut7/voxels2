@@ -1464,6 +1464,17 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		lock ( _sdfLock ) return _editJournal.EvaluateDistance( canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
 	}
 
+	public bool TryRaycastSdf( Vector3 worldStart, Vector3 worldDirection, float maximumDistance, out Vector3 hitPosition )
+	{
+		var operations = _editJournal.CreateOperationSnapshot();
+		float EvaluateWorldDistance( Vector3 worldPosition )
+		{
+			var canonicalSample = GameObject.WorldTransform.PointToLocal( worldPosition ) / VoxelSize;
+			return VoxelEditJournal.EvaluateDistance( operations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) ) * VoxelSize;
+		}
+		return VoxelSdfRaycast.TryTrace( worldStart, worldDirection, maximumDistance, System.MathF.Max( 1.0f, VoxelSize * 0.125f ), EvaluateWorldDistance, out hitPosition );
+	}
+
 	private void FillChunk( VoxelChunk chunk, int chunkSize )
 	{
 		var sampleSize = chunk.SampleSize;

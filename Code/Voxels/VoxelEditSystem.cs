@@ -241,3 +241,65 @@ internal static class VoxelEditInvalidation
 		return value < 0 && value % divisor != 0 ? quotient - 1 : quotient;
 	}
 }
+
+internal static class VoxelSdfRaycast
+{
+	private const int MaximumSamples = 512;
+	private const int RefinementSteps = 8;
+
+	public static bool TryTrace( Vector3 start, Vector3 direction, float maximumDistance, float minimumStep, System.Func<Vector3, float> evaluateDistance, out Vector3 hitPosition )
+	{
+		hitPosition = default;
+		if ( maximumDistance <= 0.0f || minimumStep <= 0.0f || direction.LengthSquared <= 0.000001f || evaluateDistance is null ) return false;
+		direction = direction.Normal;
+		var hitTolerance = minimumStep * 0.5f;
+		var travelled = 0.0f;
+		var previousPosition = start;
+		var previousDistance = evaluateDistance( start );
+		if ( System.MathF.Abs( previousDistance ) <= hitTolerance )
+		{
+			hitPosition = start;
+			return true;
+		}
+
+		for ( var sample = 0; sample < MaximumSamples && travelled < maximumDistance; sample++ )
+		{
+			var step = System.MathF.Max( System.MathF.Abs( previousDistance ) * 0.75f, minimumStep );
+			travelled = System.MathF.Min( maximumDistance, travelled + step );
+			var position = start + direction * travelled;
+			var distance = evaluateDistance( position );
+			if ( System.MathF.Abs( distance ) <= hitTolerance )
+			{
+				hitPosition = position;
+				return true;
+			}
+			if ( (previousDistance < 0.0f) != (distance < 0.0f) )
+			{
+				hitPosition = Refine( previousPosition, position, previousDistance, evaluateDistance );
+				return true;
+			}
+			previousPosition = position;
+			previousDistance = distance;
+		}
+		return false;
+	}
+
+	private static Vector3 Refine( Vector3 first, Vector3 second, float firstDistance, System.Func<Vector3, float> evaluateDistance )
+	{
+		for ( var iteration = 0; iteration < RefinementSteps; iteration++ )
+		{
+			var middle = (first + second) * 0.5f;
+			var middleDistance = evaluateDistance( middle );
+			if ( (firstDistance < 0.0f) == (middleDistance < 0.0f) )
+			{
+				first = middle;
+				firstDistance = middleDistance;
+			}
+			else
+			{
+				second = middle;
+			}
+		}
+		return (first + second) * 0.5f;
+	}
+}

@@ -1,12 +1,15 @@
 public sealed class VoxelBrush : Component
 {
 	private const float BrushRepeatInterval = 0.05f;
+	private const string DigAction = "Attack1";
+	private const string PlaceAction = "Attack2";
 	private float _brushRepeatCooldown;
 	private float _applyOnStartCountdown;
 	private bool _applyOnStartPending;
 	private bool _applyOnStartLastFrame;
 	private int _applyOnStartRemaining;
 	private int _applyOnStartIndex;
+	private bool _aimMissLogged;
 
 	[Property, Group( "Brush" )]
 	public Vector3 LocalCenter { get; set; }
@@ -22,6 +25,9 @@ public sealed class VoxelBrush : Component
 
 	[Property, Group( "Debug" )]
 	public bool ApplyOnStart { get; set; }
+
+	[Property, Group( "Debug" )]
+	public bool ApplyOnStartUsesAim { get; set; }
 
 	[Property, Group( "Debug" ), Range( 0.0f, 10.0f )]
 	public float ApplyOnStartDelay { get; set; }
@@ -57,7 +63,8 @@ public sealed class VoxelBrush : Component
 			_applyOnStartCountdown -= Time.Delta;
 			if ( _applyOnStartCountdown <= 0.0f )
 			{
-				ApplyBrush( LocalCenter + ApplyOnStartStep * _applyOnStartIndex );
+				if ( ApplyOnStartUsesAim ) ApplyAimedBrush( SdfDisplacement >= 0.0f, true );
+				else ApplyBrush( LocalCenter + ApplyOnStartStep * _applyOnStartIndex );
 				_applyOnStartIndex++;
 				_applyOnStartRemaining--;
 				_applyOnStartPending = _applyOnStartRemaining > 0;
@@ -65,8 +72,8 @@ public sealed class VoxelBrush : Component
 			}
 		}
 
-		var dig = Input.Down( "attack1" );
-		var place = !dig && Input.Down( "attack2" );
+		var dig = Input.Down( DigAction );
+		var place = !dig && Input.Down( PlaceAction );
 		if ( !dig && !place )
 		{
 			_brushRepeatCooldown = 0.0f;
@@ -85,6 +92,7 @@ public sealed class VoxelBrush : Component
 
 	private void BeginDebugBrushSequence()
 	{
+		_aimMissLogged = false;
 		_applyOnStartCountdown = ApplyOnStartDelay;
 		_applyOnStartRemaining = System.Math.Clamp( ApplyOnStartCount, 1, 64 );
 		_applyOnStartIndex = 0;
@@ -95,6 +103,18 @@ public sealed class VoxelBrush : Component
 	public void ApplyBrush()
 	{
 		ApplyBrush( LocalCenter );
+	}
+
+	[Button( "Dig At Aim" )]
+	public void DigAtAim()
+	{
+		ApplyAimedBrush( true );
+	}
+
+	[Button( "Place At Aim" )]
+	public void PlaceAtAim()
+	{
+		ApplyAimedBrush( false );
 	}
 
 	private void ApplyBrush( Vector3 localCenter )
@@ -108,31 +128,51 @@ public sealed class VoxelBrush : Component
 		voxelWorld.DisplaceSdf( worldCenter, Radius, SdfDisplacement );
 	}
 
-	private void ApplyAimedBrush( bool dig )
+	private void ApplyAimedBrush( bool dig, bool forceCameraAim = false )
 	{
 		if ( !TryGetVoxelWorld( out var voxelWorld ) )
 		{
 			return;
 		}
 
-		var camera = Scene.Camera;
-		if ( camera is null )
+		if ( !TryGetAimTransform( forceCameraAim, out var aim ) )
 		{
 			return;
 		}
 
-		var traceStart = camera.WorldPosition;
-		var traceEnd = traceStart + camera.WorldRotation.Forward * TraceDistance;
-		var trace = Scene.Trace.Ray( traceStart, traceEnd )
-			.WithTag( VoxelManager.ChunkTag )
-			.Run();
-		if ( !trace.Hit || trace.GameObject?.Parent != GameObject )
+		if ( !voxelWorld.TryRaycastSdf( aim.Position, aim.Rotation.Forward, TraceDistance, out var hitPosition ) )
 		{
+			if ( !_aimMissLogged ) Log.Warning( $"Voxel brush aim did not intersect the authoritative terrain SDF: start={aim.Position}, direction={aim.Rotation.Forward}, range={TraceDistance:F1}." );
+			_aimMissLogged = true;
 			return;
 		}
 
+		_aimMissLogged = false;
 		var strength = System.MathF.Abs( SdfDisplacement );
-		voxelWorld.DisplaceSdf( trace.HitPosition, Radius, dig ? strength : -strength );
+		voxelWorld.DisplaceSdf( hitPosition, Radius, dig ? strength : -strength );
+	}
+
+	private bool TryGetAimTransform( bool forceCameraAim, out Transform aim )
+	{
+		if ( !forceCameraAim )
+		{
+			foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+			{
+				if ( !controller.Active || !controller.GameObject.Enabled || !controller.GameObject.Active ) continue;
+				if ( controller.GameObject.Network.Active && !controller.GameObject.Network.IsOwner ) continue;
+				aim = controller.EyeTransform;
+				return true;
+			}
+		}
+
+		if ( Scene.Camera is not null )
+		{
+			aim = Scene.Camera.WorldTransform;
+			return true;
+		}
+
+		aim = default;
+		return false;
 	}
 
 	private bool TryGetVoxelWorld( out VoxelManager voxelWorld )

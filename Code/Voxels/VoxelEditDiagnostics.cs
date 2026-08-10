@@ -12,6 +12,7 @@ internal static class VoxelEditDiagnostics
 				"phase5_deterministic_invalidation" => RunInvalidation(),
 				"phase5_stale_edit_generations" => RunStaleGenerations(),
 				"phase5_edit_eviction_reentry" => RunEvictionReentry(),
+				"phase5_voxel_brush_raycast" => RunBrushRaycast(),
 				_ => new VoxelEditProofReport( false, $"Unknown Phase Five edit scenario '{scenario}'.", 0, 0, 0 )
 			};
 		}
@@ -97,6 +98,15 @@ internal static class VoxelEditDiagnostics
 		var affected = VoxelEditInvalidation.GetVisualBlocks( operation, candidates, VoxelClipboxConfig.CellsPerBlock );
 		Require( affected.Count > 0 && affected.All( key => key.EditRevision == operation.WorldRevision ), "clipbox re-entry lost the edit revision" );
 		return new VoxelEditProofReport( true, string.Empty, samples.Length + affected.Count, 1, affected.Count );
+	}
+
+	private static VoxelEditProofReport RunBrushRaycast()
+	{
+		Require( VoxelSdfRaycast.TryTrace( new Vector3( 0, 0, 10 ), Vector3.Down, 20, 0.25f, point => point.z, out var hit ), "brush ray did not find the authoritative surface" );
+		Require( System.MathF.Abs( hit.z ) <= 0.25f, "brush ray converged outside its surface tolerance" );
+		Require( !VoxelSdfRaycast.TryTrace( new Vector3( 0, 0, 10 ), Vector3.Up, 20, 0.25f, point => point.z, out _ ), "brush ray reported a surface behind its aim direction" );
+		Require( VoxelSdfRaycast.TryTrace( new Vector3( 0, 0, -10 ), Vector3.Up, 20, 0.25f, point => point.z, out _ ), "brush ray could not exit solid terrain" );
+		return new VoxelEditProofReport( true, string.Empty, 4, 0, 0 );
 	}
 
 	private static VoxelEditOp Operation( VoxelEditShape shape, VoxelCsgOperation operation, Vector3 position, Vector3 size, float smoothness = 0.0f ) => new()
