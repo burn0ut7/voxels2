@@ -29,7 +29,6 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	private int _completedCount;
 	private long _readbackTimestamp;
 	private int _batchSize;
-	private int _uploadedEditOperationCount;
 	private ArenaState _state;
 	private bool _disposed;
 
@@ -67,11 +66,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	public void SetEditOperations( VoxelGpuEditOp[] operations, int count )
 	{
 		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
-		if ( count < _uploadedEditOperationCount ) throw new System.InvalidOperationException( "GPU edit journals are append-only for the lifetime of a transition scratch arena." );
-		var appendCount = count - _uploadedEditOperationCount;
-		if ( appendCount <= 0 ) return;
-		_editOperations.SetData( new System.ReadOnlySpan<VoxelGpuEditOp>( operations, _uploadedEditOperationCount, appendCount ), _uploadedEditOperationCount );
-		_uploadedEditOperationCount = count;
+		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
 	}
 
 	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, uint[] editIndices, int editIndexCount, out double submissionMilliseconds )
