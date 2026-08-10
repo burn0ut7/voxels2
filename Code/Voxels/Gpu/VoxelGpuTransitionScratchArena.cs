@@ -1,5 +1,6 @@
 internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 {
+	public const int RingSize = 2;
 	public const int MaximumBatchSize = 128;
 	private const int SampleCount = 13;
 	private readonly object _stateLock = new();
@@ -34,6 +35,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 
 	public long CapacityBytes { get; }
 	public bool IsIdle { get { lock ( _stateLock ) return _state == ArenaState.Idle; } }
+	public VoxelGpuTransitionScratchArena CreateParallelArena() => new( _chunkSize, _voxelSize, _sdfClampDistance, _simplexFrequency, _simplexAmplitude, _simplexBaseHeight, _simplexSeed );
 
 	public VoxelGpuTransitionScratchArena( int chunkSize, float voxelSize, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
 	{

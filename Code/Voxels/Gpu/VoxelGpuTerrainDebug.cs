@@ -80,6 +80,7 @@ internal readonly record struct VoxelGpuClipboxSeamProofReport(
 	int Lod5DuplicateTriangles,
 	int CollapsedTransitionMeshes,
 	int UndeformedCoarseBoundaryVertices,
+	int BackfacingTransitionTriangles,
 	int BoundaryVertices,
 	int UnmatchedBoundaryVertices,
 	float MaximumSeamPositionError,
@@ -91,8 +92,8 @@ internal readonly record struct VoxelGpuClipboxSeamProofReport(
 		ActiveTransitions > 0 && PublishedTransitions == ActiveTransitions && MissingTransitions == 0 &&
 		DependencyMismatches == 0 && FaceMaskMismatches == 0 && InvalidIndices == 0 &&
 		DuplicateRegularTriangles == 0 && DuplicateTransitionTriangles == 0 && CrossOwnerDuplicateTriangles == 0 && Lod5DuplicateTriangles == 0 &&
-		CollapsedTransitionMeshes == 0 && UndeformedCoarseBoundaryVertices == 0 && BoundaryVertices > 0 && UnmatchedBoundaryVertices == 0;
+		CollapsedTransitionMeshes == 0 && UndeformedCoarseBoundaryVertices == 0 && BackfacingTransitionTriangles == 0 && BoundaryVertices > 0 && UnmatchedBoundaryVertices == 0;
 
 	public string LodOwnershipFailure => LodOwnershipPassed ? string.Empty :
-		$"transitions={PublishedTransitions}/{ActiveTransitions}, missing={MissingTransitions}, dependencies={DependencyMismatches}, faceMasks={FaceMaskMismatches}, invalidIndices={InvalidIndices}, duplicates={DuplicateRegularTriangles + DuplicateTransitionTriangles + CrossOwnerDuplicateTriangles} (lod5={Lod5DuplicateTriangles}), collapsed={CollapsedTransitionMeshes}, undeformed={UndeformedCoarseBoundaryVertices}, boundary={BoundaryVertices}/{UnmatchedBoundaryVertices}";
+		$"transitions={PublishedTransitions}/{ActiveTransitions}, missing={MissingTransitions}, dependencies={DependencyMismatches}, faceMasks={FaceMaskMismatches}, invalidIndices={InvalidIndices}, duplicates={DuplicateRegularTriangles + DuplicateTransitionTriangles + CrossOwnerDuplicateTriangles} (lod5={Lod5DuplicateTriangles}), collapsed={CollapsedTransitionMeshes}, undeformed={UndeformedCoarseBoundaryVertices}, backfacing={BackfacingTransitionTriangles}, boundary={BoundaryVertices}/{UnmatchedBoundaryVertices}";
 }
