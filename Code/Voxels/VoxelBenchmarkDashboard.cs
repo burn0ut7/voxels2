@@ -95,6 +95,11 @@ public static class VoxelBenchmarkDashboard
 		{key:'snapshot_copy_ms',label:'Snapshot copy',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Time copying SDF halo samples into immutable worker snapshots.'},
 		{key:'worker_mesh_ms',label:'Worker mesh total',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Aggregate worker time spent generating meshes.'},
 		{key:'upload_ms',label:'Main-thread upload',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Main-thread time publishing generated meshes.'},
+		{key:'collision_snapshot_wait_ms',label:'Collision snapshot wait',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Aggregate worker time waiting to enter the authoritative SDF snapshot lock.'},
+		{key:'collision_snapshot_copy_ms',label:'Collision snapshot copy',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Aggregate time copying collision SDF halos.'},
+		{key:'collision_worker_mesh_ms',label:'Collision worker mesh',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Aggregate worker time generating exact collision topology.'},
+		{key:'collision_model_build_ms',label:'Collision model build',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Aggregate main-thread time constructing physics models.'},
+		{key:'collision_publication_ms',label:'Collision publication',unit:'ms',category:'Latency & pipeline',direction:'lower',about:'Aggregate main-thread model construction and collider installation time.'},
 		{key:'gpu_transvoxel_submission_ms',label:'GPU proof submission',unit:'ms',category:'GPU Transvoxel proof',direction:'lower',about:'CPU time required to submit the complete GPU density and regular-cell Transvoxel pipeline.'},
 		{key:'gpu_transvoxel_completion_ms',label:'GPU proof completion',unit:'ms',category:'GPU Transvoxel proof',direction:'lower',about:'Wall time from dispatch submission through GPU completion and validation readback.'},
 		{key:'gpu_transvoxel_readback_ms',label:'GPU proof readback',unit:'ms',category:'GPU Transvoxel proof',direction:'lower',about:'Diagnostic-only vertex/index readback and conformance validation time; not part of the intended resident runtime path.'},
@@ -212,7 +217,7 @@ public static class VoxelBenchmarkDashboard
 	const detailGroups={
 		'Frame experience':['avg_fps','one_percent_low_fps','point_one_percent_low_fps','frame_p95_ms','frame_max_ms','stutter_events'],
 		'Editing latency':['edit_call_p95_ms','post_edit_settle_ms','frames_over_33ms'],
-		'Meshing pipeline':['visual_batch_ms','snapshot_wait_ms','snapshot_copy_ms','worker_mesh_ms','upload_ms'],
+		'Meshing pipeline':['visual_batch_ms','snapshot_wait_ms','snapshot_copy_ms','worker_mesh_ms','upload_ms','collision_snapshot_wait_ms','collision_snapshot_copy_ms','collision_worker_mesh_ms','collision_model_build_ms','collision_publication_ms'],
 		'Memory':['allocated_bytes','peak_memory_bytes','gc_pause_ms','authoritative_sdf_bytes'],
 		'Topology':['visual_vertices','visual_triangles','collision_triangles','visual_coherence_violation_frames','draw_calls_avg']
 	};

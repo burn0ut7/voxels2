@@ -112,6 +112,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private double _totalSnapshotCopyMilliseconds;
 	private double _totalWorkerMeshMilliseconds;
 	private double _totalMainThreadUploadMilliseconds;
+	private double _totalCollisionSnapshotWaitMilliseconds;
+	private double _totalCollisionSnapshotCopyMilliseconds;
+	private double _totalCollisionWorkerMeshMilliseconds;
+	private double _totalCollisionModelBuildMilliseconds;
+	private double _totalCollisionPublicationMilliseconds;
 	private long _callManagerUpdates;
 	private long _callWorldGenerationRequests;
 	private long _callWorldGenerationPolls;
@@ -238,6 +243,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	[Property, Group( "Diagnostics" )]
 	public bool LogTerrainEdits { get; set; }
+
+	[Property, Group( "Diagnostics" )]
+	public bool LogCollisionBuilds { get; set; }
 
 	[Property, Group( "Diagnostics" )]
 	public bool CaptureCallCounts { get; set; }
@@ -1144,6 +1152,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			_totalSnapshotCopyMilliseconds,
 			_totalWorkerMeshMilliseconds,
 			_totalMainThreadUploadMilliseconds,
+			_totalCollisionSnapshotWaitMilliseconds,
+			_totalCollisionSnapshotCopyMilliseconds,
+			_totalCollisionWorkerMeshMilliseconds,
+			_totalCollisionModelBuildMilliseconds,
+			_totalCollisionPublicationMilliseconds,
 			_playerSafetyActive
 		);
 	}
@@ -1897,8 +1910,20 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		var haloSize = chunk.Size + 3;
 		var halo = new float[checked( haloSize * haloSize * haloSize )];
-		CountCall( ref _callSdfHaloSnapshots );
-		CountCall( ref _callSdfHaloSamplesCopied, halo.Length );
+		FillSdfHalo( chunk, halo, true );
+		return halo;
+	}
+
+	private void FillSdfHalo( VoxelChunk chunk, float[] halo, bool countVisualSnapshot )
+	{
+		var haloSize = chunk.Size + 3;
+		var haloSampleCount = checked( haloSize * haloSize * haloSize );
+		if ( halo is null || halo.Length < haloSampleCount ) throw new System.ArgumentException( "SDF halo destination is too small.", nameof( halo ) );
+		if ( countVisualSnapshot )
+		{
+			CountCall( ref _callSdfHaloSnapshots );
+			CountCall( ref _callSdfHaloSamplesCopied, haloSampleCount );
+		}
 		var origin = GetChunkVoxelOrigin( chunk.Coordinate );
 		var haloMinimum = new Vector3( origin.x - 1, origin.y - 1, origin.z - 1 );
 		var haloMaximum = new Vector3( origin.x + chunk.Size + 1, origin.y + chunk.Size + 1, origin.z + chunk.Size + 1 );
@@ -1923,7 +1948,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				}
 			}
 		}
-		return halo;
 	}
 
 	private float GetWorldSdfSample( Vector3Int worldSample, VoxelChunk preferredChunk, IReadOnlyList<VoxelEditOp> localOperations )
@@ -2005,10 +2029,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		UploadChunkCollider( state, result.Mesh, result.Generation, result.SnapshotWaitTime, result.SnapshotTime, result.MeshingTime );
 	}
 
-	private void UploadChunkCollider( ChunkCollisionState state, VoxelMeshData meshData, int generation, System.TimeSpan snapshotWaitTime, System.TimeSpan snapshotTime, System.TimeSpan meshingTime )
+	private void UploadChunkCollider( ChunkCollisionState state, VoxelCollisionMeshData meshData, int generation, System.TimeSpan snapshotWaitTime, System.TimeSpan snapshotTime, System.TimeSpan meshingTime )
 	{
-		var modelStart = System.Diagnostics.Stopwatch.GetTimestamp();
+		var publicationStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		var collisionModel = meshData.Indices.Count > 0 ? BuildCollisionModel( meshData ) : null;
+		var modelBuildTime = System.Diagnostics.Stopwatch.GetElapsedTime( publicationStart );
 		state.Collider.Enabled = false;
 		state.Collider.Model = collisionModel;
 		state.Collider.Enabled = meshData.Indices.Count > 0;
@@ -2023,30 +2048,29 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		state.SnapshotWaitTime = snapshotWaitTime;
 		state.SnapshotTime = snapshotTime;
 		state.MeshingTime = meshingTime;
-		state.ModelBuildTime = System.Diagnostics.Stopwatch.GetElapsedTime( modelStart );
+		state.ModelBuildTime = modelBuildTime;
+		state.PublicationTime = System.Diagnostics.Stopwatch.GetElapsedTime( publicationStart );
+		_totalCollisionSnapshotWaitMilliseconds += snapshotWaitTime.TotalMilliseconds;
+		_totalCollisionSnapshotCopyMilliseconds += snapshotTime.TotalMilliseconds;
+		_totalCollisionWorkerMeshMilliseconds += meshingTime.TotalMilliseconds;
+		_totalCollisionModelBuildMilliseconds += state.ModelBuildTime.TotalMilliseconds;
+		_totalCollisionPublicationMilliseconds += state.PublicationTime.TotalMilliseconds;
 		CountCall( ref _callCollisionUploads );
-		if ( LogGeneration )
+		if ( LogGeneration && LogCollisionBuilds )
 		{
 			Log.Info(
 				$"Voxel CPU collision: chunk={state.Coordinate}, topology=exact-visual-mesh, " +
 				$"vertices={state.VertexCount:N0}, triangles={state.TriangleCount:N0}, meshing={state.MeshingTime.TotalMilliseconds:F2}ms, " +
 				$"snapshotWait={state.SnapshotWaitTime.TotalMilliseconds:F2}ms, snapshot={state.SnapshotTime.TotalMilliseconds:F2}ms, " +
-				$"physicsModel={state.ModelBuildTime.TotalMilliseconds:F2}ms, objectReused=yes."
+				$"physicsModel={state.ModelBuildTime.TotalMilliseconds:F2}ms, publication={state.PublicationTime.TotalMilliseconds:F2}ms, objectReused=yes."
 			);
 		}
 	}
 
-	private static Model BuildCollisionModel( VoxelMeshData meshData )
+	private static Model BuildCollisionModel( VoxelCollisionMeshData meshData )
 	{
-		var collisionVertices = new List<Vector3>( meshData.Vertices.Count );
-		foreach ( var vertex in meshData.Vertices )
-		{
-			collisionVertices.Add( vertex.Position );
-		}
-
 		return new ModelBuilder()
-			.AddCollisionMesh( collisionVertices, meshData.Indices )
-			.AddTraceMesh( collisionVertices, meshData.Indices )
+			.AddCollisionMesh( meshData.Vertices, meshData.Indices )
 			.Create();
 	}
 
@@ -2787,18 +2811,27 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				var snapshotWaitStart = System.Diagnostics.Stopwatch.GetTimestamp();
 				System.TimeSpan snapshotWaitElapsed;
 				System.TimeSpan snapshotElapsed;
-				float[] distanceSnapshot;
-				lock ( _sdfLock )
+				var haloSize = chunkSize + 3;
+				var haloSampleCount = checked( haloSize * haloSize * haloSize );
+				var distanceSnapshot = System.Buffers.ArrayPool<float>.Shared.Rent( haloSampleCount );
+				try
 				{
-					snapshotWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotWaitStart );
-					var snapshotStart = System.Diagnostics.Stopwatch.GetTimestamp();
-					distanceSnapshot = CreateSdfHalo( chunk );
-					CountCall( ref _callCollisionSnapshotSamplesCopied, distanceSnapshot.Length );
-					snapshotElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotStart );
+					lock ( _sdfLock )
+					{
+						snapshotWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotWaitStart );
+						var snapshotStart = System.Diagnostics.Stopwatch.GetTimestamp();
+						FillSdfHalo( chunk, distanceSnapshot, false );
+						CountCall( ref _callCollisionSnapshotSamplesCopied, haloSampleCount );
+						snapshotElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( snapshotStart );
+					}
+					var meshStart = System.Diagnostics.Stopwatch.GetTimestamp();
+					var mesh = VoxelTransvoxelMesher.BuildCollision( distanceSnapshot, chunkSize, voxelSize );
+					return new CollisionBuildResult( generation, mesh, snapshotWaitElapsed, snapshotElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( meshStart ) );
 				}
-				var meshStart = System.Diagnostics.Stopwatch.GetTimestamp();
-				var mesh = VoxelTransvoxelMesher.Build( distanceSnapshot, chunkSize, voxelSize );
-				return new CollisionBuildResult( generation, mesh, snapshotWaitElapsed, snapshotElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( meshStart ) );
+				finally
+				{
+					System.Buffers.ArrayPool<float>.Shared.Return( distanceSnapshot );
+				}
 			} );
 			inFlight++;
 		}
@@ -3218,7 +3251,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		state.DesiredGeneration = generation;
 		state.Dirty = true;
 		state.Queued = false;
-		state.ReadyResult = new CollisionBuildResult( generation, meshData, snapshotWaitTime, snapshotTime, meshingTime );
+		state.ReadyResult = new CollisionBuildResult( generation, VoxelCollisionMeshData.FromVisual( meshData ), snapshotWaitTime, snapshotTime, meshingTime );
 	}
 
 	private void TryLogCpuBatchSummary()
@@ -3377,7 +3410,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	}
 
 	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime, double MeshQueueMilliseconds, long WorkerCompletedTimestamp );
-	private readonly record struct CollisionBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
+	private readonly record struct CollisionBuildResult( int Generation, VoxelCollisionMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
 	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );
@@ -3414,6 +3447,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		public System.TimeSpan SnapshotTime { get; set; }
 		public System.TimeSpan MeshingTime { get; set; }
 		public System.TimeSpan ModelBuildTime { get; set; }
+		public System.TimeSpan PublicationTime { get; set; }
 
 		public ChunkCollisionState( Vector3Int coordinate, GameObject gameObject, ModelCollider collider )
 		{

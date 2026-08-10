@@ -25,20 +25,34 @@ internal static class VoxelTransvoxelMesher
 
 	public static VoxelMeshData Build( float[] halo, int chunkSize, float voxelSize )
 	{
+		var output = new VisualMeshOutput( chunkSize );
+		Build( halo, chunkSize, voxelSize, ref output );
+		return output.Mesh;
+	}
+
+	public static VoxelCollisionMeshData BuildCollision( float[] halo, int chunkSize, float voxelSize )
+	{
+		var output = new CollisionMeshOutput( chunkSize );
+		Build( halo, chunkSize, voxelSize, ref output );
+		return output.Mesh;
+	}
+
+	private static void Build<TOutput>( float[] halo, int chunkSize, float voxelSize, ref TOutput output ) where TOutput : struct, IMeshOutput
+	{
 		var haloSize = chunkSize + 3;
-		if ( halo is null || halo.Length != checked( haloSize * haloSize * haloSize ) )
+		if ( halo is null || halo.Length < checked( haloSize * haloSize * haloSize ) )
 		{
 			throw new System.ArgumentException( "Transvoxel regular cells require a one-sample SDF halo.", nameof( halo ) );
 		}
 
 		var sampleSize = chunkSize + 1;
-		var edgeSlots = new int[checked( sampleSize * sampleSize * sampleSize * 3 )];
-		System.Array.Fill( edgeSlots, -1 );
-		var estimatedVertices = checked( chunkSize * chunkSize * 2 );
-		var mesh = new VoxelMeshData( estimatedVertices, estimatedVertices * 6 );
+		var edgeSlotCount = checked( sampleSize * sampleSize * sampleSize * 3 );
+		var edgeSlots = System.Buffers.ArrayPool<int>.Shared.Rent( edgeSlotCount );
+		System.Array.Fill( edgeSlots, -1, 0, edgeSlotCount );
 		System.Span<float> values = stackalloc float[8];
 		System.Span<int> cellVertices = stackalloc int[MaximumRegularVertices];
-
+		try
+		{
 		for ( var z = 0; z < chunkSize; z++ )
 		for ( var y = 0; y < chunkSize; y++ )
 		for ( var x = 0; x < chunkSize; x++ )
@@ -78,7 +92,7 @@ internal static class VoxelTransvoxelMesher
 					secondCorner,
 					values,
 					edgeSlots,
-					mesh
+					ref output
 				);
 			}
 
@@ -90,14 +104,17 @@ internal static class VoxelTransvoxelMesher
 				var second = cellVertices[VoxelTransvoxelTables.RegularTriangleIndices[indexOffset + 1]];
 				var third = cellVertices[VoxelTransvoxelTables.RegularTriangleIndices[indexOffset + 2]];
 				if ( first == second || second == third || third == first ) continue;
-				AddOutwardTriangle( first, second, third, mesh );
+				AddOutwardTriangle( first, second, third, ref output );
 			}
 		}
-
-		return mesh;
+		}
+		finally
+		{
+			System.Buffers.ArrayPool<int>.Shared.Return( edgeSlots );
+		}
 	}
 
-	private static int GetOrCreateEdgeVertex(
+	private static int GetOrCreateEdgeVertex<TOutput>(
 		float[] halo,
 		int haloSize,
 		int sampleSize,
@@ -109,7 +126,7 @@ internal static class VoxelTransvoxelMesher
 		int secondCorner,
 		System.ReadOnlySpan<float> values,
 		int[] edgeSlots,
-		VoxelMeshData mesh )
+		ref TOutput output ) where TOutput : struct, IMeshOutput
 	{
 		if ( (uint)firstCorner >= Corners.Length || (uint)secondCorner >= Corners.Length )
 		{
@@ -152,7 +169,7 @@ internal static class VoxelTransvoxelMesher
 		var firstGradient = Gradient( halo, haloSize, firstX, firstY, firstZ );
 		var secondGradient = Gradient( halo, haloSize, secondX, secondY, secondZ );
 		var normal = SafeNormal( Vector3.Lerp( firstGradient, secondGradient, interpolation ), Vector3.Up );
-		var vertexIndex = AddVertex( position, normal, mesh );
+		var vertexIndex = output.AddVertex( position, normal );
 		edgeSlots[slot] = vertexIndex;
 		return vertexIndex;
 	}
@@ -175,39 +192,78 @@ internal static class VoxelTransvoxelMesher
 	private static Vector3 SafeNormal( Vector3 value, Vector3 fallback ) =>
 		value.LengthSquared > 0.000000000001f ? value.Normal : fallback;
 
-	private static int AddVertex( Vector3 position, Vector3 normal, VoxelMeshData mesh )
+	private static void AddOutwardTriangle<TOutput>( int first, int second, int third, ref TOutput output ) where TOutput : struct, IMeshOutput
 	{
-		var tangent = System.MathF.Abs( normal.z ) < 0.999f ? Vector3.Cross( Vector3.Up, normal ).Normal : Vector3.Right;
-		var vertexIndex = mesh.Vertices.Count;
-		mesh.Vertices.Add( new Vertex
-		{
-			Position = position,
-			Normal = normal,
-			Tangent = new Vector4( tangent.x, tangent.y, tangent.z, 1.0f ),
-			TexCoord0 = new Vector4( position.x / 128.0f, position.y / 128.0f, 0.0f, 0.0f ),
-			Color = Color.White
-		} );
-		return vertexIndex;
-	}
-
-	private static void AddOutwardTriangle( int first, int second, int third, VoxelMeshData mesh )
-	{
-		var a = mesh.Vertices[first];
-		var b = mesh.Vertices[second];
-		var c = mesh.Vertices[third];
-		var faceNormal = Vector3.Cross( b.Position - a.Position, c.Position - a.Position );
+		var a = output.GetPosition( first );
+		var b = output.GetPosition( second );
+		var c = output.GetPosition( third );
+		var faceNormal = Vector3.Cross( b - a, c - a );
 		if ( faceNormal.LengthSquared <= 0.000000000001f ) return;
 
-		mesh.Indices.Add( first );
-		if ( Vector3.Dot( faceNormal, a.Normal + b.Normal + c.Normal ) >= 0.0f )
+		output.AddIndex( first );
+		if ( Vector3.Dot( faceNormal, output.GetNormal( first ) + output.GetNormal( second ) + output.GetNormal( third ) ) >= 0.0f )
 		{
-			mesh.Indices.Add( second );
-			mesh.Indices.Add( third );
+			output.AddIndex( second );
+			output.AddIndex( third );
 		}
 		else
 		{
-			mesh.Indices.Add( third );
-			mesh.Indices.Add( second );
+			output.AddIndex( third );
+			output.AddIndex( second );
 		}
+	}
+
+	private interface IMeshOutput
+	{
+		int AddVertex( Vector3 position, Vector3 normal );
+		Vector3 GetPosition( int index );
+		Vector3 GetNormal( int index );
+		void AddIndex( int index );
+	}
+
+	private readonly struct VisualMeshOutput : IMeshOutput
+	{
+		public VoxelMeshData Mesh { get; }
+
+		public VisualMeshOutput( int chunkSize )
+		{
+			var estimatedVertices = checked( chunkSize * chunkSize * 2 );
+			Mesh = new VoxelMeshData( estimatedVertices, estimatedVertices * 6 );
+		}
+
+		public int AddVertex( Vector3 position, Vector3 normal )
+		{
+			var tangent = System.MathF.Abs( normal.z ) < 0.999f ? Vector3.Cross( Vector3.Up, normal ).Normal : Vector3.Right;
+			var index = Mesh.Vertices.Count;
+			Mesh.Vertices.Add( new Vertex { Position = position, Normal = normal, Tangent = new Vector4( tangent.x, tangent.y, tangent.z, 1.0f ), TexCoord0 = new Vector4( position.x / 128.0f, position.y / 128.0f, 0.0f, 0.0f ), Color = Color.White } );
+			return index;
+		}
+
+		public Vector3 GetPosition( int index ) => Mesh.Vertices[index].Position;
+		public Vector3 GetNormal( int index ) => Mesh.Vertices[index].Normal;
+		public void AddIndex( int index ) => Mesh.Indices.Add( index );
+	}
+
+	private readonly struct CollisionMeshOutput : IMeshOutput
+	{
+		public VoxelCollisionMeshData Mesh { get; }
+
+		public CollisionMeshOutput( int chunkSize )
+		{
+			var estimatedVertices = checked( chunkSize * chunkSize * 2 );
+			Mesh = new VoxelCollisionMeshData( estimatedVertices, estimatedVertices * 6 );
+		}
+
+		public int AddVertex( Vector3 position, Vector3 normal )
+		{
+			var index = Mesh.Vertices.Count;
+			Mesh.Vertices.Add( position );
+			Mesh.Normals.Add( normal );
+			return index;
+		}
+
+		public Vector3 GetPosition( int index ) => Mesh.Vertices[index];
+		public Vector3 GetNormal( int index ) => Mesh.Normals[index];
+		public void AddIndex( int index ) => Mesh.Indices.Add( index );
 	}
 }
