@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 40;
+	private const int SuiteVersion = 41;
 	private const int InfinityPathSampleCount = 1024;
 	private const int RealtimeSurfaceEditCount = 80;
 	private const float HighSpeedCollisionTraversalSpeed = 20000.0f;
@@ -1882,10 +1882,13 @@ public sealed class VoxelTerrainBenchmark : Component
 		}
 		if ( !CanApplyNextEdit() ) return;
 
-		var localX = _editIndex * _manager.VoxelSize * 0.5f;
+		var column = _editIndex % 10;
+		var row = _editIndex / 10;
+		var localX = (column * 10.0f - 45.0f) * _manager.VoxelSize;
+		var localY = (row * 10.0f - 35.0f) * _manager.VoxelSize;
 		var rayStartZ = (_manager.SimplexBaseHeight + _manager.SimplexAmplitude + 8.0f) * _manager.VoxelSize;
 		var rayDistance = (_manager.SimplexAmplitude * 2.0f + 32.0f) * _manager.VoxelSize;
-		var rayStart = _manager.GameObject.WorldTransform.PointToWorld( new Vector3( localX, 0.0f, rayStartZ ) );
+		var rayStart = _manager.GameObject.WorldTransform.PointToWorld( new Vector3( localX, localY, rayStartZ ) );
 		var editStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( !_manager.TryRaycastSdf( rayStart, Vector3.Down, rayDistance, out var hitPosition ) )
 		{
