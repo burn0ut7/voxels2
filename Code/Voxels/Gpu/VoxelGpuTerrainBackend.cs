@@ -991,6 +991,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				continue;
 			}
 			var entry = _clipboxTransitions.Desired[item.Key.TransitionSlotId];
+			var assignment = _clipboxPlanner.DesiredTransitions[item.Key.TransitionSlotId];
 			var fineStep = 1 << entry.FineLevel;
 			var coarseStep = 1 << entry.CoarseLevel;
 			_transitionBatch.Requests[acceptedCount] = item;
@@ -1005,7 +1006,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				Generation = item.Generation,
 				RequestIndex = (uint)acceptedCount,
 				ResidentSlot = (uint)slot,
-				TransitionSlot = (uint)item.Key.TransitionSlotId
+				TransitionSlot = (uint)item.Key.TransitionSlotId,
+				CoarseFaceMask = assignment.CoarseKey.TransitionFaceMask
 			};
 			acceptedCount++;
 		}

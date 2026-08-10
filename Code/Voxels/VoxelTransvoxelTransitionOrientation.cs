@@ -9,8 +9,8 @@ internal static class VoxelTransvoxelTransitionOrientation
 
 	/// <summary>
 	/// Returns the canonical local position used by the Transvoxel table. The
-	/// first nine samples are on the fine face; the final four are one coarse
-	/// sample inward on the touching coarse side.
+	/// first nine samples are on the fine face; the final four use secondary
+	/// geometry positions half a coarse cell into the touching coarse side.
 	/// </summary>
 	public static Vector3 CellSamplePosition( int sample, VoxelClipboxFaceDirection face, float fineStep )
 	{
@@ -29,14 +29,39 @@ internal static class VoxelTransvoxelTransitionOrientation
 
 		var position = face switch
 		{
-			VoxelClipboxFaceDirection.NegativeX => new Vector3( coarseSample ? -2.0f : 0.0f, coordinate.x, coordinate.y ),
-			VoxelClipboxFaceDirection.PositiveX => new Vector3( coarseSample ? 4.0f : 2.0f, coordinate.y, coordinate.x ),
-			VoxelClipboxFaceDirection.NegativeY => new Vector3( coordinate.y, coarseSample ? -2.0f : 0.0f, coordinate.x ),
-			VoxelClipboxFaceDirection.PositiveY => new Vector3( coordinate.x, coarseSample ? 4.0f : 2.0f, coordinate.y ),
-			VoxelClipboxFaceDirection.NegativeZ => new Vector3( coordinate.x, coordinate.y, coarseSample ? -2.0f : 0.0f ),
-			VoxelClipboxFaceDirection.PositiveZ => new Vector3( coordinate.y, coordinate.x, coarseSample ? 4.0f : 2.0f ),
+			VoxelClipboxFaceDirection.NegativeX => new Vector3( coarseSample ? -1.0f : 0.0f, coordinate.x, coordinate.y ),
+			VoxelClipboxFaceDirection.PositiveX => new Vector3( coarseSample ? 3.0f : 2.0f, coordinate.y, coordinate.x ),
+			VoxelClipboxFaceDirection.NegativeY => new Vector3( coordinate.y, coarseSample ? -1.0f : 0.0f, coordinate.x ),
+			VoxelClipboxFaceDirection.PositiveY => new Vector3( coordinate.x, coarseSample ? 3.0f : 2.0f, coordinate.y ),
+			VoxelClipboxFaceDirection.NegativeZ => new Vector3( coordinate.x, coordinate.y, coarseSample ? -1.0f : 0.0f ),
+			VoxelClipboxFaceDirection.PositiveZ => new Vector3( coordinate.y, coordinate.x, coarseSample ? 3.0f : 2.0f ),
 			_ => throw new System.ArgumentOutOfRangeException( nameof( face ) )
 		};
 		return position * fineStep;
+	}
+
+	public static Vector3 SecondaryLocalPosition( Vector3 position, uint faceMask, int chunkSize )
+	{
+		if ( chunkSize < 2 ) throw new System.ArgumentOutOfRangeException( nameof( chunkSize ) );
+		var boundaryMask = 0u;
+		if ( position.x < 1.0f ) boundaryMask |= 1u;
+		if ( position.x > chunkSize - 1.0f ) boundaryMask |= 2u;
+		if ( position.y < 1.0f ) boundaryMask |= 4u;
+		if ( position.y > chunkSize - 1.0f ) boundaryMask |= 8u;
+		if ( position.z < 1.0f ) boundaryMask |= 16u;
+		if ( position.z > chunkSize - 1.0f ) boundaryMask |= 32u;
+		if ( (faceMask & boundaryMask) != boundaryMask ) return position;
+
+		position.x = SecondaryCoordinate( position.x, chunkSize, (faceMask & 1u) != 0, (faceMask & 2u) != 0 );
+		position.y = SecondaryCoordinate( position.y, chunkSize, (faceMask & 4u) != 0, (faceMask & 8u) != 0 );
+		position.z = SecondaryCoordinate( position.z, chunkSize, (faceMask & 16u) != 0, (faceMask & 32u) != 0 );
+		return position;
+	}
+
+	private static float SecondaryCoordinate( float coordinate, int chunkSize, bool negativeFace, bool positiveFace )
+	{
+		if ( negativeFace && coordinate < 1.0f ) coordinate = 0.5f + coordinate * 0.5f;
+		if ( positiveFace && coordinate > chunkSize - 1.0f ) coordinate = chunkSize - 0.5f + (coordinate - chunkSize) * 0.5f;
+		return coordinate;
 	}
 }

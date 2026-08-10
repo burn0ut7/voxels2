@@ -2,7 +2,7 @@ MODES
 {
 	Default();
 }
-// GPU LOD crack plan: force a clean live rebuild after orientation ownership fix.
+// Transvoxel half-cell orientation conformance proof.
 CS
 {
 	#include "system.fxc"

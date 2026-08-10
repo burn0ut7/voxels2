@@ -17,7 +17,7 @@ internal struct VoxelGpuTransitionRequest
 	public uint RequestIndex;
 	public uint ResidentSlot;
 	public uint TransitionSlot;
-	public uint Reserved0;
+	public uint CoarseFaceMask;
 }
 
 [StructLayout( LayoutKind.Sequential, Pack = 4, Size = 64 )]

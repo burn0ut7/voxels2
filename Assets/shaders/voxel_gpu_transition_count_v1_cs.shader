@@ -2,7 +2,7 @@ MODES
 {
 	Default();
 }
-// GPU LOD crack plan: shared transition orientation live-reload marker.
+// Transvoxel shared fine-face density ownership.
 CS
 {
 	#include "system.fxc"
@@ -19,7 +19,7 @@ CS
 		uint RequestIndex;
 		uint ResidentSlot;
 		uint TransitionSlot;
-		uint Reserved0;
+		uint CoarseFaceMask;
 	};
 	struct CountResult { uint VertexCount; uint IndexCount; uint Generation; uint RequestIndex; uint Overflow; uint ActiveCells; uint Reserved0; uint Reserved1; };
 	StructuredBuffer<TransitionRequest> Requests < Attribute( "Requests" ); >;
@@ -61,7 +61,8 @@ CS
 		[loop]for(uint cell=0;cell<(uint)TransitionCellCount;cell++)
 		{
 			uint baseIndex=(id.x*(uint)TransitionCellCount+cell)*(uint)SampleCount;
-			[unroll]for(uint sample=0;sample<13;sample++)Samples[baseIndex+sample]=EvaluateTerrainDensity(WorldSample(request,sample,cell),SdfClampDistance,SimplexFrequency,SimplexAmplitude,SimplexBaseHeight,SimplexSeed);
+			[unroll]for(uint sample=0;sample<9;sample++)Samples[baseIndex+sample]=EvaluateTerrainDensity(FineSample(request,sample,cell),SdfClampDistance,SimplexFrequency,SimplexAmplitude,SimplexBaseHeight,SimplexSeed);
+			Samples[baseIndex+9]=Samples[baseIndex];Samples[baseIndex+10]=Samples[baseIndex+2];Samples[baseIndex+11]=Samples[baseIndex+6];Samples[baseIndex+12]=Samples[baseIndex+8];
 			uint code=0;[unroll]for(uint bit=0;bit<9;bit++)if(Samples[baseIndex+CaseOrder[bit]]<0)code|=1u<<bit;
 			uint cls=Lookup[code]&0x7f;uint counts=Lookup[GeometryOffset+cls];vertexCount+=counts>>4;indexCount+=(counts&15)*3;if((counts&15)!=0)activeCells++;
 		}

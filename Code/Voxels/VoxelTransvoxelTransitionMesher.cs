@@ -161,7 +161,36 @@ internal static class VoxelTransvoxelTransitionMesher
 		}
 
 		boundaryEdges = ValidateBoundaryMatching( productionVoxelSize, positionTolerance );
+		ValidateSecondaryCornerOwnership( positionTolerance );
 		return new VoxelTransvoxelTransitionProofResult( true, string.Empty, cases, orientations, fixtureCases, triangles, boundaryEdges, gradientNormals, positionTolerance, true );
+	}
+
+	private static void ValidateSecondaryCornerOwnership( float tolerance )
+	{
+		const int chunkSize = 32;
+		var negativeCornerMask = VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.NegativeX ) |
+			VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.NegativeY ) |
+			VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.NegativeZ );
+		var positiveCornerMask = VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.PositiveX ) |
+			VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.PositiveY ) |
+			VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.PositiveZ );
+		var negativeCorner = VoxelTransvoxelTransitionOrientation.SecondaryLocalPosition( Vector3.Zero, negativeCornerMask, chunkSize );
+		var positiveCorner = VoxelTransvoxelTransitionOrientation.SecondaryLocalPosition( Vector3.One * chunkSize, positiveCornerMask, chunkSize );
+		if ( (negativeCorner - Vector3.One * 0.5f).Length > tolerance || (positiveCorner - Vector3.One * (chunkSize - 0.5f)).Length > tolerance )
+			throw new System.InvalidOperationException( "Adjacent transition faces did not select a shared secondary corner position." );
+		var partialCorner = VoxelTransvoxelTransitionOrientation.SecondaryLocalPosition( Vector3.Zero, negativeCornerMask & ~VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.NegativeZ ), chunkSize );
+		var partialEdgePrimary = new Vector3( 0.0f, 0.0f, chunkSize * 0.5f );
+		var partialEdge = VoxelTransvoxelTransitionOrientation.SecondaryLocalPosition( partialEdgePrimary, VoxelClipboxTransitionPlanner.FaceMaskBit( VoxelClipboxFaceDirection.NegativeX ), chunkSize );
+		if ( partialCorner.Length > tolerance || (partialEdge - partialEdgePrimary).Length > tolerance )
+			throw new System.InvalidOperationException( "A partial transition edge or corner did not retain its primary position." );
+
+		foreach ( var face in System.Enum.GetValues<VoxelClipboxFaceDirection>() )
+		{
+			var lowCorner = VoxelTransvoxelTransitionOrientation.CellSamplePosition( 9, face, 1.0f );
+			var highCorner = VoxelTransvoxelTransitionOrientation.CellSamplePosition( 0, face, 1.0f );
+			if ( System.MathF.Abs( (lowCorner - highCorner).Length - 1.0f ) > tolerance )
+				throw new System.InvalidOperationException( $"Transition face {face} did not use the half-coarse-cell inset." );
+		}
 	}
 
 	internal static float[] BuildSyntheticCaseForProof( int caseCode )
@@ -187,14 +216,15 @@ internal static class VoxelTransvoxelTransitionMesher
 	private static float[] BuildFixtureSamples( VoxelTransitionFixture fixture, VoxelClipboxFaceDirection face, float scale )
 	{
 		var samples = new float[13];
-		for ( var index = 0; index < 13; index++ ) samples[index] = FixtureValue( fixture, ToFacePosition( index, face, scale ) );
+		for ( var index = 0; index < 9; index++ ) samples[index] = FixtureValue( fixture, ToFacePosition( index, face, scale ) );
+		samples[9] = samples[0]; samples[10] = samples[2]; samples[11] = samples[6]; samples[12] = samples[8];
 		return samples;
 	}
 
 	private static Vector3[] BuildFixtureGradients( VoxelTransitionFixture fixture, VoxelClipboxFaceDirection face, float scale )
 	{
 		var gradients = new Vector3[13];
-		for ( var index = 0; index < gradients.Length; index++ )
+		for ( var index = 0; index < 9; index++ )
 		{
 			var position = ToFacePosition( index, face, scale );
 			var delta = System.MathF.Max( scale * 0.001f, 0.0001f );
@@ -203,6 +233,7 @@ internal static class VoxelTransvoxelTransitionMesher
 				FixtureValue( fixture, position + Vector3.Up * delta ) - FixtureValue( fixture, position - Vector3.Up * delta ),
 				FixtureValue( fixture, position + Vector3.Forward * delta ) - FixtureValue( fixture, position - Vector3.Forward * delta ) ).Normal;
 		}
+		gradients[9] = gradients[0]; gradients[10] = gradients[2]; gradients[11] = gradients[6]; gradients[12] = gradients[8];
 		return gradients;
 	}
 

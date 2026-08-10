@@ -27,12 +27,12 @@ float3 TransitionProofSamplePosition( uint sample, uint face )
 {
 	float3 position = TransitionFacePosition( sample, face, 0, 1, 2 );
 	if ( sample < 9 ) return position;
-	if ( face == 0 ) position.x -= 2.0f;
-	else if ( face == 1 ) position.x += 2.0f;
-	else if ( face == 2 ) position.y -= 2.0f;
-	else if ( face == 3 ) position.y += 2.0f;
-	else if ( face == 4 ) position.z -= 2.0f;
-	else position.z += 2.0f;
+	if ( face == 0 ) position.x -= 1.0f;
+	else if ( face == 1 ) position.x += 1.0f;
+	else if ( face == 2 ) position.y -= 1.0f;
+	else if ( face == 3 ) position.y += 1.0f;
+	else if ( face == 4 ) position.z -= 1.0f;
+	else position.z += 1.0f;
 	return position;
 }
 

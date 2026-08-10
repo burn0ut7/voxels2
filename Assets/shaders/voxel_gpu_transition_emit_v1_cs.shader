@@ -2,13 +2,14 @@ MODES
 {
 	Default();
 }
-// GPU LOD crack plan: shared transition orientation live-reload marker.
+// Transvoxel all-adjacent-faces secondary ownership.
 CS
 {
 	#include "system.fxc"
 	#include "voxel_terrain_field.fxc"
 	#include "voxel_transvoxel_orientation.fxc"
-	struct TransitionRequest { float4 FineOrigin; float4 CoarseOrigin; uint FineStep; uint CoarseStep; uint Face; uint Generation; uint RequestIndex; uint ResidentSlot; uint TransitionSlot; uint Reserved0; };
+	#include "voxel_transvoxel_deformation.fxc"
+	struct TransitionRequest { float4 FineOrigin; float4 CoarseOrigin; uint FineStep; uint CoarseStep; uint Face; uint Generation; uint RequestIndex; uint ResidentSlot; uint TransitionSlot; uint CoarseFaceMask; };
 	struct AllocationDescriptor { uint VertexOffset; uint VertexCapacity; uint IndexOffset; uint IndexCapacity; uint Generation; uint ResidentSlot; uint RequestIndex; uint Flags; float4 DrawOrigin; float4 DrawScale; };
 	struct VoxelGpuVertex { float3 Position; float3 Normal; float3 Tangent; float2 TexCoord; };
 	StructuredBuffer<TransitionRequest> Requests < Attribute( "Requests" ); >;
@@ -21,7 +22,7 @@ CS
 	static const uint CaseOrder[9]={0,1,2,5,8,7,6,3,4};
 	float Density(float3 p){return EvaluateTerrainDensity(p,SdfClampDistance,SimplexFrequency,SimplexAmplitude,SimplexBaseHeight,SimplexSeed);} float3 FaceNormal(uint face){if(face==0)return float3(-1,0,0);if(face==1)return float3(1,0,0);if(face==2)return float3(0,-1,0);if(face==3)return float3(0,1,0);if(face==4)return float3(0,0,-1);return float3(0,0,1);}
 	float3 FineSample(TransitionRequest request,uint sample,uint cellIndex){return request.FineOrigin.xyz+TransitionFacePosition(sample,request.Face,cellIndex,(uint)TransitionCellsPerAxis,ChunkSize)*(float)request.FineStep;}
-	float3 CoarseSample(TransitionRequest request,uint sample,uint cellIndex){float3 p=FineSample(request,sample,cellIndex);float3 boundary=request.CoarseOrigin.xyz;float extent=(float)ChunkSize*(float)request.CoarseStep;if(request.Face==0)boundary.x+=extent;else if(request.Face==2)boundary.y+=extent;else if(request.Face==4)boundary.z+=extent;boundary+=FaceNormal(request.Face)*(float)request.CoarseStep;if(request.Face==0||request.Face==1)p.x=boundary.x;else if(request.Face==2||request.Face==3)p.y=boundary.y;else p.z=boundary.z;return p;}
+	float3 CoarseSample(TransitionRequest request,uint sample,uint cellIndex){float3 p=FineSample(request,sample,cellIndex);float3 boundary=request.CoarseOrigin.xyz;float extent=(float)ChunkSize*(float)request.CoarseStep;if(request.Face==0)boundary.x+=extent;else if(request.Face==2)boundary.y+=extent;else if(request.Face==4)boundary.z+=extent;if(request.Face==0||request.Face==1)p.x=boundary.x;else if(request.Face==2||request.Face==3)p.y=boundary.y;else p.z=boundary.z;return TransitionSecondaryCanonicalPosition(p,request.CoarseOrigin.xyz,request.CoarseStep,request.CoarseFaceMask,ChunkSize);}
 	float3 WorldSample(TransitionRequest request,uint sample,uint cellIndex){return sample<9?FineSample(request,sample,cellIndex):CoarseSample(request,sample,cellIndex);}
 	float3 Normal(TransitionRequest request,float3 p,uint sampleA,uint sampleB,uint cellIndex,float t){float e=(float)request.FineStep;float3 a=WorldSample(request,sampleA,cellIndex),b=WorldSample(request,sampleB,cellIndex),pa=lerp(a,b,t);float3 g=float3(Density(pa+float3(e,0,0))-Density(pa-float3(e,0,0)),Density(pa+float3(0,e,0))-Density(pa-float3(0,e,0)),Density(pa+float3(0,0,e))-Density(pa-float3(0,0,e)));float d=dot(g,g);if(d<1e-12)return FaceNormal(request.Face);return g*rsqrt(d);}
 	[numthreads(64,1,1)] void MainCs(uint3 id:SV_DispatchThreadID)
