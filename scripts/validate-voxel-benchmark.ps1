@@ -55,6 +55,7 @@ $fullRequiredScenarios = @(
 	'gpu_player_line_streaming',
 	'gpu_player_diagonal_streaming',
 	'gpu_player_clipbox_oscillation',
+	'high_speed_collision_streaming',
 	'gpu_allocator_churn',
 	'gpu_replacement_failure',
 	'gpu_pool_exhaustion',
@@ -77,13 +78,13 @@ $fullRequiredScenarios = @(
 $gpuRequiredScenarios = @(
 	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase5_sparse_edit_contract', 'phase5_deterministic_invalidation', 'phase5_stale_edit_generations', 'phase5_edit_eviction_reentry', 'phase5_voxel_brush_raycast', 'phase5_gpu_edit_revision_binding', 'phase5_incremental_edit_replay', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_radius64_match', 'gpu_lod5_transition_ownership', 'gpu_realtime_surface_edits_20hz', 'gpu_cpu_collision_rebuild_cost',
 	'gpu_persistent_static_set', 'gpu_camera_sweep_generation', 'gpu_production_render_integration',
-	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming', 'gpu_player_clipbox_oscillation',
+	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming', 'gpu_player_clipbox_oscillation', 'high_speed_collision_streaming',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
 	'gpu_async_readback_saturation', 'gpu_resource_recreation', 'gpu_dedicated_server_startup', 'phase4_regular_b8_l4_stationary'
 )
 $cpuRequiredScenarios = @(
 	'cold_generation', 'collision_backlog_frame_budget', 'collision_proximity_edit_filter', 'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase5_sparse_edit_contract', 'phase5_deterministic_invalidation', 'phase5_stale_edit_generations', 'phase5_edit_eviction_reentry', 'phase5_voxel_brush_raycast', 'phase5_gpu_edit_revision_binding', 'phase5_incremental_edit_replay', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'live_chunk_radius_reconfiguration', 'player_infinity_streaming', 'player_line_streaming',
-	'player_diagonal_streaming', 'chunk_seam_edit_coherence', 'varied_edits', 'bulk_edit',
+	'high_speed_collision_streaming', 'player_diagonal_streaming', 'chunk_seam_edit_coherence', 'varied_edits', 'bulk_edit',
 	'sustained_world_sweep_and_depth_dig_20hz', 'sustained_world_spiral_place_20hz', 'player_post_edit_line_streaming'
 )
 $requiredMetrics = @(
@@ -206,7 +207,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 35 ) { Add-Failure "Expected suite version 35, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 36 ) { Add-Failure "Expected suite version 36, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -264,6 +265,11 @@ foreach ( $scenario in $scenarios )
 	{
 		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
 		if ( [long]$scenario.stream_chunks_completed -le 0 ) { Add-Failure "$context recorded no completed chunk streaming lifecycles" }
+	}
+	elseif ( $scenario.scenario -eq 'high_speed_collision_streaming' )
+	{
+		if ( [long]$scenario.calls_player_traversal_updates -le 0 ) { Add-Failure "$context did not move the actual player" }
+		if ( [long]$scenario.calls_collision_builds_completed -le 0 ) { Add-Failure "$context recorded no completed predictive collision builds" }
 	}
 	if ( $scenario.scenario -eq 'gpu_transvoxel_regular_proof' )
 	{
@@ -424,7 +430,7 @@ foreach ( $scenario in $scenarios )
 		}
 		if ( [long]$scenario.calls_safety_activations -ne 0 -or [long]$scenario.calls_safety_players_repositioned -ne 0 ) { Add-Failure "$context disturbed player safety for a distant edit" }
 	}
-	elseif ( $scenario.scenario -notlike 'player_*_streaming' -and $scenario.scenario -notlike 'phase5_*' -and [long]$scenario.calls_safety_players_repositioned -le 0 )
+	elseif ( $scenario.scenario -notlike 'player_*_streaming' -and $scenario.scenario -ne 'high_speed_collision_streaming' -and $scenario.scenario -notlike 'phase5_*' -and [long]$scenario.calls_safety_players_repositioned -le 0 )
 	{
 		Add-Failure "$context did not exercise player safety repositioning"
 	}

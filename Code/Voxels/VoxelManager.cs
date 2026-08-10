@@ -10,6 +10,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumConcurrentCpuChunkBuilds = 32;
 	private const int MaximumCpuMeshUploadsPerFrame = 16;
 	private const int MaximumCollisionChunkRadius = 16;
+	private const float MaximumCollisionLookaheadSeconds = 2.0f;
+	private const int MaximumCollisionLookaheadChunks = 64;
 	private const int MaximumCollisionBuildsPerFrame = 1;
 	private const int MaximumConcurrentCollisionBuilds = 1;
 	private const int MaximumChunkTimingHistory = 65536;
@@ -48,6 +50,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Queue<Vector3Int> _collisionBuildQueue = new();
 	private readonly HashSet<Vector3Int> _collisionQueuedChunks = new();
 	private readonly HashSet<Vector3Int> _collisionDesiredChunks = new();
+	private readonly List<CollisionObserver> _collisionObserverScratch = new( 4 );
+	private readonly List<CollisionObserver> _collisionPreviousObservers = new( 4 );
 	private readonly HashSet<Vector3Int> _staleCollisionChunks = new();
 	private readonly Dictionary<Vector3Int, CpuChunkRuntime> _cpuChunkStates = new();
 	private readonly Queue<Vector3Int> _cpuChunkBuildQueue = new();
@@ -236,6 +240,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	[Property, Group( "Collision" ), Range( 1, MaximumCollisionChunkRadius )]
 	public int CollisionChunkRadius { get; set; } = 2;
 
+	[Property, Group( "Collision" ), Range( 0.0f, MaximumCollisionLookaheadSeconds )]
+	public float CollisionLookaheadSeconds { get; set; } = 0.75f;
+
 	[Property, Group( "Collision" ), Range( 1, MaximumCollisionBuildsPerFrame )]
 	public int CollisionBuildsPerFrame { get; set; } = 1;
 
@@ -396,6 +403,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		GpuClipboxDebugMaxTransitions = System.Math.Clamp( GpuClipboxDebugMaxTransitions, 1, 4096 );
 		GpuFrustumPaddingChunks = System.Math.Clamp( GpuFrustumPaddingChunks, 0, 4 );
 		CollisionChunkRadius = System.Math.Clamp( CollisionChunkRadius, 1, MaximumCollisionChunkRadius );
+		CollisionLookaheadSeconds = System.Math.Clamp( CollisionLookaheadSeconds, 0.0f, MaximumCollisionLookaheadSeconds );
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
 		CollisionBuildConcurrency = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
 		DetailedChunkLogLimit = System.Math.Clamp( DetailedChunkLogLimit, 0, MaximumDetailedChunkLogs );
@@ -2242,6 +2250,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_collisionBuildQueue.Clear();
 		_collisionQueuedChunks.Clear();
 		_collisionDesiredChunks.Clear();
+		_collisionObserverScratch.Clear();
+		_collisionPreviousObservers.Clear();
 		_staleCollisionChunks.Clear();
 		_lastCollisionInterestTimestamp = 0;
 	}
@@ -2412,7 +2422,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var visualCoordinates = new List<Vector3Int>( _cpuChunkStates.Keys );
 		foreach ( var coordinate in visualCoordinates )
 		{
-			if ( _desiredChunkCoordinates.Contains( coordinate ) ) continue;
+			if ( _desiredChunkCoordinates.Contains( coordinate ) || _collisionDesiredChunks.Contains( coordinate ) ) continue;
 			var state = _cpuChunkStates[coordinate];
 			if ( state.Task?.IsFaulted == true ) _ = state.Task.Exception;
 			_cpuChunkStates.Remove( coordinate );
@@ -2431,7 +2441,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var chunkObjectCoordinates = new List<Vector3Int>( _chunkGameObjects.Keys );
 		foreach ( var coordinate in chunkObjectCoordinates )
 		{
-			if ( !_desiredChunkCoordinates.Contains( coordinate ) ) DestroyChunkGameObject( coordinate );
+			if ( !_desiredChunkCoordinates.Contains( coordinate ) && !_collisionDesiredChunks.Contains( coordinate ) ) DestroyChunkGameObject( coordinate );
 		}
 
 		for ( var index = _coherentVisualEditBatches.Count - 1; index >= 0; index-- )
@@ -2549,10 +2559,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void UpdateCpuCollisionWorld()
 	{
+		PopulateCollisionObservers( _collisionObserverScratch );
 		if ( _lastCollisionInterestTimestamp == 0 ||
+			!AreCollisionObserversEqual( _collisionObserverScratch, _collisionPreviousObservers ) ||
 			System.Diagnostics.Stopwatch.GetElapsedTime( _lastCollisionInterestTimestamp ).TotalSeconds >= 0.25 )
 		{
-			RefreshCollisionInterests();
+			RefreshCollisionInterests( _collisionObserverScratch );
 		}
 
 		PumpCollisionGenerationQueue();
@@ -2561,31 +2573,32 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void RefreshCollisionInterests()
 	{
+		PopulateCollisionObservers( _collisionObserverScratch );
+		RefreshCollisionInterests( _collisionObserverScratch );
+	}
+
+	private void RefreshCollisionInterests( List<CollisionObserver> collisionObservers )
+	{
 		CountCall( ref _callCollisionInterestRefreshes );
 		_lastCollisionInterestTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		_collisionPreviousObservers.Clear();
+		_collisionPreviousObservers.AddRange( collisionObservers );
 		_collisionDesiredChunks.Clear();
 		_collisionBuildQueue.Clear();
 		_collisionQueuedChunks.Clear();
-		var observers = new List<Vector3Int>();
+		var priorityObservers = new List<Vector3Int>( collisionObservers.Count );
 
-		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		foreach ( var observer in collisionObservers )
 		{
-			observers.Add( GetCollisionObserverChunk( controller.WorldPosition ) );
-		}
-
-		if ( observers.Count == 0 && Scene.Camera is not null )
-		{
-			observers.Add( GetCollisionObserverChunk( Scene.Camera.WorldPosition ) );
-		}
-
-		foreach ( var observer in observers )
-		{
+			if ( !priorityObservers.Contains( observer.Current ) ) priorityObservers.Add( observer.Current );
 			for ( var y = -CollisionChunkRadius; y < CollisionChunkRadius; y++ )
 			for ( var x = -CollisionChunkRadius; x < CollisionChunkRadius; x++ )
 			{
-				var coordinate = new Vector3Int( observer.x + x, observer.y + y, 0 );
+				var coordinate = new Vector3Int( observer.Current.x + x, observer.Current.y + y, 0 );
 				_collisionDesiredChunks.Add( coordinate );
 			}
+
+			AddCollisionLookaheadPath( observer.Current, observer.Lookahead );
 		}
 
 		foreach ( var pair in _chunkColliders )
@@ -2598,7 +2611,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		PruneCollisionEditBatches();
 
 		var ordered = new List<Vector3Int>( _collisionDesiredChunks );
-		ordered.Sort( (left, right) => GetCollisionPriority( left, observers ).CompareTo( GetCollisionPriority( right, observers ) ) );
+		ordered.Sort( (left, right) => GetCollisionPriority( left, priorityObservers ).CompareTo( GetCollisionPriority( right, priorityObservers ) ) );
 		foreach ( var coordinate in ordered )
 		{
 			if ( !_chunks.ContainsKey( coordinate ) )
@@ -2622,6 +2635,84 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 			QueueCollisionBuild( coordinate );
 		}
+	}
+
+	private void PopulateCollisionObservers( List<CollisionObserver> destination )
+	{
+		destination.Clear();
+		foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
+		{
+			var current = GetCollisionObserverChunk( controller.WorldPosition );
+			var lookaheadPosition = GetCollisionLookaheadPosition( controller );
+			var observer = new CollisionObserver( current, GetCollisionObserverChunk( lookaheadPosition ) );
+			if ( !destination.Contains( observer ) ) destination.Add( observer );
+		}
+
+		if ( destination.Count == 0 && Scene.Camera is not null )
+		{
+			var current = GetCollisionObserverChunk( Scene.Camera.WorldPosition );
+			destination.Add( new CollisionObserver( current, current ) );
+		}
+		if ( destination.Count == 0 ) destination.Add( new CollisionObserver( Vector3Int.Zero, Vector3Int.Zero ) );
+	}
+
+	private Vector3 GetCollisionLookaheadPosition( PlayerController controller )
+	{
+		if ( CollisionLookaheadSeconds <= 0.0f || controller.Body is not { } body ) return controller.WorldPosition;
+		var velocity = body.Velocity;
+		velocity.z = 0.0f;
+		var speed = velocity.Length;
+		if ( speed <= 0.001f ) return controller.WorldPosition;
+
+		var lookaheadDistance = speed * CollisionLookaheadSeconds;
+		var maximumDistance = MaximumCollisionLookaheadChunks * ChunkSize * VoxelSize;
+		if ( lookaheadDistance > maximumDistance ) lookaheadDistance = maximumDistance;
+		return controller.WorldPosition + velocity * (lookaheadDistance / speed);
+	}
+
+	private void AddCollisionLookaheadPath( Vector3Int start, Vector3Int end )
+	{
+		var x = start.x;
+		var y = start.y;
+		var deltaX = System.Math.Abs( end.x - start.x );
+		var deltaY = System.Math.Abs( end.y - start.y );
+		var stepX = start.x < end.x ? 1 : -1;
+		var stepY = start.y < end.y ? 1 : -1;
+		var error = deltaX - deltaY;
+
+		while ( true )
+		{
+			_collisionDesiredChunks.Add( new Vector3Int( x, y, 0 ) );
+			if ( x == end.x && y == end.y ) break;
+			var doubledError = error * 2;
+			if ( doubledError > -deltaY )
+			{
+				error -= deltaY;
+				x += stepX;
+			}
+			if ( doubledError < deltaX )
+			{
+				error += deltaX;
+				y += stepY;
+			}
+		}
+	}
+
+	private static bool AreCollisionObserversEqual( List<CollisionObserver> left, List<CollisionObserver> right )
+	{
+		if ( left.Count != right.Count ) return false;
+		for ( var index = 0; index < left.Count; index++ )
+		{
+			if ( left[index] != right[index] ) return false;
+		}
+		return true;
+	}
+
+	internal bool IsCollisionReadyAtWorldPosition( Vector3 worldPosition )
+	{
+		var coordinate = GetCollisionObserverChunk( worldPosition );
+		return _chunkColliders.TryGetValue( coordinate, out var state ) && state.Built && !state.Dirty &&
+			state.CompletedGeneration >= state.DesiredGeneration;
 	}
 
 	private static void DeactivateCollisionState( ChunkCollisionState state )
@@ -3437,6 +3528,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime, double MeshQueueMilliseconds, long WorkerCompletedTimestamp );
 	private readonly record struct CollisionBuildResult( int Generation, VoxelCollisionMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
+	private readonly record struct CollisionObserver( Vector3Int Current, Vector3Int Lookahead );
 	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );
 	private readonly record struct GeneratedChunkResult( VoxelChunk Chunk, ChunkTopologyReport Report, System.TimeSpan BuildTime );

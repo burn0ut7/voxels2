@@ -13,9 +13,10 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 35;
+	private const int SuiteVersion = 36;
 	private const int InfinityPathSampleCount = 1024;
 	private const int RealtimeSurfaceEditCount = 80;
+	private const float HighSpeedCollisionTraversalSpeed = 20000.0f;
 	private static string[] AllRequiredScenarios => new[]
 	{
 		"cold_generation",
@@ -65,6 +66,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"gpu_player_line_streaming",
 		"gpu_player_diagonal_streaming",
 		"gpu_player_clipbox_oscillation",
+		"high_speed_collision_streaming",
 		"gpu_allocator_churn",
 		"gpu_replacement_failure",
 		"gpu_pool_exhaustion",
@@ -136,6 +138,10 @@ public sealed class VoxelTerrainBenchmark : Component
 	private TraversalPath _traversalPath;
 	private float _traversalLoopLength;
 	private float _traversalDistanceTravelled;
+	private float _activeTraversalSpeed;
+	private Vector3 _traversalLastWorldPosition;
+	private bool _requireTraversalCollision;
+	private BenchmarkPhase _phaseAfterHighSpeedCollisionTraversal;
 	private int _traversalInitialCachedChunkCount;
 	private int _originalChunkRadius;
 	private int _liveConfigurationChunkRadius;
@@ -243,14 +249,14 @@ public sealed class VoxelTerrainBenchmark : Component
 			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership", "gpu_realtime_surface_edits_20hz", "gpu_cpu_collision_rebuild_cost",
 			"gpu_persistent_static_set", "gpu_camera_sweep_generation", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
-			"gpu_player_clipbox_oscillation",
+			"gpu_player_clipbox_oscillation", "high_speed_collision_streaming",
 			"gpu_allocator_churn", "gpu_replacement_failure", "gpu_pool_exhaustion", "gpu_return_origin_stability",
 			"gpu_async_readback_saturation", "gpu_resource_recreation", "gpu_dedicated_server_startup", "phase4_regular_b8_l4_stationary"
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
 			"cold_generation", "collision_backlog_frame_budget", "collision_proximity_edit_filter", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
-			"player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
+			"high_speed_collision_streaming", "player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
 			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz", "player_post_edit_line_streaming"
 		},
 		_ => AllRequiredScenarios
@@ -839,7 +845,20 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementVertical );
 				break;
 			case BenchmarkPhase.WaitGpuMovementVertical:
-				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_clipbox_oscillation", BenchmarkPhase.StartGpuLifecycleScenario );
+				if ( _manager.IsTerrainSettled )
+				{
+					_phaseAfterHighSpeedCollisionTraversal = BenchmarkPhase.StartGpuLifecycleScenario;
+					CompleteGpuPlayerTraversal( "gpu_player_clipbox_oscillation", BenchmarkPhase.StartHighSpeedCollisionTraversal );
+				}
+				break;
+			case BenchmarkPhase.StartHighSpeedCollisionTraversal:
+				BeginPlayerTraversal( TraversalPath.Line, "high_speed_collision_streaming", "Actual player traverses at 20,000 units/s while every occupied terrain chunk must already have collision", HighSpeedCollisionTraversalSpeed, true );
+				break;
+			case BenchmarkPhase.RunHighSpeedCollisionTraversal:
+				RunPlayerTraversal( BenchmarkPhase.WaitHighSpeedCollisionTraversal );
+				break;
+			case BenchmarkPhase.WaitHighSpeedCollisionTraversal:
+				if ( _manager.IsTerrainSettled ) CompleteHighSpeedCollisionTraversal();
 				break;
 			case BenchmarkPhase.StartGpuLifecycleScenario:
 				BeginScenario( GpuLifecycleScenarioNames[_gpuLifecycleScenarioIndex], "Production range allocation, transactional replacement, exhaustion backpressure, deferred reclaim, and return-origin stability" );
@@ -941,7 +960,15 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitLineTraversal );
 				break;
 			case BenchmarkPhase.WaitLineTraversal:
-				if ( _manager.IsTerrainSettled ) CompletePlayerTraversalAndReset( BenchmarkPhase.StartDiagonalTraversal );
+				if ( _manager.IsTerrainSettled )
+				{
+					if ( Mode == VoxelTerrainBenchmarkMode.CpuOnly )
+					{
+						_phaseAfterHighSpeedCollisionTraversal = BenchmarkPhase.StartDiagonalTraversal;
+						CompletePlayerTraversalAndReset( BenchmarkPhase.StartHighSpeedCollisionTraversal );
+					}
+					else CompletePlayerTraversalAndReset( BenchmarkPhase.StartDiagonalTraversal );
+				}
 				break;
 			case BenchmarkPhase.StartDiagonalTraversal:
 				BeginPlayerTraversal( TraversalPath.Diagonal, "player_diagonal_streaming", "Actual player flies diagonally through simultaneous X/Y chunk boundaries and back" );
@@ -1232,7 +1259,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		_phase = BenchmarkPhase.WaitLiveConfiguration;
 	}
 
-	private void BeginPlayerTraversal( TraversalPath path, string scenarioName, string description )
+	private void BeginPlayerTraversal( TraversalPath path, string scenarioName, string description, float speed = 0.0f, bool requireCollision = false )
 	{
 		BeginScenario( scenarioName, description );
 		_traversalPlayer = Scene.GetAllComponents<PlayerController>().FirstOrDefault();
@@ -1245,10 +1272,13 @@ public sealed class VoxelTerrainBenchmark : Component
 		_traversalPath = path;
 		_traversalStartWorldPosition = _traversalPlayer.WorldPosition;
 		_traversalStartLocalPosition = _manager.GameObject.WorldTransform.PointToLocal( _traversalStartWorldPosition );
+		_traversalLastWorldPosition = _traversalStartWorldPosition;
 		_traversalInitialCachedChunkCount = _manager.LoadedChunkCount;
 		_traversalDistanceTravelled = 0.0f;
+		_activeTraversalSpeed = speed > 0.0f ? speed : TraversalSpeed;
+		_requireTraversalCollision = requireCollision;
 		_traversalLoopLength = path == TraversalPath.Infinity ? BuildInfinityPath() : TraversalDistance * 2.0f;
-		_phase = path switch
+		_phase = requireCollision ? BenchmarkPhase.RunHighSpeedCollisionTraversal : path switch
 		{
 			TraversalPath.Infinity => BenchmarkPhase.RunInfinityTraversal,
 			TraversalPath.Line => BenchmarkPhase.RunLineTraversal,
@@ -1260,7 +1290,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private void RunPlayerTraversal( BenchmarkPhase waitPhase )
 	{
 		var totalDistance = _traversalLoopLength * TraversalLoopCount;
-		_traversalDistanceTravelled = System.MathF.Min( totalDistance, _traversalDistanceTravelled + TraversalSpeed * Time.Delta );
+		_traversalDistanceTravelled = System.MathF.Min( totalDistance, _traversalDistanceTravelled + _activeTraversalSpeed * Time.Delta );
 		if ( _traversalDistanceTravelled >= totalDistance )
 		{
 			MoveTraversalPlayer( _traversalStartWorldPosition );
@@ -1276,7 +1306,16 @@ public sealed class VoxelTerrainBenchmark : Component
 			TraversalPath.Vertical => SampleOutAndBackPath( loopDistance, false, true ),
 			_ => SampleOutAndBackPath( loopDistance, true, false )
 		};
-		MoveTraversalPlayer( _manager.GameObject.WorldTransform.PointToWorld( _traversalStartLocalPosition + offset ) );
+		var worldPosition = _manager.GameObject.WorldTransform.PointToWorld( _traversalStartLocalPosition + offset );
+		if ( _requireTraversalCollision && !_manager.IsCollisionReadyAtWorldPosition( worldPosition ) )
+		{
+			FailRun( $"high-speed traversal reached {worldPosition} before its terrain collider was ready" );
+			return;
+		}
+
+		var velocity = Time.Delta > 0.0f ? (worldPosition - _traversalLastWorldPosition) / Time.Delta : Vector3.Zero;
+		_traversalLastWorldPosition = worldPosition;
+		MoveTraversalPlayer( worldPosition, _requireTraversalCollision ? velocity : Vector3.Zero );
 	}
 
 	private float BuildInfinityPath()
@@ -1326,13 +1365,28 @@ public sealed class VoxelTerrainBenchmark : Component
 		return new Vector3( signedDistance * inverseSquareRootOfTwo, signedDistance * inverseSquareRootOfTwo, 0.0f );
 	}
 
-	private void MoveTraversalPlayer( Vector3 worldPosition )
+	private void MoveTraversalPlayer( Vector3 worldPosition, Vector3 velocity = default )
 	{
 		_traversalPlayer.WorldPosition = worldPosition;
 		_manager.RecordPlayerTraversalUpdate();
 		if ( _traversalPlayer.Body is null ) return;
-		_traversalPlayer.Body.Velocity = Vector3.Zero;
+		_traversalPlayer.Body.Velocity = velocity;
 		_traversalPlayer.Body.AngularVelocity = Vector3.Zero;
+	}
+
+	private void CompleteHighSpeedCollisionTraversal()
+	{
+		_requireTraversalCollision = false;
+		if ( _manager.VisualBackend == VoxelVisualBackendMode.CpuChunks )
+		{
+			CompletePlayerTraversalAndReset( _phaseAfterHighSpeedCollisionTraversal );
+			return;
+		}
+
+		CompleteScenario( gpuTerrain: _manager.CaptureGpuTerrainDiagnostics() );
+		MoveTraversalPlayer( _traversalStartWorldPosition );
+		_phase = _phaseAfterHighSpeedCollisionTraversal;
+		StartWarmup();
 	}
 
 	private void CompletePlayerTraversalAndReset( BenchmarkPhase nextPhase )
@@ -2441,6 +2495,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		StartGpuMovementVertical,
 		RunGpuMovementVertical,
 		WaitGpuMovementVertical,
+		StartHighSpeedCollisionTraversal,
+		RunHighSpeedCollisionTraversal,
+		WaitHighSpeedCollisionTraversal,
 		StartGpuLifecycleScenario,
 		WaitGpuLifecycleScenario,
 		StartGpuAsyncReadbackSaturation,
