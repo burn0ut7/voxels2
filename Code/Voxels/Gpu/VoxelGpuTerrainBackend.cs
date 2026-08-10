@@ -37,6 +37,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly List<VoxelVisualBlockKey> _desiredOrder = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
+	private readonly List<(VoxelEditOp Operation, uint Revision)> _fixedLodEdits = new();
 	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
 	private readonly List<VoxelVisualBlockKey> _transitionLeavingScratch = new();
@@ -188,6 +189,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	public void QueueStaticSet( IEnumerable<Vector3Int> coordinates, int ruleVersion ) => UpdateDesiredSet( coordinates, ruleVersion );
 
+	public void SetEditOperations( VoxelGpuEditOp[] operations, int operationCount )
+	{
+		foreach ( var scratch in _scratchRing ) scratch.SetEditOperations( operations, operationCount );
+		_transitionScratch.SetEditOperations( operations, operationCount );
+	}
+
 	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )
 	{
 		if ( _clipboxPlanner is null ) throw new System.InvalidOperationException( "Regular clipbox residency was not enabled for this GPU backend." );
@@ -198,6 +205,31 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_diagnostics.ClipboxRevision = _clipboxPlanner.Revision;
 			return false;
 		}
+		return QueueClipboxPlan();
+	}
+
+	public int QueueEdit( VoxelGpuEditOp[] operations, int operationCount, VoxelEditOp operation, uint editRevision )
+	{
+		SetEditOperations( operations, operationCount );
+		if ( _clipboxPlanner is not null )
+		{
+			if ( !_clipboxPlanner.ApplyEdit( operation, editRevision, _chunkSize ) ) return 0;
+			var changed = _clipboxPlanner.ChangedSlotCount + _clipboxPlanner.ChangedTransitionSlotCount;
+			QueueClipboxPlan();
+			return changed;
+		}
+
+		_fixedLodEdits.Add( (operation, editRevision) );
+		var affected = VoxelEditInvalidation.GetVisualBlocks( operation, _desiredOrder, _chunkSize );
+		if ( affected.Count == 0 ) return 0;
+		_desiredKeyInputScratch.Clear();
+		foreach ( var key in _desiredOrder ) _desiredKeyInputScratch.Add( affected.Contains( key ) ? key with { EditRevision = editRevision } : key );
+		UpdateDesiredKeys( _desiredKeyInputScratch );
+		return affected.Count;
+	}
+
+	private bool QueueClipboxPlan()
+	{
 		_diagnostics.ClipboxRevision = _clipboxPlanner.Revision;
 		_diagnostics.ClipboxChangedSlots = _clipboxPlanner.ChangedSlotCount;
 		_diagnostics.ClipboxActiveSlotCount = _clipboxPlanner.ActiveRegularCount;
@@ -288,7 +320,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public void UpdateDesiredSet( IEnumerable<Vector3Int> coordinates, int ruleVersion )
 	{
 		_desiredKeyInputScratch.Clear();
-		foreach ( var coordinate in coordinates ) _desiredKeyInputScratch.Add( new VoxelVisualBlockKey( coordinate, 0, ruleVersion ) );
+		foreach ( var coordinate in coordinates )
+		{
+			var key = new VoxelVisualBlockKey( coordinate, 0, ruleVersion );
+			var revision = key.EditRevision;
+			foreach ( var edit in _fixedLodEdits )
+				if ( VoxelEditInvalidation.OverlapsVisualBlock( edit.Operation, key, _chunkSize ) ) revision = System.Math.Max( revision, edit.Revision );
+			_desiredKeyInputScratch.Add( key with { EditRevision = revision } );
+		}
 		UpdateDesiredKeys( _desiredKeyInputScratch );
 	}
 

@@ -45,6 +45,6 @@ CS
 		uint localIndex = id.x - block * (uint)HaloSampleCount;
 		float3 localSample = float3( Decode3D( localIndex, HaloSize ) ) - 1.0f;
 		float3 sample = BlockRequests[block].SampleOrigin.xyz + localSample * BlockRequests[block].SampleScale.xyz;
-		DensitySamples[id.x] = EvaluateTerrainDensity( sample, SdfClampDistance, SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
+		DensitySamples[id.x] = EvaluateEditedTerrainDensity( sample, SdfClampDistance, SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
 	}
 }

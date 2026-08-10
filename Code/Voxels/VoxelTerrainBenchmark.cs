@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 22;
+	private const int SuiteVersion = 23;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
@@ -29,6 +29,10 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_four_level_b8_movement",
 		"phase4_four_level_stationary_soak",
 		"phase4_transition_ownership",
+		"phase5_sparse_edit_contract",
+		"phase5_deterministic_invalidation",
+		"phase5_stale_edit_generations",
+		"phase5_edit_eviction_reentry",
 		"phase4_transition_all_512_cases",
 		"phase4_transition_six_orientations",
 		"phase4_transition_plane",
@@ -134,6 +138,8 @@ public sealed class VoxelTerrainBenchmark : Component
 	private VoxelClipboxPlannerProofReport _pendingClipboxPlannerProof;
 	private VoxelClipboxReferenceEquivalenceRunner _referenceEquivalenceRunner;
 	private int _phase4PlannerScenarioIndex;
+	private int _phase5EditScenarioIndex;
+	private VoxelEditProofReport _pendingPhase5EditProof;
 	private VoxelTransvoxelTransitionProofResult _pendingTransitionProof;
 	private VoxelGpuTransitionCaseProofResult _pendingTransitionGpuProof;
 	private int _phase4TransitionScenarioIndex;
@@ -174,6 +180,13 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_transition_watertight_edges",
 		"phase4_transition_no_duplicate_faces"
 	};
+	private static readonly string[] Phase5EditScenarioNames =
+	{
+		"phase5_sparse_edit_contract",
+		"phase5_deterministic_invalidation",
+		"phase5_stale_edit_generations",
+		"phase5_edit_eviction_reentry"
+	};
 	private static readonly string[] Phase4IndirectScenarioNames =
 	{
 		"phase4_indirect_1_to_1024",
@@ -204,7 +217,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		VoxelTerrainBenchmarkMode.GpuOnly => new[]
 		{
-			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
+			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
 			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match",
 			"gpu_persistent_static_set", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
@@ -214,7 +227,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
-			"cold_generation", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
+			"cold_generation", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
 			"player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
 			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz"
 		},
@@ -410,6 +423,28 @@ public sealed class VoxelTerrainBenchmark : Component
 				if ( _phase4PlannerScenarioIndex < Phase4PlannerScenarioNames.Length )
 				{
 					_phase = BenchmarkPhase.StartPhase4Planner;
+					break;
+				}
+				_phase5EditScenarioIndex = 0;
+				_phase = BenchmarkPhase.StartPhase5EditProof;
+				StartWarmup();
+				break;
+			case BenchmarkPhase.StartPhase5EditProof:
+				BeginScenario( Phase5EditScenarioNames[_phase5EditScenarioIndex], "Phase Five sparse edit authority, deterministic invalidation, stale-generation rejection, and replay proof" );
+				_pendingPhase5EditProof = VoxelEditDiagnostics.RunScenario( Phase5EditScenarioNames[_phase5EditScenarioIndex] );
+				_phase = BenchmarkPhase.WaitPhase5EditProof;
+				break;
+			case BenchmarkPhase.WaitPhase5EditProof:
+				CompleteScenario();
+				if ( !_pendingPhase5EditProof.Passed )
+				{
+					FailRun( $"Phase Five edit proof failed: {_pendingPhase5EditProof.Failure}" );
+					break;
+				}
+				_phase5EditScenarioIndex++;
+				if ( _phase5EditScenarioIndex < Phase5EditScenarioNames.Length )
+				{
+					_phase = BenchmarkPhase.StartPhase5EditProof;
 					break;
 				}
 				_phase4TransitionScenarioIndex = 0;
@@ -877,6 +912,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		_results.Clear();
 		_comparisons.Clear();
 		_phase4PlannerScenarioIndex = 0;
+		_phase5EditScenarioIndex = 0;
 		_phase4TransitionScenarioIndex = 0;
 		_phase4IndirectScenarioIndex = 0;
 		_phase4RegularScenarioIndex = 0;
@@ -2107,6 +2143,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		Warmup,
 		StartPhase4Planner,
 		WaitPhase4Planner,
+		StartPhase5EditProof,
+		WaitPhase5EditProof,
 		StartPhase4Transition,
 		WaitPhase4TransitionGpu,
 		WaitPhase4Transition,

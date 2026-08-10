@@ -9,7 +9,9 @@ internal sealed class VoxelClipboxRuntimePlanner
 	private readonly VoxelClipboxTransitionSlotAssignment[] _desiredTransitions;
 	private readonly int[] _changedSlotIds;
 	private readonly int[] _changedTransitionSlotIds;
+	private readonly List<(BBox Bounds, uint Revision)> _editRegions = new();
 	private bool _hasCurrentPlan;
+	private int _chunkSize = VoxelClipboxConfig.CellsPerBlock;
 	private ulong _revision;
 	private int _changedSlotCount;
 	private int _changedTransitionSlotCount;
@@ -49,6 +51,7 @@ internal sealed class VoxelClipboxRuntimePlanner
 	{
 		ObserverBaseBlock = VoxelClipboxCoordinates.GetObserverBaseBlock( observerCanonicalSample );
 		ActiveRegularCount = VoxelClipboxReferencePlanner.Populate( ObserverBaseBlock, _config, _desiredLevels, _desiredSlots );
+		ApplyStoredEditRevisions();
 		ActiveTransitionCount = VoxelClipboxTransitionPlanner.Populate( _config, _desiredLevels, _desiredSlots, _desiredTransitions );
 		_changedSlotCount = 0;
 		_changedTransitionSlotCount = 0;
@@ -64,6 +67,42 @@ internal sealed class VoxelClipboxRuntimePlanner
 		}
 		_revision++;
 		return _changedSlotCount != 0 || _changedTransitionSlotCount != 0;
+	}
+
+	public bool ApplyEdit( VoxelEditOp operation, uint editRevision, int chunkSize )
+	{
+		if ( _editRegions.Count != 0 && chunkSize != _chunkSize ) throw new System.InvalidOperationException( "The clipbox chunk size cannot change while sparse edits are active." );
+		_chunkSize = chunkSize;
+		_editRegions.Add( (VoxelEditJournal.GetBounds( operation ), editRevision) );
+		ApplyStoredEditRevisions();
+
+		ActiveTransitionCount = VoxelClipboxTransitionPlanner.Populate( _config, _desiredLevels, _desiredSlots, _desiredTransitions );
+		_changedSlotCount = 0;
+		_changedTransitionSlotCount = 0;
+		for ( var index = 0; index < _desiredSlots.Length; index++ )
+			if ( (!_hasCurrentPlan && _desiredSlots[index].Active) || (_hasCurrentPlan && !SlotsMatchForDelta( _currentSlots[index], _desiredSlots[index] )) ) _changedSlotIds[_changedSlotCount++] = index;
+		for ( var index = 0; index < _desiredTransitions.Length; index++ )
+			if ( (!_hasCurrentPlan && _desiredTransitions[index].Active) || (_hasCurrentPlan && !TransitionsMatchForDelta( _currentTransitions[index], _desiredTransitions[index] )) ) _changedTransitionSlotIds[_changedTransitionSlotCount++] = index;
+		_revision++;
+		return _changedSlotCount != 0 || _changedTransitionSlotCount != 0;
+	}
+
+	private void ApplyStoredEditRevisions()
+	{
+		if ( _editRegions.Count == 0 ) return;
+		for ( var index = 0; index < _desiredSlots.Length; index++ )
+		{
+			var assignment = _desiredSlots[index];
+			if ( !assignment.Active ) continue;
+			var step = 1 << assignment.Lod;
+			var origin = VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( assignment.Coordinate, assignment.Lod, _chunkSize );
+			var halo = step * 2.0f;
+			var bounds = new BBox( origin - Vector3.One * halo, origin + Vector3.One * (_chunkSize * step + halo) );
+			var revision = assignment.Key.EditRevision;
+			foreach ( var region in _editRegions )
+				if ( bounds.Overlaps( region.Bounds ) ) revision = System.Math.Max( revision, region.Revision );
+			if ( revision != assignment.Key.EditRevision ) _desiredSlots[index] = assignment with { Key = assignment.Key with { EditRevision = revision } };
+		}
 	}
 
 	private static bool SlotsMatchForDelta( VoxelClipboxRegularSlotAssignment current, VoxelClipboxRegularSlotAssignment desired ) =>

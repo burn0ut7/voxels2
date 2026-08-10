@@ -10,6 +10,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	private readonly GpuBuffer<uint> _lookup;
 	private readonly GpuBuffer<VoxelGpuCountResult> _countResults;
 	private readonly GpuBuffer<VoxelGpuAllocationDescriptor> _allocations;
+	private readonly GpuBuffer<VoxelGpuEditOp> _editOperations;
 	private readonly int _chunkSize;
 	private readonly int _transitionCellsPerAxis;
 	private readonly int _transitionCellCount;
@@ -53,10 +54,19 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		_lookup = CreateLookupBuffer();
 		_countResults = new GpuBuffer<VoxelGpuCountResult>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Count Results" );
 		_allocations = new GpuBuffer<VoxelGpuAllocationDescriptor>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Allocations" );
+		_editOperations = new GpuBuffer<VoxelGpuEditOp>( VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Active Edits" );
 		_count = new ComputeShader( "shaders/voxel_gpu_transition_count_v1_cs.shader" );
 		_emit = new ComputeShader( "shaders/voxel_gpu_transition_emit_v1_cs.shader" );
 		BindAttributes();
-		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64);
+		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64) + (long)VoxelEditJournal.MaximumGpuOperations * 80;
+	}
+
+	public void SetEditOperations( VoxelGpuEditOp[] operations, int count )
+	{
+		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
+		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
+		_count.Attributes.Set( "VoxelEditCount", count );
+		_emit.Attributes.Set( "VoxelEditCount", count );
 	}
 
 	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, out double submissionMilliseconds )
@@ -159,6 +169,8 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "SimplexAmplitude", _simplexAmplitude );
 			shader.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
 			shader.Attributes.Set( "SimplexSeed", _simplexSeed );
+			shader.Attributes.Set( "VoxelEditOperations", _editOperations );
+			shader.Attributes.Set( "VoxelEditCount", 0 );
 		}
 	}
 
@@ -178,7 +190,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	public void Dispose()
 	{
 		lock ( _stateLock ) _disposed = true;
-		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose();
+		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose(); _editOperations?.Dispose();
 	}
 
 	private enum ArenaState { Idle, CountSubmitted, CountReady, EmitReady }

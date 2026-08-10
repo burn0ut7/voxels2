@@ -76,6 +76,7 @@ internal static class VoxelClipboxTransitionPlanner
 				var stableSlotId = GetStableSlotId( config, fineLevel, face, u, v );
 				var fineSlotId = VoxelClipboxCoordinates.GetSlotIndex( fineLevel, fineCoordinate, config.BlocksPerAxis );
 				var coarseSlotId = VoxelClipboxCoordinates.GetSlotIndex( fineLevel + 1, coarseCoordinate, config.BlocksPerAxis );
+				var editRevision = System.Math.Max( regularSlots[fineSlotId].Key.EditRevision, regularSlots[coarseSlotId].Key.EditRevision );
 				destination[stableSlotId] = new VoxelClipboxTransitionSlotAssignment(
 					stableSlotId,
 					fineLevel,
@@ -89,7 +90,7 @@ internal static class VoxelClipboxTransitionPlanner
 					v,
 					active,
 					config.RuleVersion,
-					config.EditRevision,
+					editRevision,
 					regularSlots[fineSlotId].Key,
 					regularSlots[coarseSlotId].Key );
 				if ( active ) activeCount++;

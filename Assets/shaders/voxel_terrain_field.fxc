@@ -52,6 +52,76 @@ float EvaluateTerrainDensity( float3 canonicalSample, float sdfClampDistance, fl
 	return clamp( canonicalSample.z - surfaceHeight, -sdfClampDistance, sdfClampDistance );
 }
 
+struct VoxelEditOperation
+{
+	float4 PositionAndSmoothness;
+	float4 Rotation;
+	float4 SizeAndMaterial;
+	uint Shape;
+	uint Operation;
+	uint WorldRevision;
+	uint Reserved0;
+	float4 BoundsMin;
+};
+
+StructuredBuffer<VoxelEditOperation> VoxelEditOperations < Attribute( "VoxelEditOperations" ); >;
+int VoxelEditCount < Attribute( "VoxelEditCount" ); >;
+
+float3 VoxelRotateInverse( float3 point, float4 rotation )
+{
+	float3 inverseVector = -rotation.xyz;
+	return point + 2.0f * cross( inverseVector, cross( inverseVector, point ) + rotation.w * point );
+}
+
+float VoxelEditShapeDistance( VoxelEditOperation edit, float3 canonicalSample )
+{
+	float3 point = VoxelRotateInverse( canonicalSample - edit.PositionAndSmoothness.xyz, edit.Rotation );
+	if ( edit.Shape == 0 ) return length( point ) - edit.SizeAndMaterial.x;
+	if ( edit.Shape == 1 )
+	{
+		point.z -= clamp( point.z, -edit.SizeAndMaterial.y, edit.SizeAndMaterial.y );
+		return length( point ) - edit.SizeAndMaterial.x;
+	}
+	float3 delta = abs( point ) - edit.SizeAndMaterial.xyz;
+	return length( max( delta, 0.0f ) ) + min( max( delta.x, max( delta.y, delta.z ) ), 0.0f );
+}
+
+float VoxelSmoothMinimum( float first, float second, float smoothing )
+{
+	if ( smoothing <= 0.0001f ) return min( first, second );
+	float blend = saturate( 0.5f + 0.5f * (second - first) / smoothing );
+	return lerp( second, first, blend ) - smoothing * blend * (1.0f - blend);
+}
+
+float EvaluateEditedTerrainDensity( float3 canonicalSample, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	float density = EvaluateTerrainDensity( canonicalSample, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	[loop] for ( int index = 0; index < VoxelEditCount; index++ )
+	{
+		VoxelEditOperation edit = VoxelEditOperations[index];
+		if ( edit.Operation == 4 ) continue;
+		float boundsRadius = edit.BoundsMin.w;
+		if ( any( abs( canonicalSample - edit.PositionAndSmoothness.xyz ) > boundsRadius ) ) continue;
+		float shape = VoxelEditShapeDistance( edit, canonicalSample );
+		if ( edit.Operation == 0 ) density = min( density, shape );
+		else if ( edit.Operation == 1 ) density = max( density, -shape );
+		else if ( edit.Operation == 2 ) density = VoxelSmoothMinimum( density, shape, edit.PositionAndSmoothness.w );
+		else if ( edit.Operation == 3 ) density = -VoxelSmoothMinimum( -density, shape, edit.PositionAndSmoothness.w );
+	}
+	return clamp( density, -sdfClampDistance, sdfClampDistance );
+}
+
+float3 EvaluateEditedTerrainGradient( float3 canonicalSample, float sampleStep, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	float3 delta = float3( sampleStep, 0.0f, 0.0f );
+	float x = EvaluateEditedTerrainDensity( canonicalSample + delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed ) - EvaluateEditedTerrainDensity( canonicalSample - delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	delta = float3( 0.0f, sampleStep, 0.0f );
+	float y = EvaluateEditedTerrainDensity( canonicalSample + delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed ) - EvaluateEditedTerrainDensity( canonicalSample - delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	delta = float3( 0.0f, 0.0f, sampleStep );
+	float z = EvaluateEditedTerrainDensity( canonicalSample + delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed ) - EvaluateEditedTerrainDensity( canonicalSample - delta, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	return float3( x, y, z );
+}
+
 float3 EvaluateTerrainGradient( float3 canonicalSample, float sampleStep, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
 {
 	float3 delta = float3( sampleStep, 0.0f, 0.0f );

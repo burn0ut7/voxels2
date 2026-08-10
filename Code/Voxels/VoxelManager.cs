@@ -26,6 +26,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const long GpuReferenceIndexCount = 47657688;
 
 	private readonly Dictionary<Vector3Int, VoxelChunk> _chunks = new();
+	private readonly VoxelEditJournal _editJournal = new();
 	private readonly Dictionary<Vector3Int, GameObject> _chunkGameObjects = new();
 	private readonly HashSet<Vector3Int> _desiredChunkCoordinates = new();
 	private readonly List<Vector3Int> _gpuStreamingObservers = new( 4 );
@@ -59,7 +60,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private VoxelGpuTransvoxelProof _gpuTransvoxelProof;
 	private VoxelGpuTransitionCaseProof _gpuTransitionCaseProof;
 	private VoxelGpuTerrainBackend _gpuTerrainBackend;
-	private bool _gpuEditUnavailableWarningLogged;
 	private VoxelGpuTransvoxelProofResult _lastGpuTransvoxelProofResult;
 	private bool _hasGpuTransvoxelProofResult;
 	private VoxelGpuTransitionCaseProofResult _lastGpuTransitionCaseProofResult;
@@ -278,6 +278,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int LoadedChunkCount => _chunks.Count;
 	public int DesiredChunkCount => GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox && VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ? _gpuDesiredBlockCount : _desiredChunkCoordinates.Count;
 	public int ActiveChunkGameObjectCount => _chunkGameObjects.Count;
+	public uint WorldEditRevision => _editJournal.WorldRevision;
+	public int ActiveEditOperationCount => _editJournal.Count;
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox && VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ? GpuClipboxConfig.ExpectedActiveRegularCount : checked( ChunkDiameter * ChunkDiameter );
 	[Property, ReadOnly, Group( "Rendering" )]
@@ -755,6 +757,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				EffectiveGpuVertexPoolCapacity,
 				EffectiveGpuIndexPoolCapacity,
 				clipboxConfig );
+			var editSnapshot = _editJournal.CreateGpuSnapshot( out var editCount );
+			_gpuTerrainBackend.SetEditOperations( editSnapshot, editCount );
 			if ( clipboxConfig.HasValue )
 			{
 				_gpuDesiredBlockCount = clipboxConfig.Value.ExpectedActiveRegularCount;
@@ -1385,43 +1389,44 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	public int DisplaceSdf( Vector3 worldPosition, float radius, float displacement )
 	{
-		CountCall( ref _callBrushRequests );
-		if ( VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod )
-		{
-			if ( !_gpuEditUnavailableWarningLogged )
-			{
-				_gpuEditUnavailableWarningLogged = true;
-				Log.Warning( "Terrain edits are unavailable while the Phase 2B static GPU visual backend is selected; the authoritative SDF was not changed." );
-			}
-			return 0;
-		}
 		if ( radius <= 0.0f || System.MathF.Abs( displacement ) <= 0.0001f )
 		{
 			return 0;
 		}
 
-		var startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		var brushCenter = GameObject.WorldTransform.PointToLocal( worldPosition ) / VoxelSize;
 		var brushRadius = radius / VoxelSize;
-		var sdfDisplacement = displacement / VoxelSize;
+		return ApplyEdit( new VoxelEditOp
+		{
+			Shape = VoxelEditShape.Sphere,
+			Operation = displacement > 0.0f ? VoxelCsgOperation.SmoothSubtract : VoxelCsgOperation.SmoothAdd,
+			Position = brushCenter,
+			Rotation = Rotation.Identity,
+			Size = new Vector3( brushRadius, 0.0f, 0.0f ),
+			Smoothness = System.MathF.Max( 0.25f, System.MathF.Abs( displacement / VoxelSize ) * 0.25f ),
+			MaterialId = (ushort)VoxelMaterial.Terrain
+		} );
+	}
+
+	public int ApplyEdit( VoxelEditOp requestedOperation )
+	{
+		CountCall( ref _callBrushRequests );
+		var startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 		var changedChunks = new List<Vector3Int>();
-		var changedSampleCount = 0;
 		var writeWaitStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		System.TimeSpan writeWaitElapsed;
+		VoxelEditOp operation;
 		lock ( _sdfLock )
 		{
 			writeWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( writeWaitStart );
-			CountCall( ref _callBrushChunkTests, _chunks.Count );
-			foreach ( var pair in _chunks )
+			operation = _editJournal.Append( requestedOperation );
+			var affectedChunks = VoxelEditInvalidation.GetCpuChunks( operation, ChunkSize );
+			CountCall( ref _callBrushChunkTests, affectedChunks.Count );
+			foreach ( var coordinate in affectedChunks )
 			{
-				var changedSamples = DisplaceChunkSdf( pair.Value, brushCenter, brushRadius, sdfDisplacement );
-				if ( changedSamples == 0 )
-				{
-					continue;
-				}
-
-				changedChunks.Add( pair.Key );
-				changedSampleCount += changedSamples;
+				if ( !_chunks.TryGetValue( coordinate, out var chunk ) ) continue;
+				FillChunk( chunk, ChunkSize );
+				changedChunks.Add( coordinate );
 			}
 		}
 
@@ -1435,20 +1440,31 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 		MergeCoherentVisualEditBatch( changedChunks );
 		ActivatePlayerSafetyForEdit( changedChunks );
-
 		PumpCpuChunkBuildQueue();
+		var gpuDirtyBlocks = 0;
+		if ( _gpuTerrainBackend is not null )
+		{
+			var snapshot = _editJournal.CreateGpuSnapshot( out var editCount );
+			gpuDirtyBlocks = _gpuTerrainBackend.QueueEdit( snapshot, editCount, operation, operation.WorldRevision );
+		}
 
 		var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime( startTimestamp );
 		Log.Info(
-			$"Voxel brush: center={worldPosition}, radius={radius:F1}, displacement={displacement:F1}, " +
-			$"changedSamples={changedSampleCount:N0}, dirtyChunks={changedChunks.Count:N0}, " +
+			$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
+			$"dirtyCpuChunks={changedChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
 			$"cpuCollisionQueued={changedChunks.Count:N0}, sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, total={elapsed.TotalMilliseconds:F2} ms."
 		);
 
-		return changedChunks.Count;
+		return System.Math.Max( changedChunks.Count, gpuDirtyBlocks );
 	}
 
-	private static void FillChunk( VoxelChunk chunk, int chunkSize )
+	public float QuerySdf( Vector3 worldPosition )
+	{
+		var canonicalSample = GameObject.WorldTransform.PointToLocal( worldPosition ) / VoxelSize;
+		lock ( _sdfLock ) return _editJournal.EvaluateDistance( canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
+	}
+
+	private void FillChunk( VoxelChunk chunk, int chunkSize )
 	{
 		var sampleSize = chunk.SampleSize;
 		var chunkOrigin = new Vector3Int(
@@ -1456,24 +1472,48 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			chunk.Coordinate.y * chunkSize,
 			(chunk.Coordinate.z - 1) * chunkSize
 		);
-		var minimumDistance = chunkOrigin.z;
-		var maximumDistance = chunkOrigin.z + chunk.Size;
+		var proceduralTerrain = VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod;
+		var minimumSurfaceHeight = proceduralTerrain ? SimplexBaseHeight - SimplexAmplitude : 0.0f;
+		var maximumSurfaceHeight = proceduralTerrain ? SimplexBaseHeight + SimplexAmplitude : 0.0f;
+		var minimumDistance = chunkOrigin.z - maximumSurfaceHeight;
+		var maximumDistance = chunkOrigin.z + chunk.Size - minimumSurfaceHeight;
 		if ( minimumDistance >= chunk.DistanceClamp )
 		{
 			chunk.Fill( new Voxel( chunk.DistanceClamp, VoxelMaterial.Air ) );
-			return;
 		}
-		if ( maximumDistance <= -chunk.DistanceClamp )
+		else if ( maximumDistance <= -chunk.DistanceClamp )
 		{
 			chunk.Fill( new Voxel( -chunk.DistanceClamp, VoxelMaterial.Terrain ) );
-			return;
 		}
-
-		for ( var z = 0; z < sampleSize; z++ )
+		else if ( !proceduralTerrain ) for ( var z = 0; z < sampleSize; z++ )
 		{
 			var distance = chunkOrigin.z + z;
 			var material = distance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air;
 			chunk.FillLayer( z, new Voxel( distance, material ) );
+		}
+		else for ( var y = 0; y < sampleSize; y++ )
+		for ( var x = 0; x < sampleSize; x++ )
+		{
+			var sampleX = chunkOrigin.x + x;
+			var sampleY = chunkOrigin.y + y;
+			var surfaceHeight = SimplexBaseHeight + TerrainSimplexNoise( new Vector2( sampleX, sampleY ) * SimplexFrequency, SimplexSeed ) * SimplexAmplitude;
+			for ( var z = 0; z < sampleSize; z++ )
+			{
+				var distance = System.Math.Clamp( chunkOrigin.z + z - surfaceHeight, -chunk.DistanceClamp, chunk.DistanceClamp );
+				chunk.SetVoxel( x, y, z, new Voxel( distance, distance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air ) );
+			}
+		}
+		var operations = _editJournal.CreateOperationSnapshot();
+		if ( operations.Length == 0 ) return;
+		for ( var z = 0; z < sampleSize; z++ )
+		for ( var y = 0; y < sampleSize; y++ )
+		for ( var x = 0; x < sampleSize; x++ )
+		{
+			var canonicalSample = new Vector3( chunkOrigin.x + x, chunkOrigin.y + y, chunkOrigin.z + z );
+			var existing = chunk.GetVoxel( x, y, z );
+			var distance = VoxelEditJournal.EvaluateDistance( operations, canonicalSample, existing.Distance );
+			var material = VoxelEditJournal.EvaluateMaterial( operations, canonicalSample, distance, existing.Material == VoxelMaterial.Air ? VoxelMaterial.Terrain : existing.Material );
+			chunk.SetVoxel( x, y, z, new Voxel( distance, material ) );
 		}
 	}
 
@@ -1538,6 +1578,58 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			}
 		}
 	}
+
+	private float EvaluateProceduralDistance( Vector3 canonicalSample )
+	{
+		if ( VisualBackend != VoxelVisualBackendMode.GpuPersistentFixedLod ) return System.Math.Clamp( canonicalSample.z, -SdfClampDistance, SdfClampDistance );
+		var surfaceHeight = SimplexBaseHeight + TerrainSimplexNoise( new Vector2( canonicalSample.x, canonicalSample.y ) * SimplexFrequency, SimplexSeed ) * SimplexAmplitude;
+		return System.Math.Clamp( canonicalSample.z - surfaceHeight, -SdfClampDistance, SdfClampDistance );
+	}
+
+	private static float TerrainSimplexNoise( Vector2 point, int seed )
+	{
+		const float skewFactor = 0.3660254038f;
+		const float unskewFactor = 0.2113248654f;
+		var skewed = (point.x + point.y) * skewFactor;
+		var cellX = (int)System.MathF.Floor( point.x + skewed );
+		var cellY = (int)System.MathF.Floor( point.y + skewed );
+		var cellOffset = (cellX + cellY) * unskewFactor;
+		var offset = point - (new Vector2( cellX, cellY ) - cellOffset);
+		var secondCornerX = offset.x > offset.y ? 1 : 0;
+		var secondCornerY = offset.x > offset.y ? 0 : 1;
+		var second = offset - new Vector2( secondCornerX, secondCornerY ) + unskewFactor;
+		var third = offset - 1.0f + 2.0f * unskewFactor;
+		var value = 0.0f;
+		var radius = 0.5f - offset.Dot( offset );
+		if ( radius > 0.0f ) value += radius * radius * radius * radius * TerrainGradient( TerrainHash( cellX, cellY, seed ) & 7 ).Dot( offset );
+		radius = 0.5f - second.Dot( second );
+		if ( radius > 0.0f ) value += radius * radius * radius * radius * TerrainGradient( TerrainHash( cellX + secondCornerX, cellY + secondCornerY, seed ) & 7 ).Dot( second );
+		radius = 0.5f - third.Dot( third );
+		if ( radius > 0.0f ) value += radius * radius * radius * radius * TerrainGradient( TerrainHash( cellX + 1, cellY + 1, seed ) & 7 ).Dot( third );
+		return 70.0f * value;
+	}
+
+	private static int TerrainHash( int x, int y, int seed )
+	{
+		unchecked
+		{
+			var value = seed + x * 374761393 + y * 668265263;
+			value = (value ^ (value >> 13)) * 1274126177;
+			return value ^ (value >> 16);
+		}
+	}
+
+	private static Vector2 TerrainGradient( int index ) => index switch
+	{
+		0 => new Vector2( 1.0f, 0.0f ),
+		1 => new Vector2( -1.0f, 0.0f ),
+		2 => new Vector2( 0.0f, 1.0f ),
+		3 => new Vector2( 0.0f, -1.0f ),
+		4 => new Vector2( 0.70710677f, 0.70710677f ),
+		5 => new Vector2( -0.70710677f, 0.70710677f ),
+		6 => new Vector2( 0.70710677f, -0.70710677f ),
+		_ => new Vector2( -0.70710677f, -0.70710677f )
+	};
 
 	private bool ShouldDrawClipboxDebugBlock( VoxelGpuClipboxDebugBlock block ) => GpuClipboxDebugMode switch
 	{
@@ -1805,7 +1897,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				return candidate.GetVoxel( candidateLocal.x, candidateLocal.y, candidateLocal.z ).Distance;
 		}
 
-		return System.Math.Clamp( (float)worldSample.z, -SdfClampDistance, SdfClampDistance );
+		var canonicalSample = new Vector3( worldSample.x, worldSample.y, worldSample.z );
+		return _editJournal.EvaluateDistance( canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
 	}
 
 	private static int FloorDiv( int value, int divisor )
@@ -2388,10 +2481,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			for ( var x = -CollisionChunkRadius; x < CollisionChunkRadius; x++ )
 			{
 				var coordinate = new Vector3Int( observer.x + x, observer.y + y, 0 );
-				if ( _chunks.ContainsKey( coordinate ) )
-				{
-					_collisionDesiredChunks.Add( coordinate );
-				}
+				if ( !_chunks.ContainsKey( coordinate ) ) GenerateChunk( coordinate );
+				_collisionDesiredChunks.Add( coordinate );
 			}
 		}
 
