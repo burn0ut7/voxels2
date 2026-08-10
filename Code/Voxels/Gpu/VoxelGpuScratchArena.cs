@@ -112,7 +112,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	{
 		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
 		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
-		_density.Attributes.Set( "VoxelEditCount", count );
 	}
 
 	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, out double submissionMilliseconds )
@@ -132,6 +131,7 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_requests.SetData( new System.Span<VoxelGpuBlockRequest>( requests, 0, count ) );
 		SetBatchSize( count );
 		_statistics.Clear();
+		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _densitySamples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		foreach ( var buffer in new GpuBuffer[] { _cells, _edgeFlags, _edgeVertexIds, _statistics, _edgeGroupSums, _cellGroupSums, _blockCounts, _countResults } )
@@ -259,7 +259,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_density.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
 		_density.Attributes.Set( "SimplexSeed", _simplexSeed );
 		_density.Attributes.Set( "VoxelEditOperations", _editOperations );
-		_density.Attributes.Set( "VoxelEditCount", 0 );
 	}
 
 	private void SetBatchSize( int batchSize )

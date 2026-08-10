@@ -2,7 +2,7 @@ MODES
 {
 	Default();
 }
-// Transvoxel shared fine-face density ownership.
+// Transvoxel shared fine-face density and sparse-edit ownership.
 CS
 {
 	#include "system.fxc"
@@ -61,7 +61,7 @@ CS
 		[loop]for(uint cell=0;cell<(uint)TransitionCellCount;cell++)
 		{
 			uint baseIndex=(id.x*(uint)TransitionCellCount+cell)*(uint)SampleCount;
-			[unroll]for(uint sample=0;sample<9;sample++)Samples[baseIndex+sample]=EvaluateEditedTerrainDensity(FineSample(request,sample,cell),SdfClampDistance,SimplexFrequency,SimplexAmplitude,SimplexBaseHeight,SimplexSeed);
+			[unroll]for(uint sample=0;sample<9;sample++)Samples[baseIndex+sample]=EvaluateEditedTerrainDensity(FineSample(request,sample,cell),(uint)request.FineOrigin.w,SdfClampDistance,SimplexFrequency,SimplexAmplitude,SimplexBaseHeight,SimplexSeed);
 			Samples[baseIndex+9]=Samples[baseIndex];Samples[baseIndex+10]=Samples[baseIndex+2];Samples[baseIndex+11]=Samples[baseIndex+6];Samples[baseIndex+12]=Samples[baseIndex+8];
 			uint code=0;[unroll]for(uint bit=0;bit<9;bit++)if(Samples[baseIndex+CaseOrder[bit]]<0)code|=1u<<bit;
 			uint cls=Lookup[code]&0x7f;uint counts=Lookup[GeometryOffset+cls];vertexCount+=counts>>4;indexCount+=(counts&15)*3;if((counts&15)!=0)activeCells++;

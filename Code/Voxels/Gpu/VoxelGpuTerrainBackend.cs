@@ -38,6 +38,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
 	private readonly List<(VoxelEditOp Operation, uint Revision)> _fixedLodEdits = new();
+	private int _editOperationCount;
 	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
 	private readonly List<VoxelVisualBlockKey> _transitionLeavingScratch = new();
@@ -193,6 +194,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	{
 		foreach ( var scratch in _scratchRing ) scratch.SetEditOperations( operations, operationCount );
 		_transitionScratch.SetEditOperations( operations, operationCount );
+		_editOperationCount = operationCount;
 	}
 
 	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )
@@ -988,7 +990,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				requests[index] = new VoxelGpuBlockRequest
 				{
 					SampleOrigin = new Vector4( sampleOrigin, 0.0f ),
-					SampleScale = new Vector4( sampleScale, sampleScale, sampleScale, 0.0f ),
+					SampleScale = new Vector4( sampleScale, sampleScale, sampleScale, VoxelGpuEditDispatch.GetOperationCount( item.Key.EditRevision, _editOperationCount ) ),
 					CoordinateX = item.Key.Coordinate.x,
 					CoordinateY = item.Key.Coordinate.y,
 					CoordinateZ = item.Key.Coordinate.z,
@@ -1035,7 +1037,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_transitionSlotScratch[acceptedCount] = slot;
 			_transitionRequestScratch[acceptedCount] = new VoxelGpuTransitionRequest
 			{
-				FineOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize ), 0.0f ),
+				FineOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize ), VoxelGpuEditDispatch.GetOperationCount( item.Key.EditRevision, _editOperationCount ) ),
 				CoarseOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.CoarseCoordinate, entry.CoarseLevel, _chunkSize ), 0.0f ),
 				FineStep = (uint)fineStep,
 				CoarseStep = (uint)coarseStep,

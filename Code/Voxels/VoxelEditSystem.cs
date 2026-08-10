@@ -242,6 +242,16 @@ internal static class VoxelEditInvalidation
 	}
 }
 
+internal static class VoxelGpuEditDispatch
+{
+	public static uint GetOperationCount( uint editRevision, int uploadedOperationCount )
+	{
+		if ( uploadedOperationCount < 0 || uploadedOperationCount > VoxelEditJournal.MaximumGpuOperations ) throw new System.ArgumentOutOfRangeException( nameof( uploadedOperationCount ) );
+		if ( editRevision > (uint)uploadedOperationCount ) throw new System.InvalidOperationException( $"GPU block edit revision {editRevision} exceeds the uploaded journal length {uploadedOperationCount}." );
+		return editRevision;
+	}
+}
+
 internal static class VoxelSdfRaycast
 {
 	private const int MaximumSamples = 512;

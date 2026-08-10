@@ -13,6 +13,7 @@ internal static class VoxelEditDiagnostics
 				"phase5_stale_edit_generations" => RunStaleGenerations(),
 				"phase5_edit_eviction_reentry" => RunEvictionReentry(),
 				"phase5_voxel_brush_raycast" => RunBrushRaycast(),
+				"phase5_gpu_edit_revision_binding" => RunGpuEditRevisionBinding(),
 				_ => new VoxelEditProofReport( false, $"Unknown Phase Five edit scenario '{scenario}'.", 0, 0, 0 )
 			};
 		}
@@ -107,6 +108,18 @@ internal static class VoxelEditDiagnostics
 		Require( !VoxelSdfRaycast.TryTrace( new Vector3( 0, 0, 10 ), Vector3.Up, 20, 0.25f, point => point.z, out _ ), "brush ray reported a surface behind its aim direction" );
 		Require( VoxelSdfRaycast.TryTrace( new Vector3( 0, 0, -10 ), Vector3.Up, 20, 0.25f, point => point.z, out _ ), "brush ray could not exit solid terrain" );
 		return new VoxelEditProofReport( true, string.Empty, 4, 0, 0 );
+	}
+
+	private static VoxelEditProofReport RunGpuEditRevisionBinding()
+	{
+		Require( VoxelGpuEditDispatch.GetOperationCount( 0, 3 ) == 0, "unedited GPU blocks did not bind the empty journal prefix" );
+		Require( VoxelGpuEditDispatch.GetOperationCount( 1, 3 ) == 1, "GPU blocks did not bind their first edit revision" );
+		Require( VoxelGpuEditDispatch.GetOperationCount( 3, 3 ) == 3, "GPU blocks did not bind the complete uploaded journal" );
+		var rejected = false;
+		try { VoxelGpuEditDispatch.GetOperationCount( 4, 3 ); }
+		catch ( System.InvalidOperationException ) { rejected = true; }
+		Require( rejected, "GPU blocks accepted an edit revision beyond the uploaded journal" );
+		return new VoxelEditProofReport( true, string.Empty, 4, 3, 1 );
 	}
 
 	private static VoxelEditOp Operation( VoxelEditShape shape, VoxelCsgOperation operation, Vector3 position, Vector3 size, float smoothness = 0.0f ) => new()

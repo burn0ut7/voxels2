@@ -3,7 +3,7 @@ MODES
 	Default();
 }
 // GPU LOD crack plan: shared canonical terrain field live-reload marker.
-// Versioned persistent terrain Pass A density and material rules for fixed-LOD batches.
+// Versioned persistent terrain Pass A density rules with revisioned sparse edits.
 CS
 {
 	#include "system.fxc"
@@ -45,6 +45,6 @@ CS
 		uint localIndex = id.x - block * (uint)HaloSampleCount;
 		float3 localSample = float3( Decode3D( localIndex, HaloSize ) ) - 1.0f;
 		float3 sample = BlockRequests[block].SampleOrigin.xyz + localSample * BlockRequests[block].SampleScale.xyz;
-		DensitySamples[id.x] = EvaluateEditedTerrainDensity( sample, SdfClampDistance, SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
+		DensitySamples[id.x] = EvaluateEditedTerrainDensity( sample, (uint)BlockRequests[block].SampleScale.w, SdfClampDistance, SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
 	}
 }

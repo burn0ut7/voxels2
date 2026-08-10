@@ -65,8 +65,6 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	{
 		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
 		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
-		_count.Attributes.Set( "VoxelEditCount", count );
-		_emit.Attributes.Set( "VoxelEditCount", count );
 	}
 
 	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, out double submissionMilliseconds )
@@ -82,6 +80,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		_countResults.Clear();
 		Graphics.ResourceBarrierTransition( _requests, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _lookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _samples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _countResults, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_count.Attributes.Set( "BatchSize", count );
@@ -125,6 +124,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		Graphics.ResourceBarrierTransition( pool.Vertices, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( pool.Indices, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _samples, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		_emit.Attributes.Set( "OutputVertices", pool.Vertices );
 		_emit.Attributes.Set( "OutputIndices", pool.Indices );
 		_emit.Dispatch( _batchSize, 1, 1 );
@@ -170,7 +170,6 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
 			shader.Attributes.Set( "SimplexSeed", _simplexSeed );
 			shader.Attributes.Set( "VoxelEditOperations", _editOperations );
-			shader.Attributes.Set( "VoxelEditCount", 0 );
 		}
 	}
 
