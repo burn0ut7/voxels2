@@ -11,6 +11,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	private readonly GpuBuffer<VoxelGpuCountResult> _countResults;
 	private readonly GpuBuffer<VoxelGpuAllocationDescriptor> _allocations;
 	private readonly GpuBuffer<VoxelGpuEditOp> _editOperations;
+	private readonly GpuBuffer<uint> _editIndices;
 	private readonly int _chunkSize;
 	private readonly int _transitionCellsPerAxis;
 	private readonly int _transitionCellCount;
@@ -55,10 +56,11 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		_countResults = new GpuBuffer<VoxelGpuCountResult>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Count Results" );
 		_allocations = new GpuBuffer<VoxelGpuAllocationDescriptor>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Allocations" );
 		_editOperations = new GpuBuffer<VoxelGpuEditOp>( VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Active Edits" );
+		_editIndices = new GpuBuffer<uint>( MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Edit Indices" );
 		_count = new ComputeShader( "shaders/voxel_gpu_transition_count_v1_cs.shader" );
 		_emit = new ComputeShader( "shaders/voxel_gpu_transition_emit_v1_cs.shader" );
 		BindAttributes();
-		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64) + (long)VoxelEditJournal.MaximumGpuOperations * 80;
+		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64) + (long)VoxelEditJournal.MaximumGpuOperations * 80 + (long)MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations * sizeof( uint );
 	}
 
 	public void SetEditOperations( VoxelGpuEditOp[] operations, int count )
@@ -67,20 +69,22 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
 	}
 
-	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, out double submissionMilliseconds )
+	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, uint[] editIndices, int editIndexCount, out double submissionMilliseconds )
 	{
 		lock ( _stateLock )
 		{
-			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count ) { submissionMilliseconds = 0.0; return false; }
+			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count || editIndices is null || editIndexCount < 0 || editIndexCount > editIndices.Length || editIndexCount > _editIndices.ElementCount ) { submissionMilliseconds = 0.0; return false; }
 			_state = ArenaState.CountSubmitted;
 			_batchSize = count;
 		}
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		_requests.SetData( new System.Span<VoxelGpuTransitionRequest>( requests, 0, count ) );
+		if ( editIndexCount > 0 ) _editIndices.SetData( new System.Span<uint>( editIndices, 0, editIndexCount ) );
 		_countResults.Clear();
 		Graphics.ResourceBarrierTransition( _requests, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _lookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		Graphics.ResourceBarrierTransition( _editIndices, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _samples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _countResults, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_count.Attributes.Set( "BatchSize", count );
@@ -170,6 +174,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
 			shader.Attributes.Set( "SimplexSeed", _simplexSeed );
 			shader.Attributes.Set( "VoxelEditOperations", _editOperations );
+			shader.Attributes.Set( "VoxelEditIndices", _editIndices );
 		}
 	}
 
@@ -189,7 +194,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	public void Dispose()
 	{
 		lock ( _stateLock ) _disposed = true;
-		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose(); _editOperations?.Dispose();
+		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose(); _editOperations?.Dispose(); _editIndices?.Dispose();
 	}
 
 	private enum ArenaState { Idle, CountSubmitted, CountReady, EmitReady }
