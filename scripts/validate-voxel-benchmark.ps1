@@ -47,6 +47,7 @@ $fullRequiredScenarios = @(
 	'gpu_lod5_transition_ownership',
 	'gpu_realtime_surface_edits_20hz',
 	'gpu_accumulated_surface_edits_20hz',
+	'gpu_aimed_brush_edits_20hz',
 	'gpu_cpu_collision_rebuild_cost',
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
@@ -77,7 +78,7 @@ $fullRequiredScenarios = @(
 	'phase4_regular_b8_l4_stationary'
 )
 $gpuRequiredScenarios = @(
-	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase5_sparse_edit_contract', 'phase5_deterministic_invalidation', 'phase5_stale_edit_generations', 'phase5_edit_eviction_reentry', 'phase5_voxel_brush_raycast', 'phase5_gpu_edit_revision_binding', 'phase5_incremental_edit_replay', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_radius64_match', 'gpu_lod5_transition_ownership', 'gpu_realtime_surface_edits_20hz', 'gpu_accumulated_surface_edits_20hz', 'gpu_cpu_collision_rebuild_cost',
+	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase5_sparse_edit_contract', 'phase5_deterministic_invalidation', 'phase5_stale_edit_generations', 'phase5_edit_eviction_reentry', 'phase5_voxel_brush_raycast', 'phase5_gpu_edit_revision_binding', 'phase5_incremental_edit_replay', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_radius64_match', 'gpu_lod5_transition_ownership', 'gpu_realtime_surface_edits_20hz', 'gpu_accumulated_surface_edits_20hz', 'gpu_aimed_brush_edits_20hz', 'gpu_cpu_collision_rebuild_cost',
 	'gpu_persistent_static_set', 'gpu_camera_sweep_generation', 'gpu_production_render_integration',
 	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming', 'gpu_player_clipbox_oscillation', 'high_speed_collision_streaming',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
@@ -158,6 +159,7 @@ $requiredMetrics = @(
 $requiredCallMetrics = @(
 	'calls_manager_updates', 'calls_generation_requests', 'calls_generation_polls', 'calls_generation_chunks',
 	'calls_brush_requests', 'calls_brush_chunk_tests', 'calls_brush_samples_tested', 'calls_brush_samples_changed',
+	'calls_brush_raycasts', 'calls_brush_raycast_samples', 'calls_brush_raycast_edit_candidates', 'calls_brush_raycast_edit_tests',
 	'calls_visual_world_starts', 'calls_visual_queue_pumps', 'calls_visual_builds_queued', 'calls_visual_builds_started',
 	'calls_visual_halo_snapshots', 'calls_visual_halo_samples_copied', 'calls_visual_builds_completed', 'calls_visual_uploads',
 	'calls_collision_interest_refreshes', 'calls_collision_queue_pumps', 'calls_collision_builds_queued',
@@ -208,7 +210,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 37 ) { Add-Failure "Expected suite version 37, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 38 ) { Add-Failure "Expected suite version 38, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -398,6 +400,16 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.gpu_terrain_clipbox_dropped_work -ne 0 ) { Add-Failure "$context dropped clipbox edit work" }
 		if ( [int]$scenario.gpu_terrain_clipbox_transition_dependency_mismatches -ne 0 ) { Add-Failure "$context completed with transition dependency mismatches" }
 		if ( [int]$scenario.gpu_terrain_pending_request_count -ne 0 -or [int]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending GPU edit work" }
+	}
+	elseif ( $scenario.scenario -eq 'gpu_aimed_brush_edits_20hz' )
+	{
+		if ( $scenario.gpu_terrain_available -ne $true ) { Add-Failure "$context has no persistent GPU terrain diagnostics" }
+		if ( [int]$scenario.edits -ne 80 -or [int]$scenario.changed_chunk_events -le 0 ) { Add-Failure "$context did not execute eighty aimed brush digs" }
+		if ( [long]$scenario.calls_brush_raycasts -ne 80 -or [long]$scenario.calls_brush_raycast_samples -le 0 ) { Add-Failure "$context did not raycast every aimed brush dig" }
+		if ( [long]$scenario.calls_brush_raycast_edit_candidates -ge 12800 ) { Add-Failure "$context replayed the full accumulated journal for aimed brush raycasts" }
+		if ( [int]$scenario.gpu_edit_queue_count -lt 240 ) { Add-Failure "$context did not retain all aimed brush edits in the GPU journal" }
+		if ( [int]$scenario.gpu_terrain_clipbox_dropped_work -ne 0 -or [int]$scenario.gpu_terrain_clipbox_transition_dependency_mismatches -ne 0 ) { Add-Failure "$context dropped or mismatched aimed brush work" }
+		if ( [int]$scenario.gpu_terrain_pending_request_count -ne 0 -or [int]$scenario.gpu_terrain_pending_publication_count -ne 0 ) { Add-Failure "$context completed with pending aimed brush work" }
 	}
 	elseif ( $scenario.scenario -eq 'gpu_cpu_collision_rebuild_cost' )
 	{

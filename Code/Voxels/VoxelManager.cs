@@ -133,6 +133,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private long _callBrushChunkTests;
 	private long _callBrushSamplesTested;
 	private long _callBrushSamplesChanged;
+	private long _callBrushRaycasts;
+	private long _callBrushRaycastSamples;
+	private long _callBrushRaycastEditCandidates;
+	private long _callBrushRaycastEditTests;
 	private long _callVisualWorldStarts;
 	private long _callVisualQueuePumps;
 	private long _callVisualBuildsQueued;
@@ -1193,6 +1197,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			System.Threading.Interlocked.Read( ref _callBrushChunkTests ),
 			System.Threading.Interlocked.Read( ref _callBrushSamplesTested ),
 			System.Threading.Interlocked.Read( ref _callBrushSamplesChanged ),
+			System.Threading.Interlocked.Read( ref _callBrushRaycasts ),
+			System.Threading.Interlocked.Read( ref _callBrushRaycastSamples ),
+			System.Threading.Interlocked.Read( ref _callBrushRaycastEditCandidates ),
+			System.Threading.Interlocked.Read( ref _callBrushRaycastEditTests ),
 			System.Threading.Interlocked.Read( ref _callVisualWorldStarts ),
 			System.Threading.Interlocked.Read( ref _callVisualQueuePumps ),
 			System.Threading.Interlocked.Read( ref _callVisualBuildsQueued ),
@@ -1581,13 +1589,42 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	public bool TryRaycastSdf( Vector3 worldStart, Vector3 worldDirection, float maximumDistance, out Vector3 hitPosition )
 	{
-		var operations = _editJournal.CreateOperationSnapshot();
-		float EvaluateWorldDistance( Vector3 worldPosition )
+		hitPosition = default;
+		CountCall( ref _callBrushRaycasts );
+		if ( maximumDistance <= 0.0f || worldDirection.LengthSquared <= 0.000001f ) return false;
+
+		var canonicalStart = GameObject.WorldTransform.PointToLocal( worldStart ) / VoxelSize;
+		var worldEnd = worldStart + worldDirection.Normal * maximumDistance;
+		var canonicalEnd = GameObject.WorldTransform.PointToLocal( worldEnd ) / VoxelSize;
+		var canonicalDelta = canonicalEnd - canonicalStart;
+		var canonicalDistance = canonicalDelta.Length;
+		if ( canonicalDistance <= 0.000001f ) return false;
+
+		var bounds = new BBox(
+			new Vector3(
+				System.MathF.Min( canonicalStart.x, canonicalEnd.x ),
+				System.MathF.Min( canonicalStart.y, canonicalEnd.y ),
+				System.MathF.Min( canonicalStart.z, canonicalEnd.z )
+			),
+			new Vector3(
+				System.MathF.Max( canonicalStart.x, canonicalEnd.x ),
+				System.MathF.Max( canonicalStart.y, canonicalEnd.y ),
+				System.MathF.Max( canonicalStart.z, canonicalEnd.z )
+			)
+		);
+		var operations = _editJournal.CreateOperationSnapshot( bounds );
+		CountCall( ref _callBrushRaycastEditCandidates, operations.Length );
+		float EvaluateCanonicalDistance( Vector3 canonicalSample )
 		{
-			var canonicalSample = GameObject.WorldTransform.PointToLocal( worldPosition ) / VoxelSize;
-			return VoxelEditJournal.EvaluateDistance( operations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) ) * VoxelSize;
+			return VoxelEditJournal.EvaluateDistance( operations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
 		}
-		return VoxelSdfRaycast.TryTrace( worldStart, worldDirection, maximumDistance, System.MathF.Max( 1.0f, VoxelSize * 0.125f ), EvaluateWorldDistance, out hitPosition );
+
+		var minimumStep = System.MathF.Max( 1.0f, VoxelSize * 0.125f ) / VoxelSize;
+		var hit = VoxelSdfRaycast.TryTrace( canonicalStart, canonicalDelta, canonicalDistance, minimumStep, EvaluateCanonicalDistance, out var canonicalHit, out var sampleCount );
+		CountCall( ref _callBrushRaycastSamples, sampleCount );
+		CountCall( ref _callBrushRaycastEditTests, checked( (long)sampleCount * operations.Length ) );
+		if ( hit ) hitPosition = GameObject.WorldTransform.PointToWorld( canonicalHit * VoxelSize );
+		return hit;
 	}
 
 	private void FillChunk( VoxelChunk chunk, int chunkSize )

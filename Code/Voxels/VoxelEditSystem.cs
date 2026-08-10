@@ -283,14 +283,19 @@ internal static class VoxelSdfRaycast
 	private const int RefinementSteps = 8;
 
 	public static bool TryTrace( Vector3 start, Vector3 direction, float maximumDistance, float minimumStep, System.Func<Vector3, float> evaluateDistance, out Vector3 hitPosition )
+		=> TryTrace( start, direction, maximumDistance, minimumStep, evaluateDistance, out hitPosition, out _ );
+
+	public static bool TryTrace( Vector3 start, Vector3 direction, float maximumDistance, float minimumStep, System.Func<Vector3, float> evaluateDistance, out Vector3 hitPosition, out int sampleCount )
 	{
 		hitPosition = default;
+		sampleCount = 0;
 		if ( maximumDistance <= 0.0f || minimumStep <= 0.0f || direction.LengthSquared <= 0.000001f || evaluateDistance is null ) return false;
 		direction = direction.Normal;
 		var hitTolerance = minimumStep * 0.5f;
 		var travelled = 0.0f;
 		var previousPosition = start;
 		var previousDistance = evaluateDistance( start );
+		sampleCount++;
 		if ( System.MathF.Abs( previousDistance ) <= hitTolerance )
 		{
 			hitPosition = start;
@@ -303,6 +308,7 @@ internal static class VoxelSdfRaycast
 			travelled = System.MathF.Min( maximumDistance, travelled + step );
 			var position = start + direction * travelled;
 			var distance = evaluateDistance( position );
+			sampleCount++;
 			if ( System.MathF.Abs( distance ) <= hitTolerance )
 			{
 				hitPosition = position;
@@ -310,7 +316,7 @@ internal static class VoxelSdfRaycast
 			}
 			if ( (previousDistance < 0.0f) != (distance < 0.0f) )
 			{
-				hitPosition = Refine( previousPosition, position, previousDistance, evaluateDistance );
+				hitPosition = Refine( previousPosition, position, previousDistance, evaluateDistance, ref sampleCount );
 				return true;
 			}
 			previousPosition = position;
@@ -319,12 +325,13 @@ internal static class VoxelSdfRaycast
 		return false;
 	}
 
-	private static Vector3 Refine( Vector3 first, Vector3 second, float firstDistance, System.Func<Vector3, float> evaluateDistance )
+	private static Vector3 Refine( Vector3 first, Vector3 second, float firstDistance, System.Func<Vector3, float> evaluateDistance, ref int sampleCount )
 	{
 		for ( var iteration = 0; iteration < RefinementSteps; iteration++ )
 		{
 			var middle = (first + second) * 0.5f;
 			var middleDistance = evaluateDistance( middle );
+			sampleCount++;
 			if ( (firstDistance < 0.0f) == (middleDistance < 0.0f) )
 			{
 				first = middle;

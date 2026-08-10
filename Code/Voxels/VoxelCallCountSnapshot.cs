@@ -9,6 +9,10 @@ public readonly record struct VoxelCallCountSnapshot(
 	long BrushChunkTests,
 	long BrushSamplesTested,
 	long BrushSamplesChanged,
+	long BrushRaycasts,
+	long BrushRaycastSamples,
+	long BrushRaycastEditCandidates,
+	long BrushRaycastEditTests,
 	long VisualWorldStarts,
 	long VisualQueuePumps,
 	long VisualBuildsQueued,
@@ -41,6 +45,10 @@ public readonly record struct VoxelCallCountSnapshot(
 			System.Math.Max( 0, BrushChunkTests - baseline.BrushChunkTests ),
 			System.Math.Max( 0, BrushSamplesTested - baseline.BrushSamplesTested ),
 			System.Math.Max( 0, BrushSamplesChanged - baseline.BrushSamplesChanged ),
+			System.Math.Max( 0, BrushRaycasts - baseline.BrushRaycasts ),
+			System.Math.Max( 0, BrushRaycastSamples - baseline.BrushRaycastSamples ),
+			System.Math.Max( 0, BrushRaycastEditCandidates - baseline.BrushRaycastEditCandidates ),
+			System.Math.Max( 0, BrushRaycastEditTests - baseline.BrushRaycastEditTests ),
 			System.Math.Max( 0, VisualWorldStarts - baseline.VisualWorldStarts ),
 			System.Math.Max( 0, VisualQueuePumps - baseline.VisualQueuePumps ),
 			System.Math.Max( 0, VisualBuildsQueued - baseline.VisualBuildsQueued ),
@@ -73,6 +81,10 @@ public readonly record struct VoxelCallCountSnapshot(
 		yield return new( "brush.chunk_tests", BrushChunkTests );
 		yield return new( "brush.samples_tested", BrushSamplesTested );
 		yield return new( "brush.samples_changed", BrushSamplesChanged );
+		yield return new( "brush.raycasts", BrushRaycasts );
+		yield return new( "brush.raycast_samples", BrushRaycastSamples );
+		yield return new( "brush.raycast_edit_candidates", BrushRaycastEditCandidates );
+		yield return new( "brush.raycast_edit_tests", BrushRaycastEditTests );
 		yield return new( "visual.world_starts", VisualWorldStarts );
 		yield return new( "visual.queue_pumps", VisualQueuePumps );
 		yield return new( "visual.builds_queued", VisualBuildsQueued );

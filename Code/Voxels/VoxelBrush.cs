@@ -10,6 +10,8 @@ public sealed class VoxelBrush : Component
 	private int _applyOnStartRemaining;
 	private int _applyOnStartIndex;
 	private bool _aimMissLogged;
+	private VoxelManager _voxelWorld;
+	private PlayerController _aimController;
 
 	[Property, Group( "Brush" )]
 	public Vector3 LocalCenter { get; set; }
@@ -43,6 +45,7 @@ public sealed class VoxelBrush : Component
 
 	protected override void OnStart()
 	{
+		_voxelWorld = GameObject.Components.Get<VoxelManager>();
 		if ( ApplyOnStart )
 		{
 			BeginDebugBrushSequence();
@@ -156,10 +159,15 @@ public sealed class VoxelBrush : Component
 	{
 		if ( !forceCameraAim )
 		{
+			if ( IsUsableAimController( _aimController ) )
+			{
+				aim = _aimController.EyeTransform;
+				return true;
+			}
 			foreach ( var controller in Scene.GetAllComponents<PlayerController>() )
 			{
-				if ( !controller.Active || !controller.GameObject.Enabled || !controller.GameObject.Active ) continue;
-				if ( controller.GameObject.Network.Active && !controller.GameObject.Network.IsOwner ) continue;
+				if ( !IsUsableAimController( controller ) ) continue;
+				_aimController = controller;
 				aim = controller.EyeTransform;
 				return true;
 			}
@@ -175,9 +183,13 @@ public sealed class VoxelBrush : Component
 		return false;
 	}
 
+	private static bool IsUsableAimController( PlayerController controller ) =>
+		controller is not null && controller.Active && controller.GameObject.Enabled && controller.GameObject.Active &&
+		(!controller.GameObject.Network.Active || controller.GameObject.Network.IsOwner);
+
 	private bool TryGetVoxelWorld( out VoxelManager voxelWorld )
 	{
-		voxelWorld = GameObject.Components.Get<VoxelManager>();
+		voxelWorld = _voxelWorld ??= GameObject.Components.Get<VoxelManager>();
 		if ( voxelWorld is not null )
 		{
 			return true;
