@@ -111,11 +111,17 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			(long)_regularLookup.ElementCount * sizeof( uint );
 	}
 
-	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, uint[] editIndices, int editIndexCount, VoxelGpuEditOp[] editOperations, int editOperationCount, out double submissionMilliseconds )
+	public void SetEditOperations( VoxelGpuEditOp[] operations, int count )
+	{
+		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
+		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
+	}
+
+	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, uint[] editIndices, int editIndexCount, out double submissionMilliseconds )
 	{
 		lock ( _stateLock )
 		{
-			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count || editIndices is null || editIndexCount < 0 || editIndexCount > editIndices.Length || editIndexCount > _editIndices.ElementCount || editOperations is null || editOperationCount < 0 || editOperationCount > VoxelEditJournal.MaximumGpuOperations || editOperations.Length < System.Math.Max( 1, editOperationCount ) )
+			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count || editIndices is null || editIndexCount < 0 || editIndexCount > editIndices.Length || editIndexCount > _editIndices.ElementCount )
 			{
 				submissionMilliseconds = 0.0;
 				return false;
@@ -127,7 +133,6 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		_requests.SetData( new System.Span<VoxelGpuBlockRequest>( requests, 0, count ) );
 		if ( editIndexCount > 0 ) _editIndices.SetData( new System.Span<uint>( editIndices, 0, editIndexCount ) );
-		if ( editOperationCount > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( editOperations, 0, editOperationCount ) );
 		SetBatchSize( count );
 		_statistics.Clear();
 		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
