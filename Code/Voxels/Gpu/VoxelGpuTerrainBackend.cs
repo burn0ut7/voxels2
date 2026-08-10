@@ -14,6 +14,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly List<VoxelVisualBlockKey> _clipboxKeyScratch;
 	private readonly HashSet<VoxelVisualBlockKey> _clipboxCombinedKeySet = new();
 	private readonly List<VoxelVisualBlockKey> _clipboxCombinedKeyScratch = new();
+	private readonly HashSet<VoxelVisualBlockKey> _clipboxCurrentRenderKeys = new();
+	private readonly HashSet<VoxelVisualBlockKey> _clipboxDesiredRenderKeys = new();
 	private readonly Queue<PendingPublication> _publications = new();
 	private readonly int _chunkSize;
 	private readonly float _voxelSize;
@@ -69,6 +71,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly long _createdTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
 	private long _frameCounter;
 	private long _clipboxRevisionPlannedTimestamp;
+	private double _lastClipboxCommitCpuMilliseconds;
+	private int _lastClipboxOwnershipChanges;
 	private string _structuredDebugReportJson = "{}";
 	private bool _structuredDebugReportDirty;
 	private string _latestRevisionEventJson = "{}";
@@ -942,6 +946,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		builder.Append( ",\"resident_upload_bytes\":0" );
 		builder.Append( ",\"culling_cpu_ms\":" ).Append( Number( _renderer.LastCullingMilliseconds ) );
 		builder.Append( ",\"argument_build_cpu_ms\":" ).Append( Number( _renderer.LastArgumentBuildMilliseconds ) );
+		builder.Append( ",\"clipbox_commit_cpu_ms\":" ).Append( Number( _lastClipboxCommitCpuMilliseconds ) );
+		builder.Append( ",\"clipbox_ownership_changes\":" ).Append( _lastClipboxOwnershipChanges );
 		builder.Append( ",\"terrain_depth_gpu_ms\":null,\"terrain_opaque_gpu_ms\":null}" );
 		builder.Append( ",\"transition\":{\"desired_seam_slots\":" ).Append( _clipboxTransitions?.ActiveCount ?? 0 );
 		builder.Append( ",\"published_seam_slots\":" ).Append( _residents.PublishedCountFor( true ) );
@@ -1139,7 +1145,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			if ( !metadata.DependenciesValid || !_residents.TryGetPublished( transitionVisualKey, out _ ) || !_publishedTransitionDependencies.TryGetValue( transitionVisualKey, out var publishedDependency ) || publishedDependency != metadata.Key ) return;
 		}
 
-		SetClipboxRenderOwnership();
+		var commitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+		_lastClipboxOwnershipChanges = SetClipboxRenderOwnership();
 		_clipboxPlanner.Commit();
 		_clipboxTransitions.Commit();
 		_clipboxRevisionPending = false;
@@ -1152,26 +1159,37 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		foreach ( var assignment in _clipboxPlanner.DesiredSlots ) if ( assignment.Active ) _clipboxKeyScratch.Add( assignment.Key );
 		UpdateDesiredKeys( _clipboxKeyScratch );
 		UpdateDesiredTransitions( false );
+		_lastClipboxCommitCpuMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( commitStart ).TotalMilliseconds;
 		_diagnostics.ClipboxPendingRevisionCount = 0;
 		_diagnostics.ClipboxTransitionPendingSlots = _clipboxTransitions.PendingCount;
 		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
 		RecordRevisionEvent( "committed" );
 		var commitLatencyMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds;
 		if ( _clipboxPlanner.Revision == 1 || commitLatencyMilliseconds >= 100.0 )
-			Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={commitLatencyMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
+			Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={commitLatencyMilliseconds:F2}, commitCpuMs={_lastClipboxCommitCpuMilliseconds:F2}, ownershipChanges={_lastClipboxOwnershipChanges:N0}, cullingCpuMs={_renderer.LastCullingMilliseconds:F2}, argumentBuildCpuMs={_renderer.LastArgumentBuildMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
 	}
 
-	private void SetClipboxRenderOwnership()
+	private int SetClipboxRenderOwnership()
 	{
+		_clipboxCurrentRenderKeys.Clear();
 		foreach ( var assignment in _clipboxPlanner.CurrentSlots )
-			if ( assignment.Active ) _residents.SetRenderable( assignment.Key, false );
+			if ( assignment.Active ) _clipboxCurrentRenderKeys.Add( assignment.Key );
 		foreach ( var assignment in _clipboxPlanner.CurrentTransitions )
-			if ( assignment.Active ) _residents.SetRenderable( VoxelClipboxTransitionPlanner.GetVisualKey( assignment ), false );
+			if ( assignment.Active ) _clipboxCurrentRenderKeys.Add( VoxelClipboxTransitionPlanner.GetVisualKey( assignment ) );
+
+		_clipboxDesiredRenderKeys.Clear();
 		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
-			if ( assignment.Active ) _residents.SetRenderable( assignment.Key, true );
+			if ( assignment.Active ) _clipboxDesiredRenderKeys.Add( assignment.Key );
 		foreach ( var assignment in _clipboxPlanner.DesiredTransitions )
-			if ( assignment.Active ) _residents.SetRenderable( VoxelClipboxTransitionPlanner.GetVisualKey( assignment ), true );
-		_renderer.MarkDirty();
+			if ( assignment.Active ) _clipboxDesiredRenderKeys.Add( VoxelClipboxTransitionPlanner.GetVisualKey( assignment ) );
+
+		var changes = 0;
+		foreach ( var key in _clipboxCurrentRenderKeys )
+			if ( !_clipboxDesiredRenderKeys.Contains( key ) && _residents.SetRenderable( key, false ) ) changes++;
+		foreach ( var key in _clipboxDesiredRenderKeys )
+			if ( !_clipboxCurrentRenderKeys.Contains( key ) && _residents.SetRenderable( key, true ) ) changes++;
+		if ( changes > 0 ) _renderer.MarkDirty();
+		return changes;
 	}
 
 	private void SubmitCountBatches()

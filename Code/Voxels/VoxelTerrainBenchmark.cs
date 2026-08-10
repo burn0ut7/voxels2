@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 33;
+	private const int SuiteVersion = 34;
 	private const int InfinityPathSampleCount = 1024;
 	private const int RealtimeSurfaceEditCount = 80;
 	private static string[] AllRequiredScenarios => new[]
@@ -380,7 +380,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				var gcTiming = Sandbox.Diagnostics.PerformanceStats.Timings.GcPause.GetMetric( 1 );
 				var frameMilliseconds = Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0;
 				var unaccountedFrameMilliseconds = VoxelManager.ComputeUnaccountedFrameMilliseconds( frameMilliseconds, updateTiming.Max, renderTiming.Max, physicsTiming.Max, idleTiming.Max, asyncTiming.Max, gcTiming.Max );
-				Log.Info( $"Voxel terrain stutter diagnostic: frameMs={frameMilliseconds:F2}, unaccountedFrameMs={unaccountedFrameMilliseconds:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, gpuPendingCount={terrain.PendingCountBatches}, gpuPendingEmit={terrain.PendingEmitBatches}, gpuResidents={terrain.ResidentBlocks}/{terrain.DesiredBlocks}, gpuVisible={terrain.VisibleDrawCommands}, gpuReadbackMs={terrain.CountReadbackAverageMilliseconds:F2}, gpuBatchP95Ms={terrain.BatchCompletion.P95Milliseconds:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
+				Log.Info( $"Voxel terrain stutter diagnostic: frameMs={frameMilliseconds:F2}, unaccountedFrameMs={unaccountedFrameMilliseconds:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, gpuPendingCount={terrain.PendingCountBatches}, gpuPendingEmit={terrain.PendingEmitBatches}, gpuResidents={terrain.ResidentBlocks}/{terrain.DesiredBlocks}, gpuVisible={terrain.VisibleDrawCommands}, gpuReadbackMs={terrain.CountReadbackAverageMilliseconds:F2}, gpuBatchP95Ms={terrain.BatchCompletion.P95Milliseconds:F2}, collisionGeneration={_manager.FormatCollisionGenerationTrace()}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
 			}
 		}
 		if ( _manager?.HasPartialVisualEditPublication == true ||

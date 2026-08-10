@@ -85,6 +85,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private int _gpuDesiredBlockCount;
 	private int _slowGpuStreamingLogCount;
 	private int _idleStutterDiagnosticCount;
+	private long _lastCollisionChunkGenerationTimestamp;
+	private Vector3Int _lastCollisionGeneratedChunk;
+	private double _lastCollisionChunkGenerationMilliseconds;
+	private long _collisionChunksGenerated;
 	private string _gpuTerrainLiveDiagnostics = "available=False; requested=0; residents=0; pendingCount=0; pendingEmit=0; readbacks=0; visibleDraws=0; poolUsed=0; requestToVisibleP95Ms=0.00; failure=";
 	private long _worldGenerationStartTimestamp;
 	private bool _worldGenerationPending;
@@ -242,6 +246,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public bool LogGeneration { get; set; }
 
 	[Property, Group( "Diagnostics" )]
+	public bool LogChunkGenerationDetails { get; set; }
+
+	[Property, Group( "Diagnostics" )]
 	public bool LogTerrainEdits { get; set; }
 
 	[Property, Group( "Diagnostics" )]
@@ -313,6 +320,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	internal VoxelGpuTransitionCaseProofResult LastGpuTransitionCaseProofResult => _lastGpuTransitionCaseProofResult;
 	public long LatestChunkTimingSequence => _nextChunkTimingSequence;
 	public long LatestBatchTimingSequence => _nextBatchTimingSequence;
+	public long CollisionChunksGenerated => _collisionChunksGenerated;
+	public double LastCollisionChunkGenerationMilliseconds => _lastCollisionChunkGenerationMilliseconds;
 	public bool IsTerrainSettled => (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod || AreDesiredChunksLoaded()) && _chunkStreamingGenerationQueue.Count == 0 &&
 		(Application.IsDedicatedServer || (VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod
 			? _gpuTerrainBackend?.IsSettled == true
@@ -411,7 +420,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			var gcTiming = Sandbox.Diagnostics.PerformanceStats.Timings.GcPause.GetMetric( 1 );
 			var frameMilliseconds = Sandbox.Diagnostics.PerformanceStats.FrameTime * 1000.0;
 			var unaccountedFrameMilliseconds = ComputeUnaccountedFrameMilliseconds( frameMilliseconds, updateTiming.Max, renderTiming.Max, physicsTiming.Max, idleTiming.Max, asyncTiming.Max, gcTiming.Max );
-			Log.Info( $"Voxel idle stutter diagnostic: frameMs={frameMilliseconds:F2}, unaccountedFrameMs={unaccountedFrameMilliseconds:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
+			Log.Info( $"Voxel idle stutter diagnostic: frameMs={frameMilliseconds:F2}, unaccountedFrameMs={unaccountedFrameMilliseconds:F2}, updateMs={updateTiming.Max:F2}, renderMs={renderTiming.Max:F2}, physicsMs={physicsTiming.Max:F2}, idleMs={idleTiming.Max:F2}, asyncMs={asyncTiming.Max:F2}, gcTimingMs={gcTiming.Max:F2}, gpuMs={Sandbox.Diagnostics.PerformanceStats.GpuFrametime:F2}, collisionGeneration={FormatCollisionGenerationTrace()}, allocated={Sandbox.Diagnostics.PerformanceStats.BytesAllocated}, gcPause={Sandbox.Diagnostics.PerformanceStats.GcPause}." );
 		}
 		CountCall( ref _callManagerUpdates );
 		UpdateGpuTransvoxelProof();
@@ -1028,7 +1037,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		lock ( _sdfLock )
 		{
-			return GenerateChunk( coordinate, LogGeneration, out _ );
+			return GenerateChunk( coordinate, LogChunkGenerationDetails, out _ );
 		}
 	}
 
@@ -1050,15 +1059,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		const int vertexCount = 0;
 		const int triangleCount = 0;
 
-		if ( LogGeneration )
+		if ( logDetails )
 		{
 			var dataElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( startTimestamp, dataCompletedTimestamp );
-			var totalElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( startTimestamp );
-			report = AnalyzeChunk( chunk, vertexCount, triangleCount, dataElapsed, totalElapsed );
-			if ( logDetails )
-			{
-				LogChunkTopology( chunk, report );
-			}
+			var analyzed = AnalyzeChunk( chunk, vertexCount, triangleCount, dataElapsed, default );
+			report = new ChunkTopologyReport( analyzed.SampleCount, analyzed.SolidSampleCount, analyzed.MinimumDistance, analyzed.MaximumDistance,
+				analyzed.VertexCount, analyzed.TriangleCount, analyzed.DataElapsed, System.Diagnostics.Stopwatch.GetElapsedTime( startTimestamp ) );
+			LogChunkTopology( chunk, report );
 		}
 		else
 		{
@@ -2632,12 +2639,25 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			_collisionGenerationQueuedChunks.Remove( coordinate );
 			if ( !_collisionDesiredChunks.Contains( coordinate ) || _chunks.ContainsKey( coordinate ) ) continue;
+			var generationStart = System.Diagnostics.Stopwatch.GetTimestamp();
 			GenerateChunk( coordinate );
+			_lastCollisionChunkGenerationTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+			_lastCollisionGeneratedChunk = coordinate;
+			_lastCollisionChunkGenerationMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( generationStart, _lastCollisionChunkGenerationTimestamp ).TotalMilliseconds;
+			_collisionChunksGenerated++;
 			if ( _staleCollisionChunks.Contains( coordinate ) ) MarkDesiredCollisionStale( coordinate );
 			QueueCollisionBuild( coordinate );
 			generated++;
 			if ( generated >= 1 || System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
 		}
+	}
+
+	internal string FormatCollisionGenerationTrace()
+	{
+		var ageMilliseconds = _lastCollisionChunkGenerationTimestamp == 0
+			? -1.0
+			: System.Diagnostics.Stopwatch.GetElapsedTime( _lastCollisionChunkGenerationTimestamp ).TotalMilliseconds;
+		return $"chunk={_lastCollisionGeneratedChunk}, durationMs={_lastCollisionChunkGenerationMilliseconds:F2}, ageMs={ageMilliseconds:F2}, total={_collisionChunksGenerated:N0}, generationQueue={_collisionGenerationQueue.Count:N0}, buildQueue={_collisionBuildQueue.Count:N0}";
 	}
 
 	private Vector3Int GetCollisionObserverChunk( Vector3 worldPosition )
