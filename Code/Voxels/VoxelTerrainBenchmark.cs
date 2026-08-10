@@ -83,7 +83,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"player_post_edit_line_streaming",
 		"phase4_regular_b8_l4_stationary"
 	};
-	private static readonly ComparisonMetric[] ComparisonMetrics =
+	private static ComparisonMetric[] ComparisonMetrics => new ComparisonMetric[]
 	{
 		new( "avg_fps", true ),
 		new( "one_percent_low_fps", true ),
