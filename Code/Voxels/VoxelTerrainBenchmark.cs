@@ -13,8 +13,9 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 31;
+	private const int SuiteVersion = 32;
 	private const int InfinityPathSampleCount = 1024;
+	private const int RealtimeSurfaceEditCount = 80;
 	private static string[] AllRequiredScenarios => new[]
 	{
 		"cold_generation",
@@ -54,6 +55,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_regular_b4_l4_stationary",
 		"phase4_regular_radius64_match",
 		"gpu_lod5_transition_ownership",
+		"gpu_realtime_surface_edits_20hz",
 		"gpu_transvoxel_regular_proof",
 		"gpu_persistent_static_set",
 		"gpu_production_render_integration",
@@ -230,7 +232,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		VoxelTerrainBenchmarkMode.GpuOnly => new[]
 		{
 			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
-			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership",
+			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership", "gpu_realtime_surface_edits_20hz",
 			"gpu_persistent_static_set", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
 			"gpu_player_clipbox_oscillation",
@@ -650,17 +652,36 @@ public sealed class VoxelTerrainBenchmark : Component
 						diagnostics.ClipboxStableSlotCount == 3072 && diagnostics.ClipboxTransitionActiveSlotCount == 1920;
 					if ( !ownershipPassed ) _sampler?.RecordFailure();
 					CompleteScenario( gpuTerrain: diagnostics, lod5OwnershipProof: _pendingLod5OwnershipProof );
+					if ( !ownershipPassed )
+					{
+						FailRun( $"LOD-5 transition ownership failed: {_pendingLod5OwnershipProof?.LodOwnershipFailure ?? "proof unavailable"}; regular={diagnostics.ResidentBlocks}/{diagnostics.RequestedBlocks}, stable={diagnostics.ClipboxStableSlotCount}, transitions={diagnostics.ClipboxTransitionActiveSlotCount}." );
+						break;
+					}
+					_phase = BenchmarkPhase.StartGpuRealtimeEdits;
+					StartWarmup();
+				}
+				break;
+			case BenchmarkPhase.StartGpuRealtimeEdits:
+				BeginScenario( "gpu_realtime_surface_edits_20hz", "Eighty visible surface deformations at 20 Hz with synchronous edit, frame, GPU, allocation, and clipbox phase timings" );
+				_editIndex = 0;
+				_nextEditTimestamp = 0;
+				_phase = BenchmarkPhase.RunGpuRealtimeEdits;
+				break;
+			case BenchmarkPhase.RunGpuRealtimeEdits:
+				RunGpuRealtimeEdits();
+				break;
+			case BenchmarkPhase.WaitGpuRealtimeEdits:
+				if ( _manager.IsTerrainSettled )
+				{
+					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
+					if ( _sampler.EditCount != RealtimeSurfaceEditCount || _sampler.ChangedChunkEvents == 0 || diagnostics.EditQueue.Total.Count < RealtimeSurfaceEditCount || diagnostics.ClipboxDroppedWork != 0 || diagnostics.ClipboxTransitionDependencyMismatches != 0 ) _sampler.RecordFailure();
+					CompleteScenario( gpuTerrain: diagnostics );
 					_manager.GpuTerrainLodPolicy = _originalGpuTerrainLodPolicy;
 					_manager.GpuClipboxBlocksPerAxis = _originalGpuClipboxBlocksPerAxis;
 					_manager.GpuClipboxLevelCount = _originalGpuClipboxLevelCount;
 					_manager.GpuClipboxMatchChunkRadius = _originalGpuClipboxMatchChunkRadius;
 					_manager.ChunkRadius = _originalChunkRadius;
 					_holdBenchmarkPlayersAtOrigin = false;
-					if ( !ownershipPassed )
-					{
-						FailRun( $"LOD-5 transition ownership failed: {_pendingLod5OwnershipProof?.LodOwnershipFailure ?? "proof unavailable"}; regular={diagnostics.ResidentBlocks}/{diagnostics.RequestedBlocks}, stable={diagnostics.ClipboxStableSlotCount}, transitions={diagnostics.ClipboxTransitionActiveSlotCount}." );
-						break;
-					}
 					_phase = BenchmarkPhase.StartGpuTransvoxelProof;
 					StartWarmup();
 				}
@@ -1657,6 +1678,21 @@ public sealed class VoxelTerrainBenchmark : Component
 		_manager?.SetBenchmarkPlayerProtection( false );
 	}
 
+	private void RunGpuRealtimeEdits()
+	{
+		if ( _editIndex >= RealtimeSurfaceEditCount )
+		{
+			_phase = BenchmarkPhase.WaitGpuRealtimeEdits;
+			return;
+		}
+		if ( !CanApplyNextEdit() ) return;
+		var surfaceZ = _manager.SimplexBaseHeight * _manager.VoxelSize;
+		var localPosition = new Vector3( _editIndex * _manager.VoxelSize * 0.5f, 0.0f, surfaceZ );
+		ApplyLocalEdit( localPosition, _manager.VoxelSize * 4.0f, _manager.VoxelSize * 2.0f );
+		_editIndex++;
+		_nextEditTimestamp = System.Diagnostics.Stopwatch.GetTimestamp() + (long)(0.05 * System.Diagnostics.Stopwatch.Frequency);
+	}
+
 	private void CaptureAndFreezeBenchmarkPlayers()
 	{
 		if ( _benchmarkGravityStates.Count > 0 ) return;
@@ -1975,6 +2011,18 @@ public sealed class VoxelTerrainBenchmark : Component
 			builder.AppendLine( $"| {result.Name} | `{terrain.LodPolicy}` | {(result.Passed ? "PASS" : "FAIL")} | {terrain.ClipboxRevision} | {terrain.ClipboxChangedSlots:N0} | {terrain.ClipboxActiveSlotCount:N0} / {terrain.ClipboxStableSlotCount:N0} | {terrain.ClipboxMaximumPendingRevisionCount:N0} | {terrain.ClipboxDroppedWork:N0} | {terrain.ClipboxStationaryUpdates:N0} | {terrain.ResidentBlocks:N0} / {terrain.RequestedBlocks:N0} | {(proof.Failure ?? terrain.Failure ?? string.Empty).Replace( "|", "\\|" )} |" );
 		}
 		builder.AppendLine();
+		builder.AppendLine( "## Realtime GPU terrain editing" );
+		builder.AppendLine();
+		builder.AppendLine( "The edit queue timings measure synchronous work on the brush frame. They do not include deferred mesh publication, which remains visible in the frame, GPU, and post-edit settle metrics above." );
+		builder.AppendLine();
+		builder.AppendLine( "| Scenario | Edits | Queue avg / p95 / max | Upload avg | Planner avg | Regular delta avg | Transition metadata avg | Transition desired avg |" );
+		builder.AppendLine( "|---|---:|---:|---:|---:|---:|---:|---:|" );
+		foreach ( var result in _results.Where( result => result.GpuTerrain?.EditQueue.Total.Count > 0 ) )
+		{
+			var timings = result.GpuTerrain.Value.EditQueue;
+			builder.AppendLine( $"| {result.Name} | {timings.Total.Count:N0} | {timings.Total.AverageMilliseconds:F3} / {timings.Total.P95Milliseconds:F3} / {timings.Total.MaximumMilliseconds:F3} ms | {timings.Upload.AverageMilliseconds:F3} ms | {timings.Planner.AverageMilliseconds:F3} ms | {timings.RegularDelta.AverageMilliseconds:F3} ms | {timings.TransitionMetadata.AverageMilliseconds:F3} ms | {timings.TransitionDesired.AverageMilliseconds:F3} ms |" );
+		}
+		builder.AppendLine();
 		builder.AppendLine( "## Structured GPU clipbox diagnostics" );
 		builder.AppendLine();
 		builder.AppendLine( "Each report is the authoritative backend snapshot for the scenario’s latest planned or committed revision. It includes per-LOD residency, regular/transition renderer separation, transition dependencies, pool state, and the bounded hitch trace. Null fields are capabilities that the engine does not expose as a measured value." );
@@ -2129,7 +2177,7 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private const string GpuPhase2BCsvHeader = "gpu_terrain_available,gpu_terrain_backend,gpu_terrain_lod_policy,gpu_terrain_indirect_command_group_size,gpu_terrain_requested_blocks,gpu_terrain_resident_blocks,gpu_terrain_pending_count_batches,gpu_terrain_pending_emit_batches,gpu_terrain_backpressure_events,gpu_terrain_allocation_failures,gpu_terrain_stale_publications_rejected,gpu_terrain_visible_draw_commands,gpu_terrain_scratch_bytes,gpu_terrain_pool_capacity_bytes,gpu_terrain_pool_used_bytes,gpu_terrain_pool_peak_bytes,gpu_terrain_geometry_readback_bytes,gpu_terrain_count_submission_ms,gpu_terrain_count_readback_avg_ms,gpu_terrain_count_readback_count,gpu_terrain_emit_submission_ms,gpu_terrain_count_submission_per_block_ms,gpu_terrain_emit_submission_per_block_ms,gpu_terrain_request_to_visible_avg_ms,gpu_terrain_request_to_visible_p95_ms,gpu_terrain_request_to_visible_max_ms,gpu_terrain_batch_completion_avg_ms,gpu_terrain_batch_completion_p95_ms,gpu_terrain_batch_completion_max_ms,gpu_terrain_failure,gpu_terrain_capacity_limited,gpu_terrain_blocked_requests,gpu_terrain_capacity_evictions,gpu_terrain_capacity_deferrals,gpu_terrain_vertex_free,gpu_terrain_index_free,gpu_terrain_vertex_largest_free,gpu_terrain_index_largest_free,gpu_terrain_vertex_free_ranges,gpu_terrain_index_free_ranges,gpu_phase2b_available,gpu_phase2b_passed,gpu_phase2b_test,gpu_phase2b_failure,gpu_lifecycle_budget_bytes,gpu_lifecycle_peak_used_bytes,gpu_lifecycle_churn_operations,gpu_lifecycle_allocation_failures,gpu_lifecycle_backpressure_events,gpu_lifecycle_stale_publications_rejected,gpu_lifecycle_retained_delta_percent,gpu_terrain_render_shader,gpu_terrain_production_lighting,gpu_terrain_depth_prepass,gpu_terrain_depth_command_lists,gpu_terrain_opaque_command_lists,gpu_phase3a_available,gpu_phase3a_passed,gpu_phase3a_test,gpu_phase3a_failure,gpu_terrain_desired_blocks,gpu_terrain_resident_capacity,gpu_terrain_pending_request_capacity,gpu_terrain_pending_request_count,gpu_terrain_pending_publication_count,gpu_terrain_queues_bounded,gpu_phase3b_available,gpu_phase3b_passed,gpu_phase3b_test,gpu_phase3b_failure";
 
-	private const string GpuClipboxCsvHeader = "gpu_terrain_clipbox_revision,gpu_terrain_clipbox_changed_slots,gpu_terrain_clipbox_pending_revision_count,gpu_terrain_clipbox_max_pending_revision_count,gpu_terrain_clipbox_stable_slots,gpu_terrain_clipbox_active_slots,gpu_terrain_clipbox_dropped_work,gpu_terrain_clipbox_stationary_updates,gpu_terrain_clipbox_transition_capacity,gpu_terrain_clipbox_transition_active_slots,gpu_terrain_clipbox_transition_changed_slots,gpu_terrain_clipbox_transition_pending_slots,gpu_terrain_clipbox_transition_dependency_mismatches,gpu_terrain_clipbox_transition_stationary_updates,gpu_terrain_transition_resident_blocks,gpu_terrain_transition_renderable_residents,gpu_terrain_transition_visible_draw_commands,gpu_terrain_transition_pending_requests,gpu_terrain_transition_blocked_requests,gpu_terrain_transition_allocated_vertex_count,gpu_terrain_transition_allocated_index_count,gpu_terrain_transition_allocated_bytes,gpu_terrain_transition_geometry_readback_bytes,gpu_terrain_transition_cpu_sdf_evaluations,gpu_terrain_transition_stale_scheduler_rejections,gpu_terrain_transition_stale_dependency_rejections,gpu_terrain_structured_debug_report";
+	private const string GpuClipboxCsvHeader = "gpu_terrain_clipbox_revision,gpu_terrain_clipbox_changed_slots,gpu_terrain_clipbox_pending_revision_count,gpu_terrain_clipbox_max_pending_revision_count,gpu_terrain_clipbox_stable_slots,gpu_terrain_clipbox_active_slots,gpu_terrain_clipbox_dropped_work,gpu_terrain_clipbox_stationary_updates,gpu_terrain_clipbox_transition_capacity,gpu_terrain_clipbox_transition_active_slots,gpu_terrain_clipbox_transition_changed_slots,gpu_terrain_clipbox_transition_pending_slots,gpu_terrain_clipbox_transition_dependency_mismatches,gpu_terrain_clipbox_transition_stationary_updates,gpu_terrain_transition_resident_blocks,gpu_terrain_transition_renderable_residents,gpu_terrain_transition_visible_draw_commands,gpu_terrain_transition_pending_requests,gpu_terrain_transition_blocked_requests,gpu_terrain_transition_allocated_vertex_count,gpu_terrain_transition_allocated_index_count,gpu_terrain_transition_allocated_bytes,gpu_terrain_transition_geometry_readback_bytes,gpu_terrain_transition_cpu_sdf_evaluations,gpu_terrain_transition_stale_scheduler_rejections,gpu_terrain_transition_stale_dependency_rejections,gpu_edit_queue_count,gpu_edit_queue_avg_ms,gpu_edit_queue_p95_ms,gpu_edit_queue_max_ms,gpu_edit_upload_avg_ms,gpu_edit_upload_p95_ms,gpu_edit_upload_max_ms,gpu_edit_planner_avg_ms,gpu_edit_planner_p95_ms,gpu_edit_planner_max_ms,gpu_edit_regular_delta_avg_ms,gpu_edit_regular_delta_p95_ms,gpu_edit_regular_delta_max_ms,gpu_edit_transition_metadata_avg_ms,gpu_edit_transition_metadata_p95_ms,gpu_edit_transition_metadata_max_ms,gpu_edit_transition_desired_avg_ms,gpu_edit_transition_desired_p95_ms,gpu_edit_transition_desired_max_ms,gpu_terrain_structured_debug_report";
 
 	private static string SerializeGpuPhase2BJson( VoxelGpuTerrainDiagnostics? terrain, VoxelGpuPhase2BProofResult? proof )
 	{
@@ -2206,7 +2254,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		var t = terrain ?? default;
 		var structuredDebugReportJson = string.IsNullOrWhiteSpace( t.StructuredDebugReportJson ) ? "{}" : t.StructuredDebugReportJson;
-		return $"\"gpu_terrain_desired_blocks\":{t.DesiredBlocks},\"gpu_terrain_resident_capacity\":{t.ResidentCapacity},\"gpu_terrain_pending_request_capacity\":{t.PendingRequestCapacity},\"gpu_terrain_pending_request_count\":{t.PendingRequestCount},\"gpu_terrain_pending_publication_count\":{t.PendingPublicationCount},\"gpu_terrain_blocked_requests\":{t.BlockedRequests},\"gpu_terrain_capacity_limited\":{t.CapacityLimited.ToString().ToLowerInvariant()},\"gpu_terrain_queues_bounded\":{t.QueuesBounded.ToString().ToLowerInvariant()},\"gpu_terrain_indirect_command_group_size\":{t.IndirectCommandGroupSize},\"gpu_terrain_lod_policy\":\"{Json( t.LodPolicy )}\",\"gpu_terrain_clipbox_revision\":{t.ClipboxRevision},\"gpu_terrain_clipbox_changed_slots\":{t.ClipboxChangedSlots},\"gpu_terrain_clipbox_pending_revision_count\":{t.ClipboxPendingRevisionCount},\"gpu_terrain_clipbox_max_pending_revision_count\":{t.ClipboxMaximumPendingRevisionCount},\"gpu_terrain_clipbox_stable_slots\":{t.ClipboxStableSlotCount},\"gpu_terrain_clipbox_active_slots\":{t.ClipboxActiveSlotCount},\"gpu_terrain_clipbox_dropped_work\":{t.ClipboxDroppedWork},\"gpu_terrain_clipbox_stationary_updates\":{t.ClipboxStationaryUpdates},\"gpu_terrain_clipbox_transition_capacity\":{t.ClipboxTransitionCapacity},\"gpu_terrain_clipbox_transition_active_slots\":{t.ClipboxTransitionActiveSlotCount},\"gpu_terrain_clipbox_transition_changed_slots\":{t.ClipboxTransitionChangedSlots},\"gpu_terrain_clipbox_transition_pending_slots\":{t.ClipboxTransitionPendingSlots},\"gpu_terrain_clipbox_transition_dependency_mismatches\":{t.ClipboxTransitionDependencyMismatches},\"gpu_terrain_clipbox_transition_stationary_updates\":{t.ClipboxTransitionStationaryUpdates},\"gpu_terrain_transition_resident_blocks\":{t.TransitionResidentBlocks},\"gpu_terrain_transition_renderable_residents\":{t.TransitionRenderableResidents},\"gpu_terrain_transition_visible_draw_commands\":{t.TransitionVisibleDrawCommands},\"gpu_terrain_transition_pending_requests\":{t.TransitionPendingRequests},\"gpu_terrain_transition_blocked_requests\":{t.TransitionBlockedRequests},\"gpu_terrain_transition_allocated_vertex_count\":{t.TransitionAllocatedVertexCount},\"gpu_terrain_transition_allocated_index_count\":{t.TransitionAllocatedIndexCount},\"gpu_terrain_transition_allocated_bytes\":{t.TransitionAllocatedBytes},\"gpu_terrain_transition_geometry_readback_bytes\":{t.TransitionGeometryReadbackBytes},\"gpu_terrain_transition_cpu_sdf_evaluations\":{t.TransitionCpuSdfEvaluations},\"gpu_terrain_transition_stale_scheduler_rejections\":{t.TransitionStaleSchedulerRejections},\"gpu_terrain_transition_stale_dependency_rejections\":{t.TransitionStaleDependencyRejections},\"gpu_terrain_structured_debug_report\":{structuredDebugReportJson}";
+		return $"\"gpu_terrain_desired_blocks\":{t.DesiredBlocks},\"gpu_terrain_resident_capacity\":{t.ResidentCapacity},\"gpu_terrain_pending_request_capacity\":{t.PendingRequestCapacity},\"gpu_terrain_pending_request_count\":{t.PendingRequestCount},\"gpu_terrain_pending_publication_count\":{t.PendingPublicationCount},\"gpu_terrain_blocked_requests\":{t.BlockedRequests},\"gpu_terrain_capacity_limited\":{t.CapacityLimited.ToString().ToLowerInvariant()},\"gpu_terrain_queues_bounded\":{t.QueuesBounded.ToString().ToLowerInvariant()},\"gpu_terrain_indirect_command_group_size\":{t.IndirectCommandGroupSize},\"gpu_terrain_lod_policy\":\"{Json( t.LodPolicy )}\",\"gpu_terrain_clipbox_revision\":{t.ClipboxRevision},\"gpu_terrain_clipbox_changed_slots\":{t.ClipboxChangedSlots},\"gpu_terrain_clipbox_pending_revision_count\":{t.ClipboxPendingRevisionCount},\"gpu_terrain_clipbox_max_pending_revision_count\":{t.ClipboxMaximumPendingRevisionCount},\"gpu_terrain_clipbox_stable_slots\":{t.ClipboxStableSlotCount},\"gpu_terrain_clipbox_active_slots\":{t.ClipboxActiveSlotCount},\"gpu_terrain_clipbox_dropped_work\":{t.ClipboxDroppedWork},\"gpu_terrain_clipbox_stationary_updates\":{t.ClipboxStationaryUpdates},\"gpu_terrain_clipbox_transition_capacity\":{t.ClipboxTransitionCapacity},\"gpu_terrain_clipbox_transition_active_slots\":{t.ClipboxTransitionActiveSlotCount},\"gpu_terrain_clipbox_transition_changed_slots\":{t.ClipboxTransitionChangedSlots},\"gpu_terrain_clipbox_transition_pending_slots\":{t.ClipboxTransitionPendingSlots},\"gpu_terrain_clipbox_transition_dependency_mismatches\":{t.ClipboxTransitionDependencyMismatches},\"gpu_terrain_clipbox_transition_stationary_updates\":{t.ClipboxTransitionStationaryUpdates},\"gpu_terrain_transition_resident_blocks\":{t.TransitionResidentBlocks},\"gpu_terrain_transition_renderable_residents\":{t.TransitionRenderableResidents},\"gpu_terrain_transition_visible_draw_commands\":{t.TransitionVisibleDrawCommands},\"gpu_terrain_transition_pending_requests\":{t.TransitionPendingRequests},\"gpu_terrain_transition_blocked_requests\":{t.TransitionBlockedRequests},\"gpu_terrain_transition_allocated_vertex_count\":{t.TransitionAllocatedVertexCount},\"gpu_terrain_transition_allocated_index_count\":{t.TransitionAllocatedIndexCount},\"gpu_terrain_transition_allocated_bytes\":{t.TransitionAllocatedBytes},\"gpu_terrain_transition_geometry_readback_bytes\":{t.TransitionGeometryReadbackBytes},\"gpu_terrain_transition_cpu_sdf_evaluations\":{t.TransitionCpuSdfEvaluations},\"gpu_terrain_transition_stale_scheduler_rejections\":{t.TransitionStaleSchedulerRejections},\"gpu_terrain_transition_stale_dependency_rejections\":{t.TransitionStaleDependencyRejections},\"gpu_edit_queue_count\":{t.EditQueue.Total.Count}," + SerializeTimingJson( "gpu_edit_queue", t.EditQueue.Total ) + "," + SerializeTimingJson( "gpu_edit_upload", t.EditQueue.Upload ) + "," + SerializeTimingJson( "gpu_edit_planner", t.EditQueue.Planner ) + "," + SerializeTimingJson( "gpu_edit_regular_delta", t.EditQueue.RegularDelta ) + "," + SerializeTimingJson( "gpu_edit_transition_metadata", t.EditQueue.TransitionMetadata ) + "," + SerializeTimingJson( "gpu_edit_transition_desired", t.EditQueue.TransitionDesired ) + $",\"gpu_terrain_structured_debug_report\":{structuredDebugReportJson}";
 	}
 
 	private static string GpuPhase2BCsv( VoxelGpuTerrainDiagnostics? terrain, VoxelGpuPhase2BProofResult? proof, VoxelGpuPhase3AProofResult? phase3Proof, VoxelGpuPhase3BProofResult? phase3BProof )
@@ -2222,7 +2270,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private static string GpuClipboxCsv( VoxelGpuTerrainDiagnostics? terrain )
 	{
 		var t = terrain ?? default;
-		return string.Join( ",", t.ClipboxRevision, t.ClipboxChangedSlots, t.ClipboxPendingRevisionCount, t.ClipboxMaximumPendingRevisionCount, t.ClipboxStableSlotCount, t.ClipboxActiveSlotCount, t.ClipboxDroppedWork, t.ClipboxStationaryUpdates, t.ClipboxTransitionCapacity, t.ClipboxTransitionActiveSlotCount, t.ClipboxTransitionChangedSlots, t.ClipboxTransitionPendingSlots, t.ClipboxTransitionDependencyMismatches, t.ClipboxTransitionStationaryUpdates, t.TransitionResidentBlocks, t.TransitionRenderableResidents, t.TransitionVisibleDrawCommands, t.TransitionPendingRequests, t.TransitionBlockedRequests, t.TransitionAllocatedVertexCount, t.TransitionAllocatedIndexCount, t.TransitionAllocatedBytes, t.TransitionGeometryReadbackBytes, t.TransitionCpuSdfEvaluations, t.TransitionStaleSchedulerRejections, t.TransitionStaleDependencyRejections, Csv( string.IsNullOrWhiteSpace( t.StructuredDebugReportJson ) ? "{}" : t.StructuredDebugReportJson ) );
+		return string.Join( ",", t.ClipboxRevision, t.ClipboxChangedSlots, t.ClipboxPendingRevisionCount, t.ClipboxMaximumPendingRevisionCount, t.ClipboxStableSlotCount, t.ClipboxActiveSlotCount, t.ClipboxDroppedWork, t.ClipboxStationaryUpdates, t.ClipboxTransitionCapacity, t.ClipboxTransitionActiveSlotCount, t.ClipboxTransitionChangedSlots, t.ClipboxTransitionPendingSlots, t.ClipboxTransitionDependencyMismatches, t.ClipboxTransitionStationaryUpdates, t.TransitionResidentBlocks, t.TransitionRenderableResidents, t.TransitionVisibleDrawCommands, t.TransitionPendingRequests, t.TransitionBlockedRequests, t.TransitionAllocatedVertexCount, t.TransitionAllocatedIndexCount, t.TransitionAllocatedBytes, t.TransitionGeometryReadbackBytes, t.TransitionCpuSdfEvaluations, t.TransitionStaleSchedulerRejections, t.TransitionStaleDependencyRejections, t.EditQueue.Total.Count, TimingCsv( t.EditQueue.Total ), TimingCsv( t.EditQueue.Upload ), TimingCsv( t.EditQueue.Planner ), TimingCsv( t.EditQueue.RegularDelta ), TimingCsv( t.EditQueue.TransitionMetadata ), TimingCsv( t.EditQueue.TransitionDesired ), Csv( string.IsNullOrWhiteSpace( t.StructuredDebugReportJson ) ? "{}" : t.StructuredDebugReportJson ) );
 	}
 
 	private static string CallCountKey( string name ) => "calls_" + name.Replace( '.', '_' );
@@ -2304,6 +2352,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		WaitPhase4Regular,
 		StartGpuLod5Ownership,
 		WaitGpuLod5Ownership,
+		StartGpuRealtimeEdits,
+		RunGpuRealtimeEdits,
+		WaitGpuRealtimeEdits,
 		StartGpuTransvoxelProof,
 		WaitGpuTransvoxelProof,
 		StartGpuPersistentStatic,

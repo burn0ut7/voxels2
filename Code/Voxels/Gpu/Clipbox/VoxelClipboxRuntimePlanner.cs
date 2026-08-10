@@ -9,6 +9,9 @@ internal sealed class VoxelClipboxRuntimePlanner
 	private readonly VoxelClipboxTransitionSlotAssignment[] _desiredTransitions;
 	private readonly int[] _changedSlotIds;
 	private readonly int[] _changedTransitionSlotIds;
+	private readonly bool[] _changedRegularFlags;
+	private readonly VoxelVisualBlockKey[] _changedPreviousSlotKeys;
+	private readonly VoxelVisualBlockKey[] _changedPreviousTransitionKeys;
 	private readonly List<(BBox Bounds, uint Revision)> _editRegions = new();
 	private bool _hasCurrentPlan;
 	private int _chunkSize = VoxelClipboxConfig.CellsPerBlock;
@@ -45,6 +48,9 @@ internal sealed class VoxelClipboxRuntimePlanner
 		_desiredTransitions = new VoxelClipboxTransitionSlotAssignment[_currentTransitions.Length];
 		_changedSlotIds = new int[config.StableRegularSlotCount];
 		_changedTransitionSlotIds = new int[_currentTransitions.Length];
+		_changedRegularFlags = new bool[config.StableRegularSlotCount];
+		_changedPreviousSlotKeys = new VoxelVisualBlockKey[config.StableRegularSlotCount];
+		_changedPreviousTransitionKeys = new VoxelVisualBlockKey[_currentTransitions.Length];
 	}
 
 	public bool Update( Vector3Int observerCanonicalSample )
@@ -74,15 +80,31 @@ internal sealed class VoxelClipboxRuntimePlanner
 		if ( _editRegions.Count != 0 && chunkSize != _chunkSize ) throw new System.InvalidOperationException( "The clipbox chunk size cannot change while sparse edits are active." );
 		_chunkSize = chunkSize;
 		_editRegions.Add( (VoxelEditJournal.GetBounds( operation ), editRevision) );
-		ApplyStoredEditRevisions();
-
-		ActiveTransitionCount = VoxelClipboxTransitionPlanner.Populate( _config, _desiredLevels, _desiredSlots, _desiredTransitions );
 		_changedSlotCount = 0;
 		_changedTransitionSlotCount = 0;
+		System.Array.Clear( _changedRegularFlags );
 		for ( var index = 0; index < _desiredSlots.Length; index++ )
-			if ( (!_hasCurrentPlan && _desiredSlots[index].Active) || (_hasCurrentPlan && !SlotsMatchForDelta( _currentSlots[index], _desiredSlots[index] )) ) _changedSlotIds[_changedSlotCount++] = index;
+		{
+			var assignment = _desiredSlots[index];
+			if ( !assignment.Active || assignment.Key.EditRevision >= editRevision || !VoxelEditInvalidation.OverlapsVisualBlock( operation, assignment.Key, chunkSize ) ) continue;
+			_changedPreviousSlotKeys[_changedSlotCount] = assignment.Key;
+			_desiredSlots[index] = assignment with { Key = assignment.Key with { EditRevision = editRevision } };
+			_changedRegularFlags[index] = true;
+			_changedSlotIds[_changedSlotCount++] = index;
+		}
 		for ( var index = 0; index < _desiredTransitions.Length; index++ )
-			if ( (!_hasCurrentPlan && _desiredTransitions[index].Active) || (_hasCurrentPlan && !TransitionsMatchForDelta( _currentTransitions[index], _desiredTransitions[index] )) ) _changedTransitionSlotIds[_changedTransitionSlotCount++] = index;
+		{
+			var assignment = _desiredTransitions[index];
+			if ( !assignment.Active || (!_changedRegularFlags[assignment.FineRegularSlotId] && !_changedRegularFlags[assignment.CoarseRegularSlotId]) ) continue;
+			var fineKey = _desiredSlots[assignment.FineRegularSlotId].Key;
+			var coarseKey = _desiredSlots[assignment.CoarseRegularSlotId].Key;
+			var revision = System.Math.Max( fineKey.EditRevision, coarseKey.EditRevision );
+			var updated = assignment with { EditRevision = revision, Key = fineKey, CoarseKey = coarseKey };
+			if ( updated == assignment ) continue;
+			_changedPreviousTransitionKeys[_changedTransitionSlotCount] = VoxelClipboxTransitionPlanner.GetVisualKey( assignment );
+			_desiredTransitions[index] = updated;
+			_changedTransitionSlotIds[_changedTransitionSlotCount++] = index;
+		}
 		_revision++;
 		return _changedSlotCount != 0 || _changedTransitionSlotCount != 0;
 	}
@@ -121,6 +143,18 @@ internal sealed class VoxelClipboxRuntimePlanner
 	{
 		if ( index < 0 || index >= _changedTransitionSlotCount ) throw new System.ArgumentOutOfRangeException( nameof( index ) );
 		return _changedTransitionSlotIds[index];
+	}
+
+	public VoxelVisualBlockKey GetPreviousChangedSlotKey( int index )
+	{
+		if ( index < 0 || index >= _changedSlotCount ) throw new System.ArgumentOutOfRangeException( nameof( index ) );
+		return _changedPreviousSlotKeys[index];
+	}
+
+	public VoxelVisualBlockKey GetPreviousChangedTransitionKey( int index )
+	{
+		if ( index < 0 || index >= _changedTransitionSlotCount ) throw new System.ArgumentOutOfRangeException( nameof( index ) );
+		return _changedPreviousTransitionKeys[index];
 	}
 
 	public void Commit()

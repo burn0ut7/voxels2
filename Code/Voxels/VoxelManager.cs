@@ -237,6 +237,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public bool LogGeneration { get; set; }
 
 	[Property, Group( "Diagnostics" )]
+	public bool LogTerrainEdits { get; set; }
+
+	[Property, Group( "Diagnostics" )]
 	public bool CaptureCallCounts { get; set; }
 
 	[Property, Group( "Diagnostics" )]
@@ -1472,22 +1475,29 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		PumpCpuChunkBuildQueue();
 		var cpuQueueElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( cpuQueueStart );
 		var gpuDirtyBlocks = 0;
+		var gpuEditTiming = default( VoxelGpuEditQueueTiming );
 		var gpuQueueStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( _gpuTerrainBackend is not null )
 		{
 			var snapshot = _editJournal.CreateGpuSnapshot( out var editCount );
 			gpuDirtyBlocks = _gpuTerrainBackend.QueueEdit( snapshot, editCount, operation, operation.WorldRevision );
+			gpuEditTiming = _gpuTerrainBackend.LastEditQueueTiming;
 		}
 		var gpuQueueElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( gpuQueueStart );
 
 		var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime( startTimestamp );
-		Log.Info(
-			$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
-			$"dirtyCpuChunks={changedChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
-			$"cpuCollisionDirtyNearby={collisionDirtyCount:N0}, collisionStaleDeferred={changedChunks.Count - collisionDirtyCount:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
-			$"sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, sdfMutation={sdfMutationElapsed.TotalMilliseconds:F2}ms, " +
-			$"cpuQueue={cpuQueueElapsed.TotalMilliseconds:F2}ms, gpuQueue={gpuQueueElapsed.TotalMilliseconds:F2}ms, total={elapsed.TotalMilliseconds:F2}ms."
-		);
+		if ( LogTerrainEdits )
+		{
+			Log.Info(
+				$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
+				$"dirtyCpuChunks={changedChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
+				$"cpuCollisionDirtyNearby={collisionDirtyCount:N0}, collisionStaleDeferred={changedChunks.Count - collisionDirtyCount:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
+				$"sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, sdfMutation={sdfMutationElapsed.TotalMilliseconds:F2}ms, " +
+				$"cpuQueue={cpuQueueElapsed.TotalMilliseconds:F2}ms, gpuQueue={gpuQueueElapsed.TotalMilliseconds:F2}ms " +
+				$"(upload={gpuEditTiming.UploadMilliseconds:F2}ms, planner={gpuEditTiming.PlannerMilliseconds:F2}ms, regularDelta={gpuEditTiming.RegularDeltaMilliseconds:F2}ms, " +
+				$"transitionMetadata={gpuEditTiming.TransitionMetadataMilliseconds:F2}ms, transitionDesired={gpuEditTiming.TransitionDesiredMilliseconds:F2}ms), total={elapsed.TotalMilliseconds:F2}ms."
+			);
+		}
 
 		return System.Math.Max( changedChunks.Count, gpuDirtyBlocks );
 	}

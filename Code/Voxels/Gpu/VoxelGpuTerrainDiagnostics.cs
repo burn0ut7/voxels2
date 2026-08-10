@@ -13,6 +13,25 @@ internal readonly record struct VoxelGpuHitchTrace(
 	long GcPauseTicks,
 	long AllocatedBytes );
 
+internal readonly record struct VoxelGpuEditQueueTiming(
+	double UploadMilliseconds,
+	double PlannerMilliseconds,
+	double RegularDeltaMilliseconds,
+	double TransitionMetadataMilliseconds,
+	double TransitionDesiredMilliseconds )
+{
+	public double DesiredSetMilliseconds => RegularDeltaMilliseconds + TransitionMetadataMilliseconds + TransitionDesiredMilliseconds;
+	public double TotalMilliseconds => UploadMilliseconds + PlannerMilliseconds + DesiredSetMilliseconds;
+}
+
+internal readonly record struct VoxelGpuEditQueueDiagnostics(
+	VoxelTimingDistribution Total,
+	VoxelTimingDistribution Upload,
+	VoxelTimingDistribution Planner,
+	VoxelTimingDistribution RegularDelta,
+	VoxelTimingDistribution TransitionMetadata,
+	VoxelTimingDistribution TransitionDesired );
+
 internal readonly record struct VoxelGpuTerrainDiagnostics(
 	string Backend,
 	bool Available,
@@ -95,6 +114,7 @@ internal readonly record struct VoxelGpuTerrainDiagnostics(
 	long TransitionCpuSdfEvaluations,
 	int TransitionStaleSchedulerRejections,
 	int TransitionStaleDependencyRejections,
+	VoxelGpuEditQueueDiagnostics EditQueue,
 	string StructuredDebugReportJson );
 
 internal sealed class VoxelGpuTerrainDiagnosticCounters
@@ -111,6 +131,12 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 	private int _countReadbackCount;
 	private readonly List<double> _requestToVisibleMilliseconds = new();
 	private readonly List<double> _batchCompletionMilliseconds = new();
+	private readonly List<double> _editQueueTotalMilliseconds = new( 1024 );
+	private readonly List<double> _editUploadMilliseconds = new( 1024 );
+	private readonly List<double> _editPlannerMilliseconds = new( 1024 );
+	private readonly List<double> _editRegularDeltaMilliseconds = new( 1024 );
+	private readonly List<double> _editTransitionMetadataMilliseconds = new( 1024 );
+	private readonly List<double> _editTransitionDesiredMilliseconds = new( 1024 );
 
 	public int RequestedBlocks;
 	public int RuleVersion;
@@ -157,6 +183,15 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 
 	public void RecordRequestToVisible( double milliseconds ) => _requestToVisibleMilliseconds.Add( milliseconds );
 	public void RecordBatchCompletion( double milliseconds ) => _batchCompletionMilliseconds.Add( milliseconds );
+	public void RecordEditQueue( VoxelGpuEditQueueTiming timing )
+	{
+		RecordBounded( _editQueueTotalMilliseconds, timing.TotalMilliseconds );
+		RecordBounded( _editUploadMilliseconds, timing.UploadMilliseconds );
+		RecordBounded( _editPlannerMilliseconds, timing.PlannerMilliseconds );
+		RecordBounded( _editRegularDeltaMilliseconds, timing.RegularDeltaMilliseconds );
+		RecordBounded( _editTransitionMetadataMilliseconds, timing.TransitionMetadataMilliseconds );
+		RecordBounded( _editTransitionDesiredMilliseconds, timing.TransitionDesiredMilliseconds );
+	}
 	public double CountReadbackAverageMilliseconds => _countReadbackCount == 0 ? 0.0 : _countReadbackTotalMilliseconds / _countReadbackCount;
 
 	public VoxelGpuTerrainDiagnostics Snapshot( VoxelGpuCapabilityReport capabilities, VoxelGpuResidentTable residents, VoxelGpuMeshPool pool, VoxelGpuTerrainRenderer renderer )
@@ -252,7 +287,20 @@ internal sealed class VoxelGpuTerrainDiagnosticCounters
 			0,
 			TransitionStaleSchedulerRejections,
 			TransitionStaleDependencyRejections,
+			new VoxelGpuEditQueueDiagnostics(
+				Summarize( _editQueueTotalMilliseconds ),
+				Summarize( _editUploadMilliseconds ),
+				Summarize( _editPlannerMilliseconds ),
+				Summarize( _editRegularDeltaMilliseconds ),
+				Summarize( _editTransitionMetadataMilliseconds ),
+				Summarize( _editTransitionDesiredMilliseconds ) ),
 			StructuredDebugReportJson );
+	}
+
+	private static void RecordBounded( List<double> values, double value )
+	{
+		if ( values.Count == 1024 ) values.RemoveAt( 0 );
+		values.Add( value );
 	}
 
 	private static VoxelTimingDistribution Summarize( List<double> values )
