@@ -22,7 +22,11 @@ float3 TransitionSecondaryLocalPosition( float3 position, uint faceMask, int chu
 	if ( position.y > (float)(chunkSize - 1) ) boundaryMask |= 8u;
 	if ( position.z < 1.0f ) boundaryMask |= 16u;
 	if ( position.z > (float)(chunkSize - 1) ) boundaryMask |= 32u;
-	if ( (faceMask & boundaryMask) != boundaryMask ) return position;
+	// A vertex can touch the owned transition face and an unrelated block edge
+	// at the same time. Deform every owned axis independently; requiring every
+	// touched edge to be owned leaves edge/corner vertices coplanar with the
+	// transition mesh and causes visible Z-fighting at coarse LOD rings.
+	if ( (faceMask & boundaryMask) == 0u ) return position;
 
 	position.x = TransitionSecondaryCoordinate( position.x, chunkSize, (faceMask & 1u) != 0, (faceMask & 2u) != 0 );
 	position.y = TransitionSecondaryCoordinate( position.y, chunkSize, (faceMask & 4u) != 0, (faceMask & 8u) != 0 );

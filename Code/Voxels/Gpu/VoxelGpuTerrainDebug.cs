@@ -74,9 +74,25 @@ internal readonly record struct VoxelGpuClipboxSeamProofReport(
 	int ZeroGeometryTransitions,
 	int InvalidIndices,
 	int DegenerateTriangles,
+	int DuplicateRegularTriangles,
+	int DuplicateTransitionTriangles,
+	int CrossOwnerDuplicateTriangles,
+	int Lod5DuplicateTriangles,
+	int CollapsedTransitionMeshes,
+	int UndeformedCoarseBoundaryVertices,
 	int BoundaryVertices,
 	int UnmatchedBoundaryVertices,
 	float MaximumSeamPositionError,
 	float MaximumOriginAlignmentError,
 	long GeometryReadbackBytes,
-	double GeometryReadbackMilliseconds );
+	double GeometryReadbackMilliseconds )
+{
+	public bool LodOwnershipPassed =>
+		ActiveTransitions > 0 && PublishedTransitions == ActiveTransitions && MissingTransitions == 0 &&
+		DependencyMismatches == 0 && FaceMaskMismatches == 0 && InvalidIndices == 0 &&
+		DuplicateRegularTriangles == 0 && DuplicateTransitionTriangles == 0 && CrossOwnerDuplicateTriangles == 0 && Lod5DuplicateTriangles == 0 &&
+		CollapsedTransitionMeshes == 0 && UndeformedCoarseBoundaryVertices == 0 && BoundaryVertices > 0 && UnmatchedBoundaryVertices == 0;
+
+	public string LodOwnershipFailure => LodOwnershipPassed ? string.Empty :
+		$"transitions={PublishedTransitions}/{ActiveTransitions}, missing={MissingTransitions}, dependencies={DependencyMismatches}, faceMasks={FaceMaskMismatches}, invalidIndices={InvalidIndices}, duplicates={DuplicateRegularTriangles + DuplicateTransitionTriangles + CrossOwnerDuplicateTriangles} (lod5={Lod5DuplicateTriangles}), collapsed={CollapsedTransitionMeshes}, undeformed={UndeformedCoarseBoundaryVertices}, boundary={BoundaryVertices}/{UnmatchedBoundaryVertices}";
+}

@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 30;
+	private const int SuiteVersion = 31;
 	private const int InfinityPathSampleCount = 1024;
 	private static string[] AllRequiredScenarios => new[]
 	{
@@ -53,6 +53,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_regular_b4_l2_stationary",
 		"phase4_regular_b4_l4_stationary",
 		"phase4_regular_radius64_match",
+		"gpu_lod5_transition_ownership",
 		"gpu_transvoxel_regular_proof",
 		"gpu_persistent_static_set",
 		"gpu_production_render_integration",
@@ -154,6 +155,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private int _phase4RegularScenarioIndex;
 	private long _phase4RegularSoakStartTimestamp;
 	private VoxelGpuPhase2BProofResult _pendingRegularClipboxProof;
+	private VoxelGpuClipboxSeamProofReport? _pendingLod5OwnershipProof;
 	private VoxelCallCountSnapshot _collisionProximityBaseline;
 	private static readonly string[] GpuLifecycleScenarioNames =
 	{
@@ -228,7 +230,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		VoxelTerrainBenchmarkMode.GpuOnly => new[]
 		{
 			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
-			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match",
+			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership",
 			"gpu_persistent_static_set", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
 			"gpu_player_clipbox_oscillation",
@@ -621,7 +623,45 @@ public sealed class VoxelTerrainBenchmark : Component
 						break;
 					}
 					_holdBenchmarkPlayersAtOrigin = false;
-					_phase = Mode == VoxelTerrainBenchmarkMode.CpuOnly ? BenchmarkPhase.StartLiveConfiguration : BenchmarkPhase.StartGpuTransvoxelProof;
+					_phase = Mode == VoxelTerrainBenchmarkMode.CpuOnly ? BenchmarkPhase.StartLiveConfiguration : BenchmarkPhase.StartGpuLod5Ownership;
+					StartWarmup();
+				}
+				break;
+			case BenchmarkPhase.StartGpuLod5Ownership:
+				_holdBenchmarkPlayersAtOrigin = true;
+				HoldBenchmarkPlayersAtOrigin();
+				_manager.SetBenchmarkPlayerProtection( true );
+				_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
+				_manager.GpuClipboxBlocksPerAxis = 8;
+				_manager.GpuClipboxLevelCount = 6;
+				_manager.GpuClipboxMatchChunkRadius = false;
+				_manager.VisualBackend = VoxelVisualBackendMode.GpuPersistentFixedLod;
+				BeginScenario( "gpu_lod5_transition_ownership", "Production B8 L6 clipbox validates unique LOD-5 geometry ownership and non-coplanar transition deformation" );
+				_manager.GenerateGpuTerrainWorld();
+				_phase = BenchmarkPhase.WaitGpuLod5Ownership;
+				break;
+			case BenchmarkPhase.WaitGpuLod5Ownership:
+				if ( _manager.IsTerrainSettled )
+				{
+					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
+					_pendingLod5OwnershipProof = _manager.CaptureGpuClipboxSeamProofForBenchmark();
+					var ownershipPassed = _pendingLod5OwnershipProof?.LodOwnershipPassed == true &&
+						diagnostics.RequestedBlocks == 2752 && diagnostics.ResidentBlocks == 2752 &&
+						diagnostics.ClipboxStableSlotCount == 3072 && diagnostics.ClipboxTransitionActiveSlotCount == 1920;
+					if ( !ownershipPassed ) _sampler?.RecordFailure();
+					CompleteScenario( gpuTerrain: diagnostics, lod5OwnershipProof: _pendingLod5OwnershipProof );
+					_manager.GpuTerrainLodPolicy = _originalGpuTerrainLodPolicy;
+					_manager.GpuClipboxBlocksPerAxis = _originalGpuClipboxBlocksPerAxis;
+					_manager.GpuClipboxLevelCount = _originalGpuClipboxLevelCount;
+					_manager.GpuClipboxMatchChunkRadius = _originalGpuClipboxMatchChunkRadius;
+					_manager.ChunkRadius = _originalChunkRadius;
+					_holdBenchmarkPlayersAtOrigin = false;
+					if ( !ownershipPassed )
+					{
+						FailRun( $"LOD-5 transition ownership failed: {_pendingLod5OwnershipProof?.LodOwnershipFailure ?? "proof unavailable"}; regular={diagnostics.ResidentBlocks}/{diagnostics.RequestedBlocks}, stable={diagnostics.ClipboxStableSlotCount}, transitions={diagnostics.ClipboxTransitionActiveSlotCount}." );
+						break;
+					}
+					_phase = BenchmarkPhase.StartGpuTransvoxelProof;
 					StartWarmup();
 				}
 				break;
@@ -1010,11 +1050,11 @@ public sealed class VoxelTerrainBenchmark : Component
 		Log.Info( $"Voxel terrain benchmark scenario started: {name} ({description})." );
 	}
 
-	private void CompleteScenario( VoxelGpuTransvoxelProofResult? gpuProof = null, VoxelGpuTerrainDiagnostics? gpuTerrain = null, VoxelGpuPhase2BProofResult? gpuPhase2BProof = null, VoxelGpuPhase3AProofResult? gpuPhase3AProof = null, VoxelGpuPhase3BProofResult? gpuPhase3BProof = null, VoxelClipboxPlannerProofReport? clipboxPlannerProof = null, VoxelGpuIndirectRenderProofReport? indirectRenderProof = null, VoxelTransvoxelTransitionProofResult? transitionProof = null )
+	private void CompleteScenario( VoxelGpuTransvoxelProofResult? gpuProof = null, VoxelGpuTerrainDiagnostics? gpuTerrain = null, VoxelGpuPhase2BProofResult? gpuPhase2BProof = null, VoxelGpuPhase3AProofResult? gpuPhase3AProof = null, VoxelGpuPhase3BProofResult? gpuPhase3BProof = null, VoxelClipboxPlannerProofReport? clipboxPlannerProof = null, VoxelGpuIndirectRenderProofReport? indirectRenderProof = null, VoxelTransvoxelTransitionProofResult? transitionProof = null, VoxelGpuClipboxSeamProofReport? lod5OwnershipProof = null )
 	{
 		if ( _sampler is null ) return;
 		var streaming = _manager.CaptureChunkStreamingDiagnostics( _sampler.StartingChunkTimingSequence, _sampler.StartingBatchTimingSequence );
-		var result = _sampler.Complete( _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), streaming, System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalMilliseconds, gpuProof, gpuTerrain, gpuPhase2BProof, gpuPhase3AProof, gpuPhase3BProof, clipboxPlannerProof, indirectRenderProof, transitionProof );
+		var result = _sampler.Complete( _manager.CaptureTerrainDiagnostics(), _manager.CaptureCallCountSnapshot(), streaming, System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalMilliseconds, gpuProof, gpuTerrain, gpuPhase2BProof, gpuPhase3AProof, gpuPhase3BProof, clipboxPlannerProof, indirectRenderProof, transitionProof, lod5OwnershipProof );
 		_results.Add( result );
 		var hottest = result.CallCounts.Enumerate().OrderByDescending( entry => entry.Count ).First();
 		Log.Info( $"Voxel terrain benchmark scenario {result.Name}: result={(result.Passed ? "PASS" : "FAIL")}, elapsed={result.ElapsedMilliseconds:F2}ms, FPS(avg/1%-low/0.1%-low)={result.AverageFramesPerSecond:F1}/{result.OnePercentLowFramesPerSecond:F1}/{result.PointOnePercentLowFramesPerSecond:F1}, frameMs(p95/max)={result.FrameP95Milliseconds:F2}/{result.FrameMaximumMilliseconds:F2}, stutters={result.StutterEvents:N0}, editLatency(p95/settle)={result.EditCallP95Milliseconds:F3}/{result.PostEditSettleMilliseconds:F2}ms, GPU-p95={result.GpuP95Milliseconds:F2}ms, hottest={hottest.Name}:{hottest.Count:N0}, allocated={FormatBytes( result.AllocatedBytes )}." );
@@ -1676,7 +1716,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private void AppendHistoryCsv()
 	{
 		var comparisonHeader = string.Join( ",", ComparisonMetrics.Select( metric => $"change_{metric.Name}_pct" ) );
-		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,working_tree_dirty,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,visual_coherence_violation_frames,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,unaccounted_frame_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms,gpu_transvoxel_available,gpu_transvoxel_passed,gpu_transvoxel_failure,gpu_transvoxel_vertices,gpu_transvoxel_indices,gpu_transvoxel_active_cells,gpu_transvoxel_overflow_attempts,gpu_transvoxel_buffer_bytes,gpu_transvoxel_submission_ms,gpu_transvoxel_completion_ms,gpu_transvoxel_readback_ms,gpu_transvoxel_batch_size,gpu_transvoxel_surface_blocks,gpu_transvoxel_dispatches,gpu_transvoxel_gpu_publication_passed,gpu_transvoxel_gpu_publication_ms,gpu_transvoxel_cpu_publication_ms,clipbox_planner_available,clipbox_planner_passed,clipbox_planner_failure,clipbox_planner_cases,clipbox_planner_configurations,clipbox_planner_active_regular_count,clipbox_planner_stable_regular_slots,clipbox_planner_allocated_after_warmup,clipbox_planner_transition_capacity,clipbox_planner_active_transition_count,clipbox_planner_changed_transition_slots,clipbox_planner_transition_ownership_validated,transition_reference_available,transition_reference_passed,transition_reference_failure,transition_reference_cases,transition_reference_orientations,transition_reference_fixture_cases,transition_reference_triangles,transition_reference_boundary_edges,transition_reference_gradient_normals,transition_reference_position_tolerance,transition_reference_tables_validated,transition_gpu_case_available,transition_gpu_case_passed,transition_gpu_case_failure,transition_gpu_case_variants,transition_gpu_case_buffer_bytes,transition_gpu_case_submission_ms,transition_gpu_case_completion_ms,transition_gpu_case_readback_ms,indirect_render_available,indirect_render_passed,indirect_render_failure,indirect_render_tested_command_counts,indirect_render_maximum_command_count,indirect_render_group_size,indirect_render_boundary_command_count,indirect_render_boundary_active_lists,indirect_render_boundary_visible_commands,indirect_render_maximum_active_lists," + GpuPhase2BCsvHeader + ",stream_chunks_completed,stream_chunks_fresh,stream_chunks_cached,stream_batches_completed,stream_sdf_generation_avg_ms,stream_sdf_generation_p95_ms,stream_sdf_generation_max_ms,stream_mesh_queue_avg_ms,stream_mesh_queue_p95_ms,stream_mesh_queue_max_ms,stream_snapshot_avg_ms,stream_snapshot_p95_ms,stream_snapshot_max_ms,stream_worker_mesh_avg_ms,stream_worker_mesh_p95_ms,stream_worker_mesh_max_ms,stream_publication_wait_avg_ms,stream_publication_wait_p95_ms,stream_publication_wait_max_ms,stream_upload_avg_ms,stream_upload_p95_ms,stream_upload_max_ms,stream_chunk_ready_avg_ms,stream_chunk_ready_p95_ms,stream_chunk_ready_max_ms,stream_batch_avg_ms,stream_batch_p95_ms,stream_batch_max_ms,configuration_id,comparison_baseline_run_id,comparison_has_baseline,change_max_abs_pct,outlier_detected,outlier_metrics,reproduction_of_run_id,reproduction_status," + comparisonHeader + "," +
+		var header = "run_id,suite_version,suite_complete,timestamp_utc,revision,working_tree_dirty,engine_version,cpu,gpu,scenario,description,passed,edits,changed_chunk_events,visual_coherence_violation_frames,elapsed_ms,frames,avg_fps,one_percent_low_fps,point_one_percent_low_fps,min_fps,frame_avg_ms,frame_stddev_ms,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_p999_ms,frame_max_ms,unaccounted_frame_ms,frames_over_16ms,frames_over_33ms,frames_over_50ms,frames_over_100ms,stutter_events,longest_stutter_frames,gpu_avg_ms,gpu_p95_ms,gpu_max_ms,edit_call_avg_ms,edit_call_p95_ms,edit_call_max_ms,post_edit_settle_ms,edit_throughput_per_second,update_avg_ms,update_max_ms,render_avg_ms,render_max_ms,physics_avg_ms,physics_max_ms,network_avg_ms,network_max_ms,network_out_bytes_per_second,network_in_bytes_per_second,network_ping_ms,maximum_connections,messages_sent,messages_received,allocated_bytes,gc_pause_ms,gen0_gc,gen1_gc,gen2_gc,exceptions,peak_memory_bytes,texture_pool_peak_bytes,texture_pool_non_evictable_peak_bytes,pending_streaming_requests_max,draw_calls_avg,triangles_rendered_avg,objects_rendered_avg,material_changes_avg,loaded_chunks,authoritative_sdf_bytes,uniform_sdf_chunks,visual_chunks,failed_visual_chunks,visual_batch_built_chunks,visual_vertices,visual_triangles,colliders,collision_triangles,player_safety_active,generation_ms,visual_batch_ms,snapshot_wait_ms,snapshot_copy_ms,worker_mesh_ms,upload_ms,gpu_transvoxel_available,gpu_transvoxel_passed,gpu_transvoxel_failure,gpu_transvoxel_vertices,gpu_transvoxel_indices,gpu_transvoxel_active_cells,gpu_transvoxel_overflow_attempts,gpu_transvoxel_buffer_bytes,gpu_transvoxel_submission_ms,gpu_transvoxel_completion_ms,gpu_transvoxel_readback_ms,gpu_transvoxel_batch_size,gpu_transvoxel_surface_blocks,gpu_transvoxel_dispatches,gpu_transvoxel_gpu_publication_passed,gpu_transvoxel_gpu_publication_ms,gpu_transvoxel_cpu_publication_ms," + Lod5OwnershipCsvHeader + ",clipbox_planner_available,clipbox_planner_passed,clipbox_planner_failure,clipbox_planner_cases,clipbox_planner_configurations,clipbox_planner_active_regular_count,clipbox_planner_stable_regular_slots,clipbox_planner_allocated_after_warmup,clipbox_planner_transition_capacity,clipbox_planner_active_transition_count,clipbox_planner_changed_transition_slots,clipbox_planner_transition_ownership_validated,transition_reference_available,transition_reference_passed,transition_reference_failure,transition_reference_cases,transition_reference_orientations,transition_reference_fixture_cases,transition_reference_triangles,transition_reference_boundary_edges,transition_reference_gradient_normals,transition_reference_position_tolerance,transition_reference_tables_validated,transition_gpu_case_available,transition_gpu_case_passed,transition_gpu_case_failure,transition_gpu_case_variants,transition_gpu_case_buffer_bytes,transition_gpu_case_submission_ms,transition_gpu_case_completion_ms,transition_gpu_case_readback_ms,indirect_render_available,indirect_render_passed,indirect_render_failure,indirect_render_tested_command_counts,indirect_render_maximum_command_count,indirect_render_group_size,indirect_render_boundary_command_count,indirect_render_boundary_active_lists,indirect_render_boundary_visible_commands,indirect_render_maximum_active_lists," + GpuPhase2BCsvHeader + ",stream_chunks_completed,stream_chunks_fresh,stream_chunks_cached,stream_batches_completed,stream_sdf_generation_avg_ms,stream_sdf_generation_p95_ms,stream_sdf_generation_max_ms,stream_mesh_queue_avg_ms,stream_mesh_queue_p95_ms,stream_mesh_queue_max_ms,stream_snapshot_avg_ms,stream_snapshot_p95_ms,stream_snapshot_max_ms,stream_worker_mesh_avg_ms,stream_worker_mesh_p95_ms,stream_worker_mesh_max_ms,stream_publication_wait_avg_ms,stream_publication_wait_p95_ms,stream_publication_wait_max_ms,stream_upload_avg_ms,stream_upload_p95_ms,stream_upload_max_ms,stream_chunk_ready_avg_ms,stream_chunk_ready_p95_ms,stream_chunk_ready_max_ms,stream_batch_avg_ms,stream_batch_p95_ms,stream_batch_max_ms,configuration_id,comparison_baseline_run_id,comparison_has_baseline,change_max_abs_pct,outlier_detected,outlier_metrics,reproduction_of_run_id,reproduction_status," + comparisonHeader + "," +
 			string.Join( ",", default(VoxelCallCountSnapshot).Enumerate().Select( entry => CallCountKey( entry.Name ) ) );
 		header = header.Replace( GpuPhase2BCsvHeader + ",stream_chunks_completed", GpuPhase2BCsvHeader + "," + GpuClipboxCsvHeader + ",stream_chunks_completed", System.StringComparison.Ordinal );
 		header = header.Replace( "clipbox_planner_allocated_after_warmup,indirect_render_available", "clipbox_planner_allocated_after_warmup,clipbox_planner_transition_capacity,clipbox_planner_active_transition_count,clipbox_planner_changed_transition_slots,clipbox_planner_transition_ownership_validated,indirect_render_available", System.StringComparison.Ordinal );
@@ -2016,6 +2056,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			$"\"loaded_chunks\":{d.LoadedChunks},\"authoritative_sdf_bytes\":{d.AuthoritativeSdfStorageBytes},\"uniform_sdf_chunks\":{d.UniformSdfChunks},\"visual_chunks\":{d.ActiveVisualChunks},\"failed_visual_chunks\":{d.FailedVisualChunks},\"visual_batch_built_chunks\":{d.VisualBatchBuiltChunks},\"visual_vertices\":{d.VisualVertices},\"visual_triangles\":{d.VisualTriangles},\"colliders\":{d.ActiveColliders},\"collision_triangles\":{d.CollisionTriangles},\"player_safety_active\":{d.PlayerSafetyActive.ToString().ToLowerInvariant()}," +
 			$"\"generation_ms\":{Number( d.GenerationElapsedMilliseconds )},\"visual_batch_ms\":{Number( d.VisualBatchElapsedMilliseconds )},\"snapshot_wait_ms\":{Number( d.SnapshotWaitMilliseconds )},\"snapshot_copy_ms\":{Number( d.SnapshotCopyMilliseconds )},\"worker_mesh_ms\":{Number( d.WorkerMeshMilliseconds )},\"upload_ms\":{Number( d.MainThreadUploadMilliseconds )}," +
 			SerializeGpuTransvoxelProofJson( result.GpuTransvoxelProof ) + "," +
+			SerializeLod5OwnershipProofJson( result.Lod5OwnershipProof ) + "," +
 			SerializeGpuPhase2BJson( result.GpuTerrain, result.GpuPhase2BProof ) + "," +
 			SerializeGpuPhase3AJson( result.GpuPhase3AProof ) + "," +
 			SerializeGpuPhase3BJson( result.GpuPhase3BProof ) + "," +
@@ -2041,6 +2082,7 @@ public sealed class VoxelTerrainBenchmark : Component
 			result.AllocatedBytes, Number( result.GcPauseMilliseconds ), result.Gen0Collections, result.Gen1Collections, result.Gen2Collections, result.Exceptions, result.PeakMemoryBytes, result.PeakTexturePoolUsedBytes, result.PeakTexturePoolNonEvictableBytes, result.MaximumPendingStreamingRequests, Number( result.DrawCallsAverage ), Number( result.TrianglesRenderedAverage ), Number( result.ObjectsRenderedAverage ), Number( result.MaterialChangesAverage ),
 			d.LoadedChunks, d.AuthoritativeSdfStorageBytes, d.UniformSdfChunks, d.ActiveVisualChunks, d.FailedVisualChunks, d.VisualBatchBuiltChunks, d.VisualVertices, d.VisualTriangles, d.ActiveColliders, d.CollisionTriangles, d.PlayerSafetyActive, Number( d.GenerationElapsedMilliseconds ), Number( d.VisualBatchElapsedMilliseconds ), Number( d.SnapshotWaitMilliseconds ), Number( d.SnapshotCopyMilliseconds ), Number( d.WorkerMeshMilliseconds ), Number( d.MainThreadUploadMilliseconds ),
 			GpuTransvoxelProofCsv( result.GpuTransvoxelProof ),
+			Lod5OwnershipProofCsv( result.Lod5OwnershipProof ),
 			ClipboxPlannerProofCsv( result.ClipboxPlannerProof ),
 			TransitionProofCsv( result.TransitionProof ),
 			IndirectRenderProofCsv( result.IndirectRenderProof ),
@@ -2067,6 +2109,23 @@ public sealed class VoxelTerrainBenchmark : Component
 	private static string GpuTransvoxelProofCsv( VoxelGpuTransvoxelProofResult? proof ) => proof.HasValue
 		? string.Join( ",", true, proof.Value.Passed, Csv( proof.Value.Failure ), proof.Value.VertexCount, proof.Value.IndexCount, proof.Value.ActiveCells, proof.Value.OverflowAttempts, proof.Value.GpuBufferBytes, Number( proof.Value.SubmissionMilliseconds ), Number( proof.Value.CompletionMilliseconds ), Number( proof.Value.GeometryReadbackMilliseconds ), proof.Value.BatchSize, proof.Value.SurfaceBlockCount, proof.Value.DispatchCount, proof.Value.GpuCountPublicationPassed, Number( proof.Value.GpuCountPublicationMilliseconds ), Number( proof.Value.CpuCountPublicationMilliseconds ) )
 		: "False,False,\"\",0,0,0,0,0,0,0,0,0,0,0,False,0,0";
+
+	private static string SerializeLod5OwnershipProofJson( VoxelGpuClipboxSeamProofReport? proof )
+	{
+		var p = proof ?? default;
+		return $"\"gpu_lod_ownership_available\":{proof.HasValue.ToString().ToLowerInvariant()},\"gpu_lod_ownership_passed\":{p.LodOwnershipPassed.ToString().ToLowerInvariant()},\"gpu_lod_ownership_failure\":\"{Json( p.LodOwnershipFailure )}\",\"gpu_lod_ownership_active_transitions\":{p.ActiveTransitions},\"gpu_lod_ownership_published_transitions\":{p.PublishedTransitions},\"gpu_lod_ownership_duplicate_regular_triangles\":{p.DuplicateRegularTriangles},\"gpu_lod_ownership_duplicate_transition_triangles\":{p.DuplicateTransitionTriangles},\"gpu_lod_ownership_cross_owner_triangles\":{p.CrossOwnerDuplicateTriangles},\"gpu_lod_ownership_lod5_duplicate_triangles\":{p.Lod5DuplicateTriangles},\"gpu_lod_ownership_collapsed_transitions\":{p.CollapsedTransitionMeshes},\"gpu_lod_ownership_undeformed_coarse_vertices\":{p.UndeformedCoarseBoundaryVertices},\"gpu_lod_ownership_boundary_vertices\":{p.BoundaryVertices},\"gpu_lod_ownership_unmatched_boundary_vertices\":{p.UnmatchedBoundaryVertices},\"gpu_lod_ownership_max_seam_error\":{Number( p.MaximumSeamPositionError )},\"gpu_lod_ownership_readback_bytes\":{p.GeometryReadbackBytes},\"gpu_lod_ownership_readback_ms\":{Number( p.GeometryReadbackMilliseconds )}";
+	}
+
+	private static string Lod5OwnershipProofCsv( VoxelGpuClipboxSeamProofReport? proof )
+	{
+		var p = proof ?? default;
+		return string.Join( ",", proof.HasValue, p.LodOwnershipPassed, Csv( p.LodOwnershipFailure ), p.ActiveTransitions, p.PublishedTransitions,
+			p.DuplicateRegularTriangles, p.DuplicateTransitionTriangles, p.CrossOwnerDuplicateTriangles, p.Lod5DuplicateTriangles,
+			p.CollapsedTransitionMeshes, p.UndeformedCoarseBoundaryVertices, p.BoundaryVertices, p.UnmatchedBoundaryVertices,
+			Number( p.MaximumSeamPositionError ), p.GeometryReadbackBytes, Number( p.GeometryReadbackMilliseconds ) );
+	}
+
+	private const string Lod5OwnershipCsvHeader = "gpu_lod_ownership_available,gpu_lod_ownership_passed,gpu_lod_ownership_failure,gpu_lod_ownership_active_transitions,gpu_lod_ownership_published_transitions,gpu_lod_ownership_duplicate_regular_triangles,gpu_lod_ownership_duplicate_transition_triangles,gpu_lod_ownership_cross_owner_triangles,gpu_lod_ownership_lod5_duplicate_triangles,gpu_lod_ownership_collapsed_transitions,gpu_lod_ownership_undeformed_coarse_vertices,gpu_lod_ownership_boundary_vertices,gpu_lod_ownership_unmatched_boundary_vertices,gpu_lod_ownership_max_seam_error,gpu_lod_ownership_readback_bytes,gpu_lod_ownership_readback_ms";
 
 	private const string GpuPhase2BCsvHeader = "gpu_terrain_available,gpu_terrain_backend,gpu_terrain_lod_policy,gpu_terrain_indirect_command_group_size,gpu_terrain_requested_blocks,gpu_terrain_resident_blocks,gpu_terrain_pending_count_batches,gpu_terrain_pending_emit_batches,gpu_terrain_backpressure_events,gpu_terrain_allocation_failures,gpu_terrain_stale_publications_rejected,gpu_terrain_visible_draw_commands,gpu_terrain_scratch_bytes,gpu_terrain_pool_capacity_bytes,gpu_terrain_pool_used_bytes,gpu_terrain_pool_peak_bytes,gpu_terrain_geometry_readback_bytes,gpu_terrain_count_submission_ms,gpu_terrain_count_readback_avg_ms,gpu_terrain_count_readback_count,gpu_terrain_emit_submission_ms,gpu_terrain_count_submission_per_block_ms,gpu_terrain_emit_submission_per_block_ms,gpu_terrain_request_to_visible_avg_ms,gpu_terrain_request_to_visible_p95_ms,gpu_terrain_request_to_visible_max_ms,gpu_terrain_batch_completion_avg_ms,gpu_terrain_batch_completion_p95_ms,gpu_terrain_batch_completion_max_ms,gpu_terrain_failure,gpu_terrain_capacity_limited,gpu_terrain_blocked_requests,gpu_terrain_capacity_evictions,gpu_terrain_capacity_deferrals,gpu_terrain_vertex_free,gpu_terrain_index_free,gpu_terrain_vertex_largest_free,gpu_terrain_index_largest_free,gpu_terrain_vertex_free_ranges,gpu_terrain_index_free_ranges,gpu_phase2b_available,gpu_phase2b_passed,gpu_phase2b_test,gpu_phase2b_failure,gpu_lifecycle_budget_bytes,gpu_lifecycle_peak_used_bytes,gpu_lifecycle_churn_operations,gpu_lifecycle_allocation_failures,gpu_lifecycle_backpressure_events,gpu_lifecycle_stale_publications_rejected,gpu_lifecycle_retained_delta_percent,gpu_terrain_render_shader,gpu_terrain_production_lighting,gpu_terrain_depth_prepass,gpu_terrain_depth_command_lists,gpu_terrain_opaque_command_lists,gpu_phase3a_available,gpu_phase3a_passed,gpu_phase3a_test,gpu_phase3a_failure,gpu_terrain_desired_blocks,gpu_terrain_resident_capacity,gpu_terrain_pending_request_capacity,gpu_terrain_pending_request_count,gpu_terrain_pending_publication_count,gpu_terrain_queues_bounded,gpu_phase3b_available,gpu_phase3b_passed,gpu_phase3b_test,gpu_phase3b_failure";
 
@@ -2243,6 +2302,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		WaitPhase4Indirect,
 		StartPhase4Regular,
 		WaitPhase4Regular,
+		StartGpuLod5Ownership,
+		WaitGpuLod5Ownership,
 		StartGpuTransvoxelProof,
 		WaitGpuTransvoxelProof,
 		StartGpuPersistentStatic,
@@ -2466,7 +2527,7 @@ public sealed class VoxelTerrainBenchmark : Component
 
 		public bool TryConsumeStutterDiagnostic() => _stutterDiagnosticCount++ < 2;
 
-		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, VoxelChunkStreamingDiagnostics streaming, double elapsedMilliseconds, VoxelGpuTransvoxelProofResult? gpuProof, VoxelGpuTerrainDiagnostics? gpuTerrain, VoxelGpuPhase2BProofResult? gpuPhase2BProof, VoxelGpuPhase3AProofResult? gpuPhase3AProof, VoxelGpuPhase3BProofResult? gpuPhase3BProof, VoxelClipboxPlannerProofReport? clipboxPlannerProof, VoxelGpuIndirectRenderProofReport? indirectRenderProof, VoxelTransvoxelTransitionProofResult? transitionProof )
+		public ScenarioResult Complete( VoxelTerrainDiagnostics diagnostics, VoxelCallCountSnapshot callCounts, VoxelChunkStreamingDiagnostics streaming, double elapsedMilliseconds, VoxelGpuTransvoxelProofResult? gpuProof, VoxelGpuTerrainDiagnostics? gpuTerrain, VoxelGpuPhase2BProofResult? gpuPhase2BProof, VoxelGpuPhase3AProofResult? gpuPhase3AProof, VoxelGpuPhase3BProofResult? gpuPhase3BProof, VoxelClipboxPlannerProofReport? clipboxPlannerProof, VoxelGpuIndirectRenderProofReport? indirectRenderProof, VoxelTransvoxelTransitionProofResult? transitionProof, VoxelGpuClipboxSeamProofReport? lod5OwnershipProof )
 		{
 			_frameTimes.Sort();
 			_gpuTimes.Sort();
@@ -2567,7 +2628,8 @@ public sealed class VoxelTerrainBenchmark : Component
 				GpuPhase3BProof = gpuPhase3BProof,
 				ClipboxPlannerProof = clipboxPlannerProof,
 				IndirectRenderProof = indirectRenderProof,
-				TransitionProof = transitionProof
+				TransitionProof = transitionProof,
+				Lod5OwnershipProof = lod5OwnershipProof
 			};
 		}
 
@@ -2686,5 +2748,6 @@ public sealed class VoxelTerrainBenchmark : Component
 		public VoxelClipboxPlannerProofReport? ClipboxPlannerProof { get; init; }
 		public VoxelGpuIndirectRenderProofReport? IndirectRenderProof { get; init; }
 		public VoxelTransvoxelTransitionProofResult? TransitionProof { get; init; }
+		public VoxelGpuClipboxSeamProofReport? Lod5OwnershipProof { get; init; }
 	}
 }

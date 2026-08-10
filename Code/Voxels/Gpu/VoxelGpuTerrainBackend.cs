@@ -468,8 +468,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	/// </summary>
 	public VoxelGpuClipboxSeamProofReport RunTestOnlySeamProof()
 	{
-		if ( _clipboxPlanner is null ) return new VoxelGpuClipboxSeamProofReport( false, "regular clipbox planning is not enabled", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0 );
-		if ( !IsSettled ) return new VoxelGpuClipboxSeamProofReport( false, "production clipbox has not settled", _clipboxPlanner.ActiveTransitionCount, 0, _clipboxPlanner.ActiveTransitionCount, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0 );
+		if ( _clipboxPlanner is null ) return new VoxelGpuClipboxSeamProofReport( false, "regular clipbox planning is not enabled", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, 0, 0.0 );
+		if ( !IsSettled ) return new VoxelGpuClipboxSeamProofReport( false, "production clipbox has not settled", _clipboxPlanner.ActiveTransitionCount, 0, _clipboxPlanner.ActiveTransitionCount, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, 0, 0.0 );
 
 		var published = new VoxelGpuResidentTable.ResidentEntry[_residents.Capacity];
 		var publishedCount = _residents.CopyPublishedEntries( published );
@@ -494,8 +494,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 		var positionTolerance = System.MathF.Max( 0.0001f, _voxelSize * 0.0001f );
 		var regularPositions = new Dictionary<SeamPositionKey, Vector3>();
+		var triangleOwners = new Dictionary<SeamTriangleKey, SeamTriangleOwner>();
 		var invalidIndices = 0;
 		var degenerateTriangles = 0;
+		var duplicateRegularTriangles = 0;
+		var duplicateTransitionTriangles = 0;
+		var crossOwnerDuplicateTriangles = 0;
+		var lod5DuplicateTriangles = 0;
+		var collapsedTransitionMeshes = 0;
+		var undeformedCoarseBoundaryVertices = 0;
 		var regularInvalidIndices = 0;
 		var regularDegenerateTriangles = 0;
 		var firstDegeneratePosition = string.Empty;
@@ -507,7 +514,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var expected = assignment.Coordinate * checked( _chunkSize * VoxelGpuCanonicalCoordinates.SampleStep( assignment.Lod ) ) + VoxelGpuCanonicalCoordinates.GlobalTerrainOriginSamples( _chunkSize );
 			maximumOriginAlignmentError = System.MathF.Max( maximumOriginAlignmentError, (canonical - expected).Length );
 			if ( !entries.TryGetValue( assignment.Key, out var entry ) || entry.Descriptor.IndexCount == 0 ) continue;
-			CollectGeometry( entry, vertices, indices, positionTolerance, regularPositions, ref regularInvalidIndices, ref regularDegenerateTriangles, ref firstDegeneratePosition );
+			CollectGeometry( assignment.Lod, _chunkSize, _voxelSize, entry, vertices, indices, positionTolerance, regularPositions, triangleOwners,
+				ref regularInvalidIndices, ref regularDegenerateTriangles, ref duplicateRegularTriangles,
+				ref duplicateTransitionTriangles, ref crossOwnerDuplicateTriangles, ref lod5DuplicateTriangles,
+				ref undeformedCoarseBoundaryVertices, ref firstDegeneratePosition );
 		}
 		invalidIndices += regularInvalidIndices;
 		degenerateTriangles += regularDegenerateTriangles;
@@ -549,7 +559,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				zeroGeometryTransitions++;
 				continue;
 			}
-			ValidateTransitionGeometry( transition, entry, vertices, indices, regularPositions, positionTolerance, ref transitionInvalidIndices, ref transitionDegenerateTriangles, ref boundaryVertices, ref unmatchedBoundaryVertices, ref maximumSeamPositionError, ref firstDegeneratePosition, ref firstUnmatchedBoundary );
+			ValidateTransitionGeometry( transition, entry, vertices, indices, regularPositions, triangleOwners, positionTolerance,
+				ref transitionInvalidIndices, ref transitionDegenerateTriangles, ref duplicateRegularTriangles,
+				ref duplicateTransitionTriangles, ref crossOwnerDuplicateTriangles, ref lod5DuplicateTriangles,
+				ref collapsedTransitionMeshes, ref boundaryVertices, ref unmatchedBoundaryVertices, ref maximumSeamPositionError, ref firstDegeneratePosition, ref firstUnmatchedBoundary );
 		}
 		invalidIndices += transitionInvalidIndices;
 		degenerateTriangles += transitionDegenerateTriangles;
@@ -557,21 +570,43 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		foreach ( var transition in _clipboxTransitions.Desired )
 			if ( transition.Active && !transition.DependenciesValid ) dependencyMismatches++;
 
-		var failure = missingTransitions == 0 && dependencyMismatches == 0 && faceMaskMismatches == 0 && invalidIndices == 0 && degenerateTriangles == 0 && unmatchedBoundaryVertices == 0
+		var duplicateTriangles = duplicateRegularTriangles + duplicateTransitionTriangles + crossOwnerDuplicateTriangles;
+		var failure = missingTransitions == 0 && dependencyMismatches == 0 && faceMaskMismatches == 0 && invalidIndices == 0 && degenerateTriangles == 0 && duplicateTriangles == 0 && collapsedTransitionMeshes == 0 && undeformedCoarseBoundaryVertices == 0 && unmatchedBoundaryVertices == 0
 			? string.Empty
-			: $"missing={missingTransitions}, dependencies={dependencyMismatches}, faceMasks={faceMaskMismatches}, invalidIndices={invalidIndices} (regular={regularInvalidIndices}, transition={transitionInvalidIndices}), degenerate={degenerateTriangles} (regular={regularDegenerateTriangles}, transition={transitionDegenerateTriangles}), unmatchedBoundaryVertices={unmatchedBoundaryVertices}, firstDegenerate={firstDegeneratePosition}, firstUnmatched={firstUnmatchedBoundary}";
-		return new VoxelGpuClipboxSeamProofReport( string.IsNullOrEmpty( failure ), failure, activeTransitions, publishedTransitions, missingTransitions, dependencyMismatches, faceMaskMismatches, zeroGeometryTransitions, invalidIndices, degenerateTriangles, boundaryVertices, unmatchedBoundaryVertices, maximumSeamPositionError, maximumOriginAlignmentError, readbackBytes, readbackMilliseconds );
+			: $"missing={missingTransitions}, dependencies={dependencyMismatches}, faceMasks={faceMaskMismatches}, invalidIndices={invalidIndices} (regular={regularInvalidIndices}, transition={transitionInvalidIndices}), degenerate={degenerateTriangles} (regular={regularDegenerateTriangles}, transition={transitionDegenerateTriangles}), duplicates={duplicateTriangles} (regular={duplicateRegularTriangles}, transition={duplicateTransitionTriangles}, crossOwner={crossOwnerDuplicateTriangles}, lod5={lod5DuplicateTriangles}), collapsedTransitions={collapsedTransitionMeshes}, undeformedCoarseBoundaryVertices={undeformedCoarseBoundaryVertices}, unmatchedBoundaryVertices={unmatchedBoundaryVertices}, firstDegenerate={firstDegeneratePosition}, firstUnmatched={firstUnmatchedBoundary}";
+		return new VoxelGpuClipboxSeamProofReport( string.IsNullOrEmpty( failure ), failure, activeTransitions, publishedTransitions, missingTransitions, dependencyMismatches, faceMaskMismatches, zeroGeometryTransitions, invalidIndices, degenerateTriangles, duplicateRegularTriangles, duplicateTransitionTriangles, crossOwnerDuplicateTriangles, lod5DuplicateTriangles, collapsedTransitionMeshes, undeformedCoarseBoundaryVertices, boundaryVertices, unmatchedBoundaryVertices, maximumSeamPositionError, maximumOriginAlignmentError, readbackBytes, readbackMilliseconds );
 	}
 
-	private static void CollectGeometry( VoxelGpuResidentTable.ResidentEntry entry, SimpleVertex[] vertices, uint[] indices, float tolerance, Dictionary<SeamPositionKey, Vector3> positionLookup, ref int invalidIndices, ref int degenerateTriangles, ref string firstDegeneratePosition )
+	private static void CollectGeometry( int lod, int chunkSize, float voxelSize, VoxelGpuResidentTable.ResidentEntry entry, SimpleVertex[] vertices, uint[] indices, float tolerance,
+		Dictionary<SeamPositionKey, Vector3> positionLookup, Dictionary<SeamTriangleKey, SeamTriangleOwner> triangleOwners,
+		ref int invalidIndices, ref int degenerateTriangles, ref int duplicateRegularTriangles, ref int duplicateTransitionTriangles,
+		ref int crossOwnerDuplicateTriangles, ref int lod5DuplicateTriangles, ref int undeformedCoarseBoundaryVertices, ref string firstDegeneratePosition )
 	{
 		var allocation = entry.Allocation;
+		var seenVertices = new HashSet<int>();
+		var drawOrigin = new Vector3( entry.Descriptor.DrawOrigin.x, entry.Descriptor.DrawOrigin.y, entry.Descriptor.DrawOrigin.z );
+		var worldStep = voxelSize * VoxelGpuCanonicalCoordinates.SampleStep( lod );
+		var localTolerance = tolerance / worldStep;
 		for ( var offset = 0; offset < entry.Descriptor.IndexCount; offset++ )
 		{
 			var indexOffset = allocation.Indices.Offset + offset;
 			if ( (uint)indexOffset >= (uint)indices.Length || indices[indexOffset] >= allocation.Vertices.Count ) { invalidIndices++; continue; }
 			var vertexIndex = allocation.Vertices.Offset + (int)indices[indexOffset];
-			if ( (uint)vertexIndex < (uint)vertices.Length ) positionLookup.TryAdd( Quantize( vertices[vertexIndex].position, tolerance ), vertices[vertexIndex].position );
+			if ( (uint)vertexIndex >= (uint)vertices.Length ) continue;
+			var position = vertices[vertexIndex].position;
+			positionLookup.TryAdd( Quantize( position, tolerance ), position );
+			var localIndex = (int)indices[indexOffset];
+			if ( entry.Key.TransitionFaceMask != 0 && seenVertices.Add( localIndex ) )
+			{
+				var local = (position - drawOrigin) / worldStep;
+				var mask = entry.Key.TransitionFaceMask;
+				if (((mask & 1u) != 0 && System.MathF.Abs( local.x ) <= localTolerance) ||
+					((mask & 2u) != 0 && System.MathF.Abs( local.x - chunkSize ) <= localTolerance) ||
+					((mask & 4u) != 0 && System.MathF.Abs( local.y ) <= localTolerance) ||
+					((mask & 8u) != 0 && System.MathF.Abs( local.y - chunkSize ) <= localTolerance) ||
+					((mask & 16u) != 0 && System.MathF.Abs( local.z ) <= localTolerance) ||
+					((mask & 32u) != 0 && System.MathF.Abs( local.z - chunkSize ) <= localTolerance)) undeformedCoarseBoundaryVertices++;
+			}
 		}
 		for ( var offset = 0; offset + 2 < entry.Descriptor.IndexCount; offset += 3 )
 		{
@@ -583,10 +618,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var b = vertices[allocation.Vertices.Offset + (int)indices[second]].position;
 			var c = vertices[allocation.Vertices.Offset + (int)indices[third]].position;
 			if ( Vector3.Cross( b - a, c - a ).LengthSquared <= 0.000000000001f ) { degenerateTriangles++; if ( string.IsNullOrEmpty( firstDegeneratePosition ) ) firstDegeneratePosition = $"regular:{a}/{b}/{c}"; }
+			else RecordTriangleOwner( a, b, c, tolerance, new SeamTriangleOwner( false, lod ), triangleOwners, ref duplicateRegularTriangles, ref duplicateTransitionTriangles, ref crossOwnerDuplicateTriangles, ref lod5DuplicateTriangles );
 		}
 	}
 
-	private void ValidateTransitionGeometry( VoxelClipboxTransitionSlotAssignment transition, VoxelGpuResidentTable.ResidentEntry entry, SimpleVertex[] vertices, uint[] indices, Dictionary<SeamPositionKey, Vector3> regularPositions, float tolerance, ref int invalidIndices, ref int degenerateTriangles, ref int boundaryVertices, ref int unmatchedBoundaryVertices, ref float maximumSeamPositionError, ref string firstDegeneratePosition, ref string firstUnmatchedBoundary )
+	private void ValidateTransitionGeometry( VoxelClipboxTransitionSlotAssignment transition, VoxelGpuResidentTable.ResidentEntry entry, SimpleVertex[] vertices, uint[] indices,
+		Dictionary<SeamPositionKey, Vector3> regularPositions, Dictionary<SeamTriangleKey, SeamTriangleOwner> triangleOwners, float tolerance,
+		ref int invalidIndices, ref int degenerateTriangles, ref int duplicateRegularTriangles, ref int duplicateTransitionTriangles,
+		ref int crossOwnerDuplicateTriangles, ref int lod5DuplicateTriangles, ref int collapsedTransitionMeshes, ref int boundaryVertices, ref int unmatchedBoundaryVertices,
+		ref float maximumSeamPositionError, ref string firstDegeneratePosition, ref string firstUnmatchedBoundary )
 	{
 		var allocation = entry.Allocation;
 		var seen = new HashSet<int>();
@@ -602,6 +642,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			VoxelClipboxFaceDirection.PositiveZ => origin.z + extent,
 			_ => 0.0f
 		};
+		var hasSecondaryDepth = false;
 		for ( var offset = 0; offset < entry.Descriptor.IndexCount; offset++ )
 		{
 			var indexOffset = allocation.Indices.Offset + offset;
@@ -617,11 +658,16 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				VoxelClipboxFaceDirection.NegativeY or VoxelClipboxFaceDirection.PositiveY => position.y,
 				_ => position.z
 			};
-			if ( System.MathF.Abs( coordinate - facePlane ) > tolerance ) continue;
+			if ( System.MathF.Abs( coordinate - facePlane ) > tolerance )
+			{
+				hasSecondaryDepth = true;
+				continue;
+			}
 			boundaryVertices++;
 			if ( TryNearest( regularPositions, position, tolerance, out var error ) ) maximumSeamPositionError = System.MathF.Max( maximumSeamPositionError, error );
 			else { unmatchedBoundaryVertices++; if ( error < float.MaxValue ) maximumSeamPositionError = System.MathF.Max( maximumSeamPositionError, error ); else maximumSeamPositionError = System.MathF.Max( maximumSeamPositionError, tolerance ); if ( string.IsNullOrEmpty( firstUnmatchedBoundary ) ) firstUnmatchedBoundary = $"L{transition.FineLevel}:{transition.FineCoordinate}:{transition.Face}:{position} nearest={error:F6}"; }
 		}
+		if ( entry.Descriptor.IndexCount > 0 && !hasSecondaryDepth ) collapsedTransitionMeshes++;
 		for ( var offset = 0; offset + 2 < entry.Descriptor.IndexCount; offset += 3 )
 		{
 			var first = allocation.Indices.Offset + offset;
@@ -632,7 +678,21 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var b = vertices[allocation.Vertices.Offset + (int)indices[second]].position;
 			var c = vertices[allocation.Vertices.Offset + (int)indices[third]].position;
 			if ( Vector3.Cross( b - a, c - a ).LengthSquared <= 0.000000000001f ) { degenerateTriangles++; if ( string.IsNullOrEmpty( firstDegeneratePosition ) ) firstDegeneratePosition = $"transition:{transition.Face}:{a}/{b}/{c}"; }
+			else RecordTriangleOwner( a, b, c, tolerance, new SeamTriangleOwner( true, transition.CoarseLevel ), triangleOwners, ref duplicateRegularTriangles, ref duplicateTransitionTriangles, ref crossOwnerDuplicateTriangles, ref lod5DuplicateTriangles );
 		}
+	}
+
+	private static void RecordTriangleOwner( Vector3 a, Vector3 b, Vector3 c, float tolerance, SeamTriangleOwner owner,
+		Dictionary<SeamTriangleKey, SeamTriangleOwner> triangleOwners, ref int duplicateRegularTriangles,
+		ref int duplicateTransitionTriangles, ref int crossOwnerDuplicateTriangles, ref int lod5DuplicateTriangles )
+	{
+		var key = SeamTriangleKey.Create( Quantize( a, tolerance ), Quantize( b, tolerance ), Quantize( c, tolerance ) );
+		if ( triangleOwners.TryAdd( key, owner ) ) return;
+		var previous = triangleOwners[key];
+		if ( previous.Transition != owner.Transition ) crossOwnerDuplicateTriangles++;
+		else if ( owner.Transition ) duplicateTransitionTriangles++;
+		else duplicateRegularTriangles++;
+		if ( previous.Lod == 5 || owner.Lod == 5 ) lod5DuplicateTriangles++;
 	}
 
 	private static bool TryNearest( Dictionary<SeamPositionKey, Vector3> lookup, Vector3 position, float tolerance, out float error )
@@ -653,6 +713,25 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		checked( (int)System.MathF.Round( position.z / tolerance ) ) );
 
 	private readonly record struct SeamPositionKey( int X, int Y, int Z );
+	private readonly record struct SeamTriangleOwner( bool Transition, int Lod );
+	private readonly record struct SeamTriangleKey( SeamPositionKey A, SeamPositionKey B, SeamPositionKey C )
+	{
+		public static SeamTriangleKey Create( SeamPositionKey a, SeamPositionKey b, SeamPositionKey c )
+		{
+			if ( Compare( a, b ) > 0 ) (a, b) = (b, a);
+			if ( Compare( b, c ) > 0 ) (b, c) = (c, b);
+			if ( Compare( a, b ) > 0 ) (a, b) = (b, a);
+			return new SeamTriangleKey( a, b, c );
+		}
+
+		private static int Compare( SeamPositionKey left, SeamPositionKey right )
+		{
+			var x = left.X.CompareTo( right.X );
+			if ( x != 0 ) return x;
+			var y = left.Y.CompareTo( right.Y );
+			return y != 0 ? y : left.Z.CompareTo( right.Z );
+		}
+	}
 
 	private bool IsPending( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _pendingRequests.Contains( key ); }
 	private bool IsBlocked( VoxelVisualBlockKey key ) { lock ( _desiredSync ) return _blockedRequests.Contains( key ); }

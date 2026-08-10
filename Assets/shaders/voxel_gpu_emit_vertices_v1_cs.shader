@@ -2,7 +2,7 @@ MODES
 {
 	Default();
 }
-// Transvoxel all-adjacent-faces secondary ownership for regular boundary vertices.
+// Transvoxel per-owned-face secondary ownership for regular boundary vertices.
 // Versioned capacity-safe Pass B writes block-local vertices into assigned persistent ranges.
 CS
 {
@@ -28,7 +28,7 @@ CS
 		uint slot=id.x;if(slot>=(uint)EdgeSlotCount*(uint)BatchSize)return;uint block=slot/(uint)EdgeSlotCount,localSlot=slot-block*(uint)EdgeSlotCount;if(EdgeFlags[slot]==0)return;
 		uint localVertex=EdgeGroupSums[block*(uint)EdgeGroupCount+localSlot/256]+EdgeVertexIds[slot];AllocationDescriptor allocation=Allocations[block];if(localVertex>=allocation.VertexCapacity)return;
 		uint sample=localSlot/3,axis=localSlot-sample*3;uint3 a=Decode3D(sample,SampleSize),b=a;if(axis==0)b.x++;else if(axis==1)b.y++;else b.z++;
-		float da=Distance(block,int3(a)),db=Distance(block,int3(b)),den=da-db,t=abs(den)>.000001f?da/den:.5f;t=clamp(t,0,1);float3 localCell=lerp(float3(a),float3(b),t);localCell=TransitionSecondaryLocalPosition(localCell,allocation.Flags>>8,SampleSize-1);float3 local=localCell*VoxelSize*allocation.DrawScale.xyz,n=Safe(lerp(Gradient(block,int3(a)),Gradient(block,int3(b)),t),float3(0,0,1));
+		float da=Distance(block,int3(a)),db=Distance(block,int3(b)),den=da-db,t=abs(den)>.000001f?da/den:.5f;t=clamp(t,0,1);float3 localCell=lerp(float3(a),float3(b),t);uint transitionFaceMask=allocation.Flags>>8;localCell=TransitionSecondaryLocalPosition(localCell,transitionFaceMask,SampleSize-1);float3 local=localCell*VoxelSize*allocation.DrawScale.xyz,n=Safe(lerp(Gradient(block,int3(a)),Gradient(block,int3(b)),t),float3(0,0,1));
 		VoxelGpuVertex output;output.Position=local+allocation.DrawOrigin.xyz;output.Normal=n;output.Tangent=abs(n.z)<.999f?Safe(cross(float3(0,0,1),n),float3(1,0,0)):float3(1,0,0);output.TexCoord=local.xy/128;OutputVertices[allocation.VertexOffset+localVertex]=output;
 	}
 }

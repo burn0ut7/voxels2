@@ -44,6 +44,7 @@ $fullRequiredScenarios = @(
 	'phase4_regular_b4_l2_stationary',
 	'phase4_regular_b4_l4_stationary',
 	'phase4_regular_radius64_match',
+	'gpu_lod5_transition_ownership',
 	'gpu_transvoxel_regular_proof',
 	'gpu_persistent_static_set',
 	'gpu_production_render_integration',
@@ -71,7 +72,7 @@ $fullRequiredScenarios = @(
 	'phase4_regular_b8_l4_stationary'
 )
 $gpuRequiredScenarios = @(
-	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase5_sparse_edit_contract', 'phase5_deterministic_invalidation', 'phase5_stale_edit_generations', 'phase5_edit_eviction_reentry', 'phase5_voxel_brush_raycast', 'phase5_gpu_edit_revision_binding', 'phase5_incremental_edit_replay', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_radius64_match',
+	'phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak', 'phase4_transition_ownership', 'phase5_sparse_edit_contract', 'phase5_deterministic_invalidation', 'phase5_stale_edit_generations', 'phase5_edit_eviction_reentry', 'phase5_voxel_brush_raycast', 'phase5_gpu_edit_revision_binding', 'phase5_incremental_edit_replay', 'phase4_transition_all_512_cases', 'phase4_transition_six_orientations', 'phase4_transition_plane', 'phase4_transition_sphere', 'phase4_transition_cave', 'phase4_transition_tangent_surface', 'phase4_transition_watertight_edges', 'phase4_transition_no_duplicate_faces', 'phase4_indirect_1_to_1024', 'phase4_indirect_boundary_49', 'phase4_depth_opaque_parity', 'phase4_command_list_active_range', 'phase4_regular_b4_l2_stationary', 'phase4_regular_b4_l4_stationary', 'phase4_regular_radius64_match', 'gpu_lod5_transition_ownership',
 	'gpu_persistent_static_set', 'gpu_production_render_integration',
 	'gpu_player_infinity_streaming', 'gpu_player_line_streaming', 'gpu_player_diagonal_streaming', 'gpu_player_clipbox_oscillation',
 	'gpu_allocator_churn', 'gpu_replacement_failure', 'gpu_pool_exhaustion', 'gpu_return_origin_stability',
@@ -100,6 +101,10 @@ $requiredMetrics = @(
 	'gpu_transvoxel_completion_ms', 'gpu_transvoxel_readback_ms',
 	'gpu_transvoxel_batch_size', 'gpu_transvoxel_surface_blocks', 'gpu_transvoxel_dispatches',
 	'gpu_transvoxel_gpu_publication_passed', 'gpu_transvoxel_gpu_publication_ms', 'gpu_transvoxel_cpu_publication_ms',
+	'gpu_lod_ownership_available', 'gpu_lod_ownership_passed', 'gpu_lod_ownership_failure', 'gpu_lod_ownership_active_transitions', 'gpu_lod_ownership_published_transitions',
+	'gpu_lod_ownership_duplicate_regular_triangles', 'gpu_lod_ownership_duplicate_transition_triangles', 'gpu_lod_ownership_cross_owner_triangles', 'gpu_lod_ownership_lod5_duplicate_triangles',
+	'gpu_lod_ownership_collapsed_transitions', 'gpu_lod_ownership_undeformed_coarse_vertices', 'gpu_lod_ownership_boundary_vertices', 'gpu_lod_ownership_unmatched_boundary_vertices',
+	'gpu_lod_ownership_max_seam_error', 'gpu_lod_ownership_readback_bytes', 'gpu_lod_ownership_readback_ms',
 	'transition_reference_available', 'transition_reference_passed', 'transition_reference_failure', 'transition_reference_cases', 'transition_reference_orientations', 'transition_reference_fixture_cases', 'transition_reference_triangles', 'transition_reference_boundary_edges', 'transition_reference_gradient_normals', 'transition_reference_position_tolerance', 'transition_reference_tables_validated',
 	'transition_gpu_case_available', 'transition_gpu_case_passed', 'transition_gpu_case_failure', 'transition_gpu_case_variants', 'transition_gpu_case_buffer_bytes', 'transition_gpu_case_submission_ms', 'transition_gpu_case_completion_ms', 'transition_gpu_case_readback_ms',
 	'gpu_terrain_available', 'gpu_terrain_backend', 'gpu_terrain_requested_blocks', 'gpu_terrain_resident_blocks',
@@ -191,7 +196,7 @@ if ( $failures.Count -gt 0 )
 }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
-if ( $report.suite_version -ne 30 ) { Add-Failure "Expected suite version 30, found '$($report.suite_version)'" }
+if ( $report.suite_version -ne 31 ) { Add-Failure "Expected suite version 31, found '$($report.suite_version)'" }
 if ( $null -eq $report.PSObject.Properties['benchmark_mode'] ) { Add-Failure 'Latest report is missing benchmark_mode' }
 $requiredScenarios = switch ( [string]$report.benchmark_mode )
 {
@@ -259,6 +264,20 @@ foreach ( $scenario in $scenarios )
 		if ( [int]$scenario.gpu_transvoxel_batch_size -ne 128 ) { Add-Failure "$context did not validate the required 128-block batch" }
 		if ( $scenario.gpu_transvoxel_gpu_publication_passed -ne $true ) { Add-Failure "$context did not publish GPU-authored indirect arguments" }
 		if ( [int]$scenario.gpu_transvoxel_dispatches -ge 128 ) { Add-Failure "$context dispatch count did not demonstrate batching" }
+	}
+	elseif ( $scenario.scenario -eq 'gpu_lod5_transition_ownership' )
+	{
+		if ( $scenario.gpu_lod_ownership_available -ne $true ) { Add-Failure "$context has no LOD ownership proof" }
+		if ( $scenario.gpu_lod_ownership_passed -ne $true ) { Add-Failure "$context LOD ownership failed: $($scenario.gpu_lod_ownership_failure)" }
+		if ( [long]$scenario.gpu_terrain_requested_blocks -ne 2752 -or [long]$scenario.gpu_terrain_resident_blocks -ne 2752 ) { Add-Failure "$context did not settle the expected 2,752 B8 L6 regular blocks" }
+		if ( [long]$scenario.gpu_terrain_clipbox_stable_slots -ne 3072 ) { Add-Failure "$context did not retain the expected 3,072 stable regular slots" }
+		if ( [long]$scenario.gpu_lod_ownership_active_transitions -ne 1920 -or [long]$scenario.gpu_lod_ownership_published_transitions -ne 1920 ) { Add-Failure "$context did not publish all 1,920 transition assignments" }
+		foreach ( $metric in @('gpu_lod_ownership_duplicate_regular_triangles', 'gpu_lod_ownership_duplicate_transition_triangles', 'gpu_lod_ownership_cross_owner_triangles', 'gpu_lod_ownership_lod5_duplicate_triangles', 'gpu_lod_ownership_collapsed_transitions', 'gpu_lod_ownership_undeformed_coarse_vertices', 'gpu_lod_ownership_unmatched_boundary_vertices') )
+		{
+			if ( [long]$scenario.$metric -ne 0 ) { Add-Failure "$context reported '$metric' = $($scenario.$metric)" }
+		}
+		if ( [long]$scenario.gpu_lod_ownership_boundary_vertices -le 0 ) { Add-Failure "$context validated no transition boundary vertices" }
+		if ( [long]$scenario.gpu_lod_ownership_readback_bytes -le 0 -or [double]$scenario.gpu_lod_ownership_readback_ms -le 0 ) { Add-Failure "$context recorded no geometry proof readback" }
 	}
 	elseif ( $scenario.scenario -in @('phase4_planner_counts', 'phase4_planner_reference_equivalence', 'phase4_negative_coordinates', 'phase4_vertical_movement', 'phase4_regular_coverage', 'phase4_no_lod_overlap', 'phase4_neighbor_difference', 'phase4_four_level_b4_movement', 'phase4_four_level_b8_movement', 'phase4_four_level_stationary_soak') )
 	{
