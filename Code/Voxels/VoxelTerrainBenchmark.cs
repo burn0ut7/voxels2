@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 39;
+	private const int SuiteVersion = 40;
 	private const int InfinityPathSampleCount = 1024;
 	private const int RealtimeSurfaceEditCount = 80;
 	private const float HighSpeedCollisionTraversalSpeed = 20000.0f;
@@ -1779,6 +1779,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		Log.Error( $"Voxel terrain benchmark {_runId} failed: {reason}." );
 		if ( _sampler is not null )
 		{
+			_sampler.RecordFailure();
 			if ( _sampler.Name is "gpu_persistent_static_set" or "gpu_production_render_integration" or "gpu_async_readback_saturation" or "gpu_resource_recreation" )
 			{
 				var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
@@ -1913,7 +1914,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		var target = new Vector3(
 			(_manager.ChunkSize * 8.0f + column * 10.0f) * _manager.VoxelSize,
 			(row * 10.0f - 35.0f) * _manager.VoxelSize,
-			_manager.SimplexBaseHeight * _manager.VoxelSize
+			(_manager.SimplexBaseHeight - _manager.SimplexAmplitude - 16.0f) * _manager.VoxelSize
 		);
 		var localDirection = target - rayStart;
 		var maximumDistance = localDirection.Length + _manager.VoxelSize * 16.0f;
