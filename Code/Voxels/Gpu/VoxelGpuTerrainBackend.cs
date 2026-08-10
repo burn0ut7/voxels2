@@ -24,6 +24,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly VoxelGpuBatchScheduler.ScheduledRequest[] _transitionScheduledScratch;
 	private readonly VoxelGpuBlockRequest[][] _requestScratch;
 	private readonly VoxelGpuTransitionRequest[] _transitionRequestScratch;
+	private readonly uint[][] _editIndexScratch;
+	private readonly uint[] _transitionEditIndexScratch;
 	private readonly int[][] _slotScratch;
 	private readonly int[] _transitionSlotScratch;
 	private readonly VoxelGpuAllocationDescriptor[][] _allocationScratch;
@@ -41,6 +43,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
 	private readonly List<(VoxelEditOp Operation, uint Revision)> _fixedLodEdits = new();
 	private int _editOperationCount;
+	private readonly VoxelGpuEditOp[] _editOperations = new VoxelGpuEditOp[VoxelEditJournal.MaximumGpuOperations];
 	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
 	private readonly List<VoxelVisualBlockKey> _transitionLeavingScratch = new();
@@ -151,6 +154,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_activeBatches = new BatchContext[_scratchRing.Length];
 		_scheduledScratch = new VoxelGpuBatchScheduler.ScheduledRequest[_scratchRing.Length][];
 		_requestScratch = new VoxelGpuBlockRequest[_scratchRing.Length][];
+		_editIndexScratch = new uint[_scratchRing.Length][];
 		_slotScratch = new int[_scratchRing.Length][];
 		_allocationScratch = new VoxelGpuAllocationDescriptor[_scratchRing.Length][];
 		_pendingScratch = new PendingResident[_scratchRing.Length][];
@@ -159,6 +163,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		{
 			_scheduledScratch[index] = new VoxelGpuBatchScheduler.ScheduledRequest[VoxelGpuScratchArena.MaximumBatchSize];
 			_requestScratch[index] = new VoxelGpuBlockRequest[VoxelGpuScratchArena.MaximumBatchSize];
+			_editIndexScratch[index] = new uint[VoxelGpuScratchArena.MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations];
 			_slotScratch[index] = new int[VoxelGpuScratchArena.MaximumBatchSize];
 			_allocationScratch[index] = new VoxelGpuAllocationDescriptor[VoxelGpuScratchArena.MaximumBatchSize];
 			_pendingScratch[index] = new PendingResident[VoxelGpuScratchArena.MaximumBatchSize];
@@ -169,6 +174,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_transitionScratch = new VoxelGpuTransitionScratchArena( chunkSize, voxelSize, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
 		_transitionScheduledScratch = new VoxelGpuBatchScheduler.ScheduledRequest[VoxelGpuTransitionScratchArena.MaximumBatchSize];
 		_transitionRequestScratch = new VoxelGpuTransitionRequest[VoxelGpuTransitionScratchArena.MaximumBatchSize];
+		_transitionEditIndexScratch = new uint[VoxelGpuTransitionScratchArena.MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations];
 		_transitionSlotScratch = new int[VoxelGpuTransitionScratchArena.MaximumBatchSize];
 		_transitionAllocationScratch = new VoxelGpuAllocationDescriptor[VoxelGpuTransitionScratchArena.MaximumBatchSize];
 		_transitionPendingScratch = new PendingResident[VoxelGpuTransitionScratchArena.MaximumBatchSize];
@@ -198,6 +204,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 
 	public void SetEditOperations( VoxelGpuEditOp[] operations, int operationCount )
 	{
+		if ( operations is null || operationCount < 0 || operationCount > _editOperations.Length || operations.Length < System.Math.Max( 1, operationCount ) ) throw new System.ArgumentOutOfRangeException( nameof( operationCount ) );
+		if ( operationCount > 0 ) System.Array.Copy( operations, _editOperations, operationCount );
 		foreach ( var scratch in _scratchRing ) scratch.SetEditOperations( operations, operationCount );
 		_transitionScratch.SetEditOperations( operations, operationCount );
 		_editOperationCount = operationCount;
@@ -1206,6 +1214,8 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var batchCapacity = System.Math.Min( VoxelGpuScratchArena.MaximumBatchSize, batch.Requests.Length );
 			var scheduledCount = _scheduler.TakeBatch( batchCapacity, batch.Requests );
 			var requests = _requestScratch[arenaIndex];
+			var editIndices = _editIndexScratch[arenaIndex];
+			var editIndexCursor = 0;
 			var slots = batch.Slots;
 			for ( var index = 0; index < scheduledCount; index++ )
 			{
@@ -1218,10 +1228,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				slots[index] = slot;
 				var sampleScale = 1 << item.Key.Lod;
 				var sampleOrigin = VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( item.Key.Coordinate, item.Key.Lod, _chunkSize );
+				var editIndexOffset = editIndexCursor;
+				var editIndexCount = AppendRelevantEditIndices( GetRegularEvaluationBounds( sampleOrigin, sampleScale ), item.Key.EditRevision, editIndices, ref editIndexCursor );
 				requests[index] = new VoxelGpuBlockRequest
 				{
-					SampleOrigin = new Vector4( sampleOrigin, 0.0f ),
-					SampleScale = new Vector4( sampleScale, sampleScale, sampleScale, VoxelGpuEditDispatch.GetOperationCount( item.Key.EditRevision, _editOperationCount ) ),
+					SampleOrigin = new Vector4( sampleOrigin, editIndexOffset ),
+					SampleScale = new Vector4( sampleScale, sampleScale, sampleScale, editIndexCount ),
 					CoordinateX = item.Key.Coordinate.x,
 					CoordinateY = item.Key.Coordinate.y,
 					CoordinateZ = item.Key.Coordinate.z,
@@ -1237,7 +1249,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var countLevelMask = 0;
 			for ( var index = 0; index < scheduledCount; index++ )
 				if ( (uint)batch.Requests[index].Key.Lod < (uint)_levelCountBatches.Length ) countLevelMask |= 1 << batch.Requests[index].Key.Lod;
-			if ( !_scratchRing[arenaIndex].TrySubmitCount( requests, scheduledCount, out var submissionMilliseconds ) )
+			if ( !_scratchRing[arenaIndex].TrySubmitCount( requests, scheduledCount, editIndices, editIndexCursor, out var submissionMilliseconds ) )
 			{
 				batch.Count = 0;
 				throw new System.InvalidOperationException( $"scratch arena {arenaIndex} rejected a count batch while idle" );
@@ -1254,6 +1266,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		if ( _transitionBatch.Count != 0 || !_transitionScratch.IsIdle || _transitionScheduler.PendingCount == 0 ) return;
 		var scheduledCount = _transitionScheduler.TakeBatch( VoxelGpuTransitionScratchArena.MaximumBatchSize, _transitionBatch.Requests );
 		var acceptedCount = 0;
+		var editIndexCursor = 0;
 		for ( var index = 0; index < scheduledCount; index++ )
 		{
 			var item = _transitionBatch.Requests[index];
@@ -1264,12 +1277,16 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 			var fineStep = 1 << entry.FineLevel;
 			var coarseStep = 1 << entry.CoarseLevel;
+			var fineOrigin = VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize );
+			var coarseOrigin = VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.CoarseCoordinate, entry.CoarseLevel, _chunkSize );
+			var editIndexOffset = editIndexCursor;
+			var editIndexCount = AppendRelevantEditIndices( GetTransitionEvaluationBounds( fineOrigin, fineStep, coarseOrigin, coarseStep ), item.Key.EditRevision, _transitionEditIndexScratch, ref editIndexCursor );
 			_transitionBatch.Requests[acceptedCount] = item;
 			_transitionSlotScratch[acceptedCount] = slot;
 			_transitionRequestScratch[acceptedCount] = new VoxelGpuTransitionRequest
 			{
-				FineOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize ), VoxelGpuEditDispatch.GetOperationCount( item.Key.EditRevision, _editOperationCount ) ),
-				CoarseOrigin = new Vector4( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.CoarseCoordinate, entry.CoarseLevel, _chunkSize ), 0.0f ),
+				FineOrigin = new Vector4( fineOrigin, editIndexOffset ),
+				CoarseOrigin = new Vector4( coarseOrigin, editIndexCount ),
 				FineStep = (uint)fineStep,
 				CoarseStep = (uint)coarseStep,
 				Face = (uint)entry.Face,
@@ -1283,8 +1300,42 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		}
 		_transitionBatch.Count = acceptedCount;
 		if ( acceptedCount == 0 ) return;
-		if ( !_transitionScratch.TrySubmitCount( _transitionRequestScratch, acceptedCount, out var submissionMilliseconds ) ) throw new System.InvalidOperationException( "transition scratch arena rejected a count batch while idle" );
+		if ( !_transitionScratch.TrySubmitCount( _transitionRequestScratch, acceptedCount, _transitionEditIndexScratch, editIndexCursor, out var submissionMilliseconds ) ) throw new System.InvalidOperationException( "transition scratch arena rejected a count batch while idle" );
 		_diagnostics.CountSubmissionMilliseconds += submissionMilliseconds;
+	}
+
+	private BBox GetRegularEvaluationBounds( Vector3 origin, int sampleStep )
+	{
+		var halo = sampleStep * 2.0f;
+		return new BBox( origin - Vector3.One * halo, origin + Vector3.One * (_chunkSize * sampleStep + halo) );
+	}
+
+	private BBox GetTransitionEvaluationBounds( Vector3 fineOrigin, int fineStep, Vector3 coarseOrigin, int coarseStep )
+	{
+		var halo = coarseStep * 2.0f;
+		var fineMax = fineOrigin + Vector3.One * (_chunkSize * fineStep);
+		var coarseMax = coarseOrigin + Vector3.One * (_chunkSize * coarseStep);
+		var minimum = Vector3.Min( fineOrigin, coarseOrigin ) - Vector3.One * halo;
+		var maximum = Vector3.Max( fineMax, coarseMax ) + Vector3.One * halo;
+		return new BBox( minimum, maximum );
+	}
+
+	private int AppendRelevantEditIndices( BBox evaluationBounds, uint editRevision, uint[] destination, ref int cursor )
+	{
+		var start = cursor;
+		var operationCount = (int)VoxelGpuEditDispatch.GetOperationCount( editRevision, _editOperationCount );
+		for ( var index = 0; index < operationCount; index++ )
+		{
+			var operation = _editOperations[index];
+			if ( operation.Operation == (uint)VoxelCsgOperation.MaterialPaint ) continue;
+			var radius = operation.BoundsMin.w;
+			var center = new Vector3( operation.PositionAndSmoothness.x, operation.PositionAndSmoothness.y, operation.PositionAndSmoothness.z );
+			var operationBounds = new BBox( center - Vector3.One * radius, center + Vector3.One * radius );
+			if ( !evaluationBounds.Overlaps( operationBounds ) ) continue;
+			if ( cursor >= destination.Length ) throw new System.InvalidOperationException( "GPU batch edit-index capacity was exceeded." );
+			destination[cursor++] = (uint)index;
+		}
+		return cursor - start;
 	}
 
 	private bool TryResolveTransitionPlan( VoxelVisualBlockKey key, out VoxelGpuTransitionMetadataEntry entry, out VoxelClipboxTransitionSlotAssignment assignment )

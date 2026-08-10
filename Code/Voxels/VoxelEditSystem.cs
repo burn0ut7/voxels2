@@ -42,6 +42,8 @@ internal struct VoxelGpuEditOp
 	public Vector4 BoundsMin;
 }
 
+internal readonly record struct VoxelEditEvaluationOp( VoxelEditOp Operation, BBox Bounds );
+
 internal sealed class VoxelEditJournal
 {
 	public const int MaximumGpuOperations = 1024;
@@ -79,6 +81,18 @@ internal sealed class VoxelEditJournal
 		var distance = proceduralDistance;
 		foreach ( var operation in operations )
 			distance = ApplyDistance( operation, canonicalSample, distance );
+		return distance;
+	}
+
+	public static float EvaluateDistance( IReadOnlyList<VoxelEditEvaluationOp> operations, Vector3 canonicalSample, float proceduralDistance )
+	{
+		var distance = proceduralDistance;
+		foreach ( var evaluation in operations )
+		{
+			var operation = evaluation.Operation;
+			if ( operation.Operation == VoxelCsgOperation.MaterialPaint || !evaluation.Bounds.Contains( canonicalSample ) ) continue;
+			distance = ApplyDistance( distance, ShapeDistance( operation, canonicalSample ), operation.Operation, operation.Smoothness );
+		}
 		return distance;
 	}
 
@@ -151,6 +165,20 @@ internal sealed class VoxelEditJournal
 		}
 	}
 
+	public VoxelEditEvaluationOp[] CreateRaycastSnapshot( Vector3 segmentStart, Vector3 segmentEnd )
+	{
+		lock ( _gate )
+		{
+			var matching = new List<VoxelEditEvaluationOp>();
+			foreach ( var operation in _operations )
+			{
+				var bounds = GetBounds( operation );
+				if ( SegmentIntersectsBounds( segmentStart, segmentEnd, bounds ) ) matching.Add( new VoxelEditEvaluationOp( operation, bounds ) );
+			}
+			return matching.ToArray();
+		}
+	}
+
 	public static BBox GetBounds( VoxelEditOp operation )
 	{
 		var radius = operation.Shape switch
@@ -167,6 +195,28 @@ internal sealed class VoxelEditJournal
 		left.Mins.x <= right.Maxs.x && left.Maxs.x >= right.Mins.x &&
 		left.Mins.y <= right.Maxs.y && left.Maxs.y >= right.Mins.y &&
 		left.Mins.z <= right.Maxs.z && left.Maxs.z >= right.Mins.z;
+
+	private static bool SegmentIntersectsBounds( Vector3 start, Vector3 end, BBox bounds )
+	{
+		var direction = end - start;
+		var minimumFraction = 0.0f;
+		var maximumFraction = 1.0f;
+		return IntersectsSlab( start.x, direction.x, bounds.Mins.x, bounds.Maxs.x, ref minimumFraction, ref maximumFraction ) &&
+			IntersectsSlab( start.y, direction.y, bounds.Mins.y, bounds.Maxs.y, ref minimumFraction, ref maximumFraction ) &&
+			IntersectsSlab( start.z, direction.z, bounds.Mins.z, bounds.Maxs.z, ref minimumFraction, ref maximumFraction );
+	}
+
+	private static bool IntersectsSlab( float origin, float direction, float minimum, float maximum, ref float minimumFraction, ref float maximumFraction )
+	{
+		if ( System.MathF.Abs( direction ) <= 0.000001f ) return origin >= minimum && origin <= maximum;
+		var inverse = 1.0f / direction;
+		var first = (minimum - origin) * inverse;
+		var second = (maximum - origin) * inverse;
+		if ( first > second ) (first, second) = (second, first);
+		minimumFraction = System.MathF.Max( minimumFraction, first );
+		maximumFraction = System.MathF.Min( maximumFraction, second );
+		return minimumFraction <= maximumFraction;
+	}
 
 	private static bool Contains( VoxelEditOp operation, Vector3 point ) => GetBounds( operation ).Contains( point );
 

@@ -56,11 +56,11 @@ CS
 			float sampleZ = request.SampleOrigin.z + ((float)localZ - 1.0f) * request.SampleScale.z;
 			densities[localZ] = EvaluateTerrainDensityFromSurfaceHeight( sampleZ, surfaceHeight, SdfClampDistance );
 		}
-		uint editOperationCount = (uint)request.SampleScale.w;
-		[loop] for ( uint editIndex = 0; editIndex < editOperationCount; editIndex++ )
+		uint editIndexOffset = (uint)request.SampleOrigin.w;
+		uint editIndexCount = (uint)request.SampleScale.w;
+		[loop] for ( uint localEditIndex = 0; localEditIndex < editIndexCount; localEditIndex++ )
 		{
-			VoxelEditOperation edit = VoxelEditOperations[editIndex];
-			if ( edit.Operation == 4 ) continue;
+			VoxelEditOperation edit = VoxelEditOperations[VoxelEditIndices[editIndexOffset + localEditIndex]];
 			float boundsRadius = edit.BoundsMin.w;
 			if ( any( abs( sampleXY - edit.PositionAndSmoothness.xy ) > boundsRadius ) ) continue;
 			[loop] for ( uint localZ = 0; localZ < (uint)HaloSize; localZ++ )

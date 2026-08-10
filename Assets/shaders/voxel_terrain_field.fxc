@@ -75,6 +75,7 @@ struct VoxelEditOperation
 };
 
 StructuredBuffer<VoxelEditOperation> VoxelEditOperations < Attribute( "VoxelEditOperations" ); >;
+StructuredBuffer<uint> VoxelEditIndices < Attribute( "VoxelEditIndices" ); >;
 
 float3 VoxelRotateInverse( float3 point, float4 rotation )
 {
@@ -129,6 +130,25 @@ float ApplyTerrainEdits( float3 canonicalSample, uint editOperationCount, float 
 		density = ApplyTerrainEditShape( edit, canonicalSample, density );
 	}
 	return FinalizeEditedTerrainDensity( density, sdfClampDistance );
+}
+
+float ApplyIndexedTerrainEdits( float3 canonicalSample, uint editIndexOffset, uint editIndexCount, float density, float sdfClampDistance )
+{
+	[loop] for ( uint localIndex = 0; localIndex < editIndexCount; localIndex++ )
+	{
+		VoxelEditOperation edit = VoxelEditOperations[VoxelEditIndices[editIndexOffset + localIndex]];
+		float boundsRadius = edit.BoundsMin.w;
+		if ( any( abs( canonicalSample - edit.PositionAndSmoothness.xyz ) > boundsRadius ) ) continue;
+		density = ApplyTerrainEditShape( edit, canonicalSample, density );
+	}
+	return FinalizeEditedTerrainDensity( density, sdfClampDistance );
+}
+
+float EvaluateIndexedTerrainDensity( float3 canonicalSample, uint editIndexOffset, uint editIndexCount, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	float surfaceHeight = EvaluateTerrainSurfaceHeight( canonicalSample.xy, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	float density = EvaluateTerrainDensityFromSurfaceHeight( canonicalSample.z, surfaceHeight, sdfClampDistance );
+	return ApplyIndexedTerrainEdits( canonicalSample, editIndexOffset, editIndexCount, density, sdfClampDistance );
 }
 
 float EvaluateEditedTerrainDensityFromSurfaceHeight( float3 canonicalSample, uint editOperationCount, float surfaceHeight, float sdfClampDistance )

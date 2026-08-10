@@ -1600,19 +1600,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var canonicalDistance = canonicalDelta.Length;
 		if ( canonicalDistance <= 0.000001f ) return false;
 
-		var bounds = new BBox(
-			new Vector3(
-				System.MathF.Min( canonicalStart.x, canonicalEnd.x ),
-				System.MathF.Min( canonicalStart.y, canonicalEnd.y ),
-				System.MathF.Min( canonicalStart.z, canonicalEnd.z )
-			),
-			new Vector3(
-				System.MathF.Max( canonicalStart.x, canonicalEnd.x ),
-				System.MathF.Max( canonicalStart.y, canonicalEnd.y ),
-				System.MathF.Max( canonicalStart.z, canonicalEnd.z )
-			)
-		);
-		var operations = _editJournal.CreateOperationSnapshot( bounds );
+		var operations = _editJournal.CreateRaycastSnapshot( canonicalStart, canonicalEnd );
 		CountCall( ref _callBrushRaycastEditCandidates, operations.Length );
 		float EvaluateCanonicalDistance( Vector3 canonicalSample )
 		{
