@@ -63,23 +63,18 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64) + (long)VoxelEditJournal.MaximumGpuOperations * 80 + (long)MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations * sizeof( uint );
 	}
 
-	public void SetEditOperations( VoxelGpuEditOp[] operations, int count )
-	{
-		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
-		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
-	}
-
-	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, uint[] editIndices, int editIndexCount, out double submissionMilliseconds )
+	public bool TrySubmitCount( VoxelGpuTransitionRequest[] requests, int count, uint[] editIndices, int editIndexCount, VoxelGpuEditOp[] editOperations, int editOperationCount, out double submissionMilliseconds )
 	{
 		lock ( _stateLock )
 		{
-			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count || editIndices is null || editIndexCount < 0 || editIndexCount > editIndices.Length || editIndexCount > _editIndices.ElementCount ) { submissionMilliseconds = 0.0; return false; }
+			if ( _disposed || _state != ArenaState.Idle || requests is null || count is < 1 or > MaximumBatchSize || requests.Length < count || editIndices is null || editIndexCount < 0 || editIndexCount > editIndices.Length || editIndexCount > _editIndices.ElementCount || editOperations is null || editOperationCount < 0 || editOperationCount > VoxelEditJournal.MaximumGpuOperations || editOperations.Length < System.Math.Max( 1, editOperationCount ) ) { submissionMilliseconds = 0.0; return false; }
 			_state = ArenaState.CountSubmitted;
 			_batchSize = count;
 		}
 		var start = System.Diagnostics.Stopwatch.GetTimestamp();
 		_requests.SetData( new System.Span<VoxelGpuTransitionRequest>( requests, 0, count ) );
 		if ( editIndexCount > 0 ) _editIndices.SetData( new System.Span<uint>( editIndices, 0, editIndexCount ) );
+		if ( editOperationCount > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( editOperations, 0, editOperationCount ) );
 		_countResults.Clear();
 		Graphics.ResourceBarrierTransition( _requests, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _lookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );

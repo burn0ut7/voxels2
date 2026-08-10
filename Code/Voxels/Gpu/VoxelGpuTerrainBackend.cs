@@ -206,8 +206,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	{
 		if ( operations is null || operationCount < 0 || operationCount > _editOperations.Length || operations.Length < System.Math.Max( 1, operationCount ) ) throw new System.ArgumentOutOfRangeException( nameof( operationCount ) );
 		if ( operationCount > 0 ) System.Array.Copy( operations, _editOperations, operationCount );
-		foreach ( var scratch in _scratchRing ) scratch.SetEditOperations( operations, operationCount );
-		_transitionScratch.SetEditOperations( operations, operationCount );
 		_editOperationCount = operationCount;
 	}
 
@@ -1249,7 +1247,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var countLevelMask = 0;
 			for ( var index = 0; index < scheduledCount; index++ )
 				if ( (uint)batch.Requests[index].Key.Lod < (uint)_levelCountBatches.Length ) countLevelMask |= 1 << batch.Requests[index].Key.Lod;
-			if ( !_scratchRing[arenaIndex].TrySubmitCount( requests, scheduledCount, editIndices, editIndexCursor, out var submissionMilliseconds ) )
+			if ( !_scratchRing[arenaIndex].TrySubmitCount( requests, scheduledCount, editIndices, editIndexCursor, _editOperations, _editOperationCount, out var submissionMilliseconds ) )
 			{
 				batch.Count = 0;
 				throw new System.InvalidOperationException( $"scratch arena {arenaIndex} rejected a count batch while idle" );
@@ -1300,7 +1298,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		}
 		_transitionBatch.Count = acceptedCount;
 		if ( acceptedCount == 0 ) return;
-		if ( !_transitionScratch.TrySubmitCount( _transitionRequestScratch, acceptedCount, _transitionEditIndexScratch, editIndexCursor, out var submissionMilliseconds ) ) throw new System.InvalidOperationException( "transition scratch arena rejected a count batch while idle" );
+		if ( !_transitionScratch.TrySubmitCount( _transitionRequestScratch, acceptedCount, _transitionEditIndexScratch, editIndexCursor, _editOperations, _editOperationCount, out var submissionMilliseconds ) ) throw new System.InvalidOperationException( "transition scratch arena rejected a count batch while idle" );
 		_diagnostics.CountSubmissionMilliseconds += submissionMilliseconds;
 	}
 
