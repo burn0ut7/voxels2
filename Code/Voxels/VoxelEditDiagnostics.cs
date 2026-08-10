@@ -14,6 +14,7 @@ internal static class VoxelEditDiagnostics
 				"phase5_edit_eviction_reentry" => RunEvictionReentry(),
 				"phase5_voxel_brush_raycast" => RunBrushRaycast(),
 				"phase5_gpu_edit_revision_binding" => RunGpuEditRevisionBinding(),
+				"phase5_incremental_edit_replay" => RunIncrementalEditReplay(),
 				_ => new VoxelEditProofReport( false, $"Unknown Phase Five edit scenario '{scenario}'.", 0, 0, 0 )
 			};
 		}
@@ -120,6 +121,39 @@ internal static class VoxelEditDiagnostics
 		catch ( System.InvalidOperationException ) { rejected = true; }
 		Require( rejected, "GPU blocks accepted an edit revision beyond the uploaded journal" );
 		return new VoxelEditProofReport( true, string.Empty, 4, 3, 1 );
+	}
+
+	private static VoxelEditProofReport RunIncrementalEditReplay()
+	{
+		var operations = new[]
+		{
+			Operation( VoxelEditShape.Sphere, VoxelCsgOperation.Subtract, new Vector3( -2, 1, 0 ), new Vector3( 4, 0, 0 ) ),
+			Operation( VoxelEditShape.OrientedBox, VoxelCsgOperation.SmoothAdd, new Vector3( 3, -1, 1 ), new Vector3( 3, 2, 2 ), 1.25f ),
+			Operation( VoxelEditShape.Capsule, VoxelCsgOperation.MaterialPaint, new Vector3( 2, 0, 0 ), new Vector3( 3, 4, 0 ) )
+		};
+		var cases = 0;
+		for ( var z = -6; z <= 6; z++ )
+		for ( var y = -8; y <= 8; y++ )
+		for ( var x = -8; x <= 8; x++ )
+		{
+			var sample = new Vector3( x, y, z );
+			var proceduralDistance = z - 0.25f * x;
+			var incrementalDistance = proceduralDistance;
+			var incrementalMaterial = proceduralDistance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air;
+			foreach ( var operation in operations )
+			{
+				incrementalDistance = VoxelEditJournal.ApplyDistance( operation, sample, incrementalDistance );
+				var sourceMaterial = incrementalMaterial == VoxelMaterial.Air ? VoxelMaterial.Terrain : incrementalMaterial;
+				incrementalMaterial = VoxelEditJournal.ApplyMaterial( operation, sample, incrementalDistance, sourceMaterial );
+			}
+
+			var replayDistance = VoxelEditJournal.EvaluateDistance( operations, sample, proceduralDistance );
+			var replayMaterial = VoxelEditJournal.EvaluateMaterial( operations, sample, replayDistance, VoxelMaterial.Terrain );
+			Require( incrementalDistance == replayDistance, $"incremental distance diverged at {sample}" );
+			Require( incrementalMaterial == replayMaterial, $"incremental material diverged at {sample}" );
+			cases++;
+		}
+		return new VoxelEditProofReport( true, string.Empty, cases, operations.Length, 0 );
 	}
 
 	private static VoxelEditOp Operation( VoxelEditShape shape, VoxelCsgOperation operation, Vector3 position, Vector3 size, float smoothness = 0.0f ) => new()

@@ -1415,21 +1415,29 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var changedChunks = new List<Vector3Int>();
 		var writeWaitStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		System.TimeSpan writeWaitElapsed;
+		System.TimeSpan sdfMutationElapsed;
 		VoxelEditOp operation;
+		long testedSamples = 0;
+		long changedSamples = 0;
 		lock ( _sdfLock )
 		{
 			writeWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( writeWaitStart );
+			var sdfMutationStart = System.Diagnostics.Stopwatch.GetTimestamp();
 			operation = _editJournal.Append( requestedOperation );
 			var affectedChunks = VoxelEditInvalidation.GetCpuChunks( operation, ChunkSize );
 			CountCall( ref _callBrushChunkTests, affectedChunks.Count );
 			foreach ( var coordinate in affectedChunks )
 			{
 				if ( !_chunks.TryGetValue( coordinate, out var chunk ) ) continue;
-				FillChunk( chunk, ChunkSize );
-				changedChunks.Add( coordinate );
+				var changed = ApplyEditToChunk( chunk, operation, out var tested );
+				testedSamples += tested;
+				changedSamples += changed;
+				if ( changed > 0 ) changedChunks.Add( coordinate );
 			}
+			sdfMutationElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( sdfMutationStart );
 		}
 
+		var cpuQueueStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		foreach ( var coordinate in changedChunks )
 		{
 			if ( _cpuChunkStates.TryGetValue( coordinate, out var cpuState ) )
@@ -1441,21 +1449,63 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		MergeCoherentVisualEditBatch( changedChunks );
 		ActivatePlayerSafetyForEdit( changedChunks );
 		PumpCpuChunkBuildQueue();
+		var cpuQueueElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( cpuQueueStart );
 		var gpuDirtyBlocks = 0;
+		var gpuQueueStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( _gpuTerrainBackend is not null )
 		{
 			var snapshot = _editJournal.CreateGpuSnapshot( out var editCount );
 			gpuDirtyBlocks = _gpuTerrainBackend.QueueEdit( snapshot, editCount, operation, operation.WorldRevision );
 		}
+		var gpuQueueElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( gpuQueueStart );
 
 		var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime( startTimestamp );
 		Log.Info(
 			$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
 			$"dirtyCpuChunks={changedChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
-			$"cpuCollisionQueued={changedChunks.Count:N0}, sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, total={elapsed.TotalMilliseconds:F2} ms."
+			$"cpuCollisionQueued={changedChunks.Count:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
+			$"sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, sdfMutation={sdfMutationElapsed.TotalMilliseconds:F2}ms, " +
+			$"cpuQueue={cpuQueueElapsed.TotalMilliseconds:F2}ms, gpuQueue={gpuQueueElapsed.TotalMilliseconds:F2}ms, total={elapsed.TotalMilliseconds:F2}ms."
 		);
 
 		return System.Math.Max( changedChunks.Count, gpuDirtyBlocks );
+	}
+
+	private int ApplyEditToChunk( VoxelChunk chunk, VoxelEditOp operation, out long testedSampleCount )
+	{
+		var chunkOrigin = GetChunkVoxelOrigin( chunk.Coordinate );
+		var bounds = VoxelEditJournal.GetBounds( operation );
+		var chunkMaximum = chunkOrigin + new Vector3( chunk.Size );
+		if ( bounds.Maxs.x < chunkOrigin.x || bounds.Mins.x > chunkMaximum.x ||
+			 bounds.Maxs.y < chunkOrigin.y || bounds.Mins.y > chunkMaximum.y ||
+			 bounds.Maxs.z < chunkOrigin.z || bounds.Mins.z > chunkMaximum.z )
+		{
+			testedSampleCount = 0;
+			return 0;
+		}
+
+		var minimumX = System.Math.Clamp( (int)System.MathF.Floor( bounds.Mins.x - chunkOrigin.x ), 0, chunk.Size );
+		var maximumX = System.Math.Clamp( (int)System.MathF.Ceiling( bounds.Maxs.x - chunkOrigin.x ), 0, chunk.Size );
+		var minimumY = System.Math.Clamp( (int)System.MathF.Floor( bounds.Mins.y - chunkOrigin.y ), 0, chunk.Size );
+		var maximumY = System.Math.Clamp( (int)System.MathF.Ceiling( bounds.Maxs.y - chunkOrigin.y ), 0, chunk.Size );
+		var minimumZ = System.Math.Clamp( (int)System.MathF.Floor( bounds.Mins.z - chunkOrigin.z ), 0, chunk.Size );
+		var maximumZ = System.Math.Clamp( (int)System.MathF.Ceiling( bounds.Maxs.z - chunkOrigin.z ), 0, chunk.Size );
+		testedSampleCount = checked( (long)(maximumX - minimumX + 1) * (maximumY - minimumY + 1) * (maximumZ - minimumZ + 1) );
+		CountCall( ref _callBrushSamplesTested, testedSampleCount );
+		var changedSampleCount = 0;
+		for ( var z = minimumZ; z <= maximumZ; z++ )
+		for ( var y = minimumY; y <= maximumY; y++ )
+		for ( var x = minimumX; x <= maximumX; x++ )
+		{
+			var canonicalSample = new Vector3( chunkOrigin.x + x, chunkOrigin.y + y, chunkOrigin.z + z );
+			var existing = chunk.GetVoxel( x, y, z );
+			var distance = VoxelEditJournal.ApplyDistance( operation, canonicalSample, existing.Distance );
+			var sourceMaterial = existing.Material == VoxelMaterial.Air ? VoxelMaterial.Terrain : existing.Material;
+			var material = VoxelEditJournal.ApplyMaterial( operation, canonicalSample, distance, sourceMaterial );
+			if ( chunk.SetVoxelIfChanged( x, y, z, new Voxel( distance, material ) ) ) changedSampleCount++;
+		}
+		CountCall( ref _callBrushSamplesChanged, changedSampleCount );
+		return changedSampleCount;
 	}
 
 	public float QuerySdf( Vector3 worldPosition )
@@ -1808,53 +1858,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var scaledIndices = checked( (int)System.Math.Min( MaximumGpuIndexPoolCapacity, (indexNumerator + denominator - 1) / denominator ) );
 		EffectiveGpuVertexPoolCapacity = System.Math.Clamp( System.Math.Max( DefaultGpuVertexPoolCapacity, scaledVertices ), 65536, MaximumGpuVertexPoolCapacity );
 		EffectiveGpuIndexPoolCapacity = System.Math.Clamp( System.Math.Max( DefaultGpuIndexPoolCapacity, scaledIndices ), 196608, MaximumGpuIndexPoolCapacity );
-	}
-
-	private int DisplaceChunkSdf( VoxelChunk chunk, Vector3 brushCenter, float brushRadius, float sdfDisplacement )
-	{
-		var chunkOrigin = GetChunkVoxelOrigin( chunk.Coordinate );
-		var minimumX = System.Math.Clamp( (int)System.MathF.Floor( brushCenter.x - brushRadius - chunkOrigin.x ), 0, chunk.Size );
-		var maximumX = System.Math.Clamp( (int)System.MathF.Ceiling( brushCenter.x + brushRadius - chunkOrigin.x ), 0, chunk.Size );
-		var minimumY = System.Math.Clamp( (int)System.MathF.Floor( brushCenter.y - brushRadius - chunkOrigin.y ), 0, chunk.Size );
-		var maximumY = System.Math.Clamp( (int)System.MathF.Ceiling( brushCenter.y + brushRadius - chunkOrigin.y ), 0, chunk.Size );
-		var minimumZ = System.Math.Clamp( (int)System.MathF.Floor( brushCenter.z - brushRadius - chunkOrigin.z ), 0, chunk.Size );
-		var maximumZ = System.Math.Clamp( (int)System.MathF.Ceiling( brushCenter.z + brushRadius - chunkOrigin.z ), 0, chunk.Size );
-		var radiusSquared = brushRadius * brushRadius;
-		var sampleSize = chunk.SampleSize;
-		var sampleLayer = sampleSize * sampleSize;
-		var changedSampleCount = 0;
-		var testedSampleCount = checked( (long)(maximumX - minimumX + 1) * (maximumY - minimumY + 1) * (maximumZ - minimumZ + 1) );
-		CountCall( ref _callBrushSamplesTested, testedSampleCount );
-
-		for ( var z = minimumZ; z <= maximumZ; z++ )
-		{
-			var zDistance = chunkOrigin.z + z - brushCenter.z;
-			for ( var y = minimumY; y <= maximumY; y++ )
-			{
-				var yDistance = chunkOrigin.y + y - brushCenter.y;
-				for ( var x = minimumX; x <= maximumX; x++ )
-				{
-					var xDistance = chunkOrigin.x + x - brushCenter.x;
-					var distanceSquared = xDistance * xDistance + yDistance * yDistance + zDistance * zDistance;
-					if ( distanceSquared >= radiusSquared )
-					{
-						continue;
-					}
-
-					var normalizedDistance = System.MathF.Sqrt( distanceSquared ) / brushRadius;
-					var falloff = 1.0f - normalizedDistance;
-					falloff = falloff * falloff * (3.0f - 2.0f * falloff);
-					var index = x + sampleSize * y + sampleLayer * z;
-					var distance = chunk.GetDistanceByIndex( index ) + sdfDisplacement * falloff;
-					var material = distance < 0.0f ? VoxelMaterial.Terrain : VoxelMaterial.Air;
-					chunk.SetVoxelByIndex( index, new Voxel( distance, material ) );
-					changedSampleCount++;
-				}
-			}
-		}
-
-		CountCall( ref _callBrushSamplesChanged, changedSampleCount );
-		return changedSampleCount;
 	}
 
 	private float[] CreateSdfHalo( VoxelChunk chunk )
@@ -2308,7 +2311,17 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var observers = GetStreamingObserverChunks();
 		var desired = new HashSet<Vector3Int>();
 		PopulateDesiredChunkCoordinates( observers, desired );
-		if ( _desiredChunkCoordinates.SetEquals( desired ) ) return;
+		if ( _desiredChunkCoordinates.SetEquals( desired ) )
+		{
+			if ( _chunkGameObjects.Count > desired.Count )
+			{
+				var staleChunkObjects = new List<Vector3Int>();
+				foreach ( var coordinate in _chunkGameObjects.Keys )
+					if ( !desired.Contains( coordinate ) ) staleChunkObjects.Add( coordinate );
+				foreach ( var coordinate in staleChunkObjects ) DestroyChunkGameObject( coordinate );
+			}
+			return;
+		}
 		var previousDesiredCount = _desiredChunkCoordinates.Count;
 		var leavingVisualCount = 0;
 		foreach ( var coordinate in _cpuChunkStates.Keys ) leavingVisualCount += desired.Contains( coordinate ) ? 0 : 1;

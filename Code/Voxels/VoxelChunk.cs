@@ -47,6 +47,11 @@ public sealed class VoxelChunk
 		SetVoxelByIndex( GetIndex( x, y, z ), voxel );
 	}
 
+	internal bool SetVoxelIfChanged( int x, int y, int z, Voxel voxel )
+	{
+		return SetVoxelByIndexIfChanged( GetIndex( x, y, z ), voxel );
+	}
+
 	internal Voxel GetVoxelByIndex( int index )
 	{
 		ValidateIndex( index );
@@ -63,18 +68,25 @@ public sealed class VoxelChunk
 
 	internal void SetVoxelByIndex( int index, Voxel voxel )
 	{
+		SetVoxelByIndexIfChanged( index, voxel );
+	}
+
+	internal bool SetVoxelByIndexIfChanged( int index, Voxel voxel )
+	{
 		ValidateIndex( index );
 		var encodedDistance = EncodeDistance( voxel.Distance );
 		var encodedMaterial = (byte)voxel.Material;
-
-		if ( IsUniform && encodedDistance == _uniformDistance && encodedMaterial == _uniformMaterial )
+		var existingDistance = IsUniform ? _uniformDistance : _distances[index];
+		var existingMaterial = IsUniform ? _uniformMaterial : _materials[index];
+		if ( encodedDistance == existingDistance && encodedMaterial == existingMaterial )
 		{
-			return;
+			return false;
 		}
 
 		EnsureExpanded();
 		_distances[index] = encodedDistance;
 		_materials[index] = encodedMaterial;
+		return true;
 	}
 
 	internal void Fill( Voxel voxel )

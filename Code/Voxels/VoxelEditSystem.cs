@@ -78,11 +78,14 @@ internal sealed class VoxelEditJournal
 	{
 		var distance = proceduralDistance;
 		foreach ( var operation in operations )
-		{
-			if ( operation.Operation == VoxelCsgOperation.MaterialPaint || !Contains( operation, canonicalSample ) ) continue;
-			distance = ApplyDistance( distance, ShapeDistance( operation, canonicalSample ), operation.Operation, operation.Smoothness );
-		}
+			distance = ApplyDistance( operation, canonicalSample, distance );
 		return distance;
+	}
+
+	public static float ApplyDistance( VoxelEditOp operation, Vector3 canonicalSample, float existingDistance )
+	{
+		if ( operation.Operation == VoxelCsgOperation.MaterialPaint || !Contains( operation, canonicalSample ) ) return existingDistance;
+		return ApplyDistance( existingDistance, ShapeDistance( operation, canonicalSample ), operation.Operation, operation.Smoothness );
 	}
 
 	public VoxelMaterial EvaluateMaterial( Vector3 canonicalSample, float distance, VoxelMaterial proceduralMaterial )
@@ -92,11 +95,15 @@ internal sealed class VoxelEditJournal
 	{
 		var material = distance < 0.0f ? proceduralMaterial : VoxelMaterial.Air;
 		foreach ( var operation in operations )
-		{
-			if ( operation.Operation != VoxelCsgOperation.MaterialPaint || !Contains( operation, canonicalSample ) || ShapeDistance( operation, canonicalSample ) > 0.0f ) continue;
-			material = (VoxelMaterial)System.Math.Clamp( operation.MaterialId, (ushort)0, (ushort)byte.MaxValue );
-		}
+			material = ApplyMaterial( operation, canonicalSample, distance, material );
 		return distance < 0.0f ? material : VoxelMaterial.Air;
+	}
+
+	public static VoxelMaterial ApplyMaterial( VoxelEditOp operation, Vector3 canonicalSample, float distance, VoxelMaterial existingMaterial )
+	{
+		if ( distance >= 0.0f ) return VoxelMaterial.Air;
+		if ( operation.Operation != VoxelCsgOperation.MaterialPaint || !Contains( operation, canonicalSample ) || ShapeDistance( operation, canonicalSample ) > 0.0f ) return existingMaterial;
+		return (VoxelMaterial)System.Math.Clamp( operation.MaterialId, (ushort)0, (ushort)byte.MaxValue );
 	}
 
 	public VoxelGpuEditOp[] CreateGpuSnapshot()
