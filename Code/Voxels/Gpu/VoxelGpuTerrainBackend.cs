@@ -985,13 +985,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		for ( var index = 0; index < scheduledCount; index++ )
 		{
 			var item = _transitionBatch.Requests[index];
-			if ( !item.Key.IsTransition || item.Key.TransitionSlotId < 0 || item.Key.TransitionSlotId >= _clipboxTransitions.Capacity || !_residents.TryReserve( item.Key, item.Generation, out var slot ) )
+			if ( !TryResolveTransitionPlan( item.Key, out var entry, out var assignment ) || !_residents.TryReserve( item.Key, item.Generation, out var slot ) )
 			{
 				_diagnostics.BackpressureEvents++;
 				continue;
 			}
-			var entry = _clipboxTransitions.Desired[item.Key.TransitionSlotId];
-			var assignment = _clipboxPlanner.DesiredTransitions[item.Key.TransitionSlotId];
 			var fineStep = 1 << entry.FineLevel;
 			var coarseStep = 1 << entry.CoarseLevel;
 			_transitionBatch.Requests[acceptedCount] = item;
@@ -1017,6 +1015,32 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.CountSubmissionMilliseconds += submissionMilliseconds;
 	}
 
+	private bool TryResolveTransitionPlan( VoxelVisualBlockKey key, out VoxelGpuTransitionMetadataEntry entry, out VoxelClipboxTransitionSlotAssignment assignment )
+	{
+		entry = default;
+		assignment = default;
+		if ( !key.IsTransition || key.TransitionSlotId < 0 || key.TransitionSlotId >= _clipboxTransitions.Capacity ) return false;
+
+		var slot = key.TransitionSlotId;
+		var desiredAssignment = _clipboxPlanner.DesiredTransitions[slot];
+		if ( desiredAssignment.Active && VoxelClipboxTransitionPlanner.GetVisualKey( desiredAssignment ) == key )
+		{
+			entry = _clipboxTransitions.Desired[slot];
+			assignment = desiredAssignment;
+			return true;
+		}
+
+		var currentAssignment = _clipboxPlanner.CurrentTransitions[slot];
+		if ( currentAssignment.Active && VoxelClipboxTransitionPlanner.GetVisualKey( currentAssignment ) == key )
+		{
+			entry = _clipboxTransitions.Current[slot];
+			assignment = currentAssignment;
+			return true;
+		}
+
+		return false;
+	}
+
 	private void ProcessTransitionCountReadback()
 	{
 		if ( _transitionBatch.Count == 0 || !_transitionScratch.TryTakeCounts( out var counts, out var count, out var readbackMilliseconds ) ) return;
@@ -1030,7 +1054,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		{
 			var scheduled = _transitionBatch.Requests[index];
 			var countResult = counts[index];
-			var dependencyValid = scheduled.Key.TransitionSlotId >= 0 && scheduled.Key.TransitionSlotId < _clipboxTransitions.Capacity && _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId].DependenciesValid;
+			var dependencyValid = TryResolveTransitionPlan( scheduled.Key, out var entry, out _ ) && entry.DependenciesValid;
 			var schedulerCurrent = _transitionScheduler.IsCurrent( scheduled.Key, scheduled.Generation );
 			if ( !schedulerCurrent )
 			{
@@ -1055,7 +1079,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			{
 				RemovePendingTransitionRequest( scheduled.Key );
 				_residents.TryPublish( _transitionBatch.Slots[index], scheduled.Key, scheduled.Generation, default, new VoxelGpuResidentDescriptor { Generation = scheduled.Generation }, _clipboxPlanner is null, out _ );
-				_publishedTransitionDependencies[scheduled.Key] = _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId].Key;
+				_publishedTransitionDependencies[scheduled.Key] = entry.Key;
 				continue;
 			}
 			if ( countResult.Overflow != 0 || countResult.VertexCount > int.MaxValue || countResult.IndexCount > int.MaxValue )
@@ -1076,7 +1100,6 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				else BlockTransitionRequest( scheduled.Key, (int)countResult.VertexCount, (int)countResult.IndexCount );
 				continue;
 			}
-			var entry = _clipboxTransitions.Desired[scheduled.Key.TransitionSlotId];
 			var scale = 1 << entry.FineLevel;
 			var drawOrigin = VoxelGpuCanonicalCoordinates.WorldFromCanonicalSamples( new Vector3( VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( entry.FineCoordinate, entry.FineLevel, _chunkSize ) ), _voxelSize );
 			var extent = _chunkSize * scale * _voxelSize;
@@ -1185,7 +1208,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				Generation = scheduled.Generation,
 				ResidentSlot = (uint)activeBatch.Slots[index],
 				RequestIndex = (uint)index,
-				Flags = 1,
+				// The emit pass already reads this descriptor. Packing the six-bit
+				// transition mask here avoids another structured-buffer fetch for
+				// every regular vertex while preserving bit 0 as the regular flag.
+				Flags = 1u | (scheduled.Key.TransitionFaceMask << 8),
 				DrawOrigin = new Vector4( drawOrigin, 0.0f ),
 				DrawScale = new Vector4( drawScale, drawScale, drawScale, 0.0f )
 			};
@@ -1242,7 +1268,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			{
 				var resident = publication.Residents[residentIndex];
 				var schedulerCurrent = resident.Key.IsTransition ? _transitionScheduler.IsCurrent( resident.Key, resident.Generation ) : _scheduler.IsCurrent( resident.Key, resident.Generation );
-				var dependencyCurrent = !resident.Key.IsTransition || (resident.Key.TransitionSlotId >= 0 && resident.Key.TransitionSlotId < _clipboxTransitions.Capacity && _clipboxTransitions.Desired[resident.Key.TransitionSlotId].Key == resident.TransitionDependency);
+				var dependencyCurrent = !resident.Key.IsTransition || (TryResolveTransitionPlan( resident.Key, out var transitionEntry, out _ ) && transitionEntry.Key == resident.TransitionDependency);
 				if ( resident.Key.IsTransition )
 				{
 					if ( !schedulerCurrent ) _diagnostics.TransitionStaleSchedulerRejections++;

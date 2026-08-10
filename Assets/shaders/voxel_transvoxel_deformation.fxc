@@ -10,6 +10,11 @@ float TransitionSecondaryCoordinate( float coordinate, int chunkSize, bool negat
 
 float3 TransitionSecondaryLocalPosition( float3 position, uint faceMask, int chunkSize )
 {
+	// Regular blocks overwhelmingly have no transition faces. Keep their vertex
+	// emission on the original straight-line path instead of evaluating six
+	// boundary tests and three coordinate transforms per emitted vertex.
+	if ( faceMask == 0u ) return position;
+
 	uint boundaryMask = 0u;
 	if ( position.x < 1.0f ) boundaryMask |= 1u;
 	if ( position.x > (float)(chunkSize - 1) ) boundaryMask |= 2u;

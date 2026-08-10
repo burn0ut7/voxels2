@@ -9,14 +9,12 @@ CS
 	#include "system.fxc"
 	#include "voxel_transvoxel_deformation.fxc"
 	struct VoxelGpuVertex { float3 Position; float3 Normal; float3 Tangent; float2 TexCoord; };
-	struct BlockRequest { float4 SampleOrigin; float4 SampleScale; int CoordinateX; int CoordinateY; int CoordinateZ; int Lod; uint RuleVersion; uint Generation; uint ResidentSlot; uint TransitionFaceMask; };
 	struct AllocationDescriptor { uint VertexOffset; uint VertexCapacity; uint IndexOffset; uint IndexCapacity; uint Generation; uint ResidentSlot; uint RequestIndex; uint Flags; float4 DrawOrigin; float4 DrawScale; };
 	StructuredBuffer<float> DensitySamples < Attribute( "DensitySamples" ); >;
 	StructuredBuffer<uint> EdgeFlags < Attribute( "EdgeFlags" ); >;
 	StructuredBuffer<uint> EdgeVertexIds < Attribute( "EdgeVertexIds" ); >;
 	StructuredBuffer<uint> EdgeGroupSums < Attribute( "EdgeGroupSums" ); >;
 	StructuredBuffer<AllocationDescriptor> Allocations < Attribute( "Allocations" ); >;
-	StructuredBuffer<BlockRequest> BlockRequests < Attribute( "BlockRequests" ); >;
 	RWStructuredBuffer<VoxelGpuVertex> OutputVertices < Attribute( "OutputVertices" ); >;
 	int SampleSize < Attribute( "SampleSize" ); >; int HaloSize < Attribute( "HaloSize" ); >; int HaloSampleCount < Attribute( "HaloSampleCount" ); >;
 	int EdgeSlotCount < Attribute( "EdgeSlotCount" ); >; int EdgeGroupCount < Attribute( "EdgeGroupCount" ); >; int BatchSize < Attribute( "BatchSize" ); >;
@@ -30,7 +28,7 @@ CS
 		uint slot=id.x;if(slot>=(uint)EdgeSlotCount*(uint)BatchSize)return;uint block=slot/(uint)EdgeSlotCount,localSlot=slot-block*(uint)EdgeSlotCount;if(EdgeFlags[slot]==0)return;
 		uint localVertex=EdgeGroupSums[block*(uint)EdgeGroupCount+localSlot/256]+EdgeVertexIds[slot];AllocationDescriptor allocation=Allocations[block];if(localVertex>=allocation.VertexCapacity)return;
 		uint sample=localSlot/3,axis=localSlot-sample*3;uint3 a=Decode3D(sample,SampleSize),b=a;if(axis==0)b.x++;else if(axis==1)b.y++;else b.z++;
-		float da=Distance(block,int3(a)),db=Distance(block,int3(b)),den=da-db,t=abs(den)>.000001f?da/den:.5f;t=clamp(t,0,1);float3 localCell=lerp(float3(a),float3(b),t);localCell=TransitionSecondaryLocalPosition(localCell,BlockRequests[block].TransitionFaceMask,SampleSize-1);float3 local=localCell*VoxelSize*allocation.DrawScale.xyz,n=Safe(lerp(Gradient(block,int3(a)),Gradient(block,int3(b)),t),float3(0,0,1));
+		float da=Distance(block,int3(a)),db=Distance(block,int3(b)),den=da-db,t=abs(den)>.000001f?da/den:.5f;t=clamp(t,0,1);float3 localCell=lerp(float3(a),float3(b),t);localCell=TransitionSecondaryLocalPosition(localCell,allocation.Flags>>8,SampleSize-1);float3 local=localCell*VoxelSize*allocation.DrawScale.xyz,n=Safe(lerp(Gradient(block,int3(a)),Gradient(block,int3(b)),t),float3(0,0,1));
 		VoxelGpuVertex output;output.Position=local+allocation.DrawOrigin.xyz;output.Normal=n;output.Tangent=abs(n.z)<.999f?Safe(cross(float3(0,0,1),n),float3(1,0,0)):float3(1,0,0);output.TexCoord=local.xy/128;OutputVertices[allocation.VertexOffset+localVertex]=output;
 	}
 }

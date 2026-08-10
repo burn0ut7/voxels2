@@ -77,7 +77,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private long _lastGpuStreamingLogTimestamp;
 	private bool _gpuStreamingObserversInitialized;
 	private bool _gpuClipboxObserverInitialized;
-	private Vector3Int _gpuClipboxObserverCanonicalSample;
+	private Vector3Int _gpuClipboxObserverBaseBlock;
 	private int _gpuDesiredBlockCount;
 	private int _slowGpuStreamingLogCount;
 	private int _idleStutterDiagnosticCount;
@@ -758,7 +758,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			if ( clipboxConfig.HasValue )
 			{
 				_gpuDesiredBlockCount = clipboxConfig.Value.ExpectedActiveRegularCount;
-				_gpuTerrainBackend.QueueClipboxObserver( GetGpuObserverCanonicalSample() );
+				var observer = GetGpuObserverCanonicalSample();
+				_gpuTerrainBackend.QueueClipboxObserver( observer );
+				_gpuClipboxObserverInitialized = true;
+				_gpuClipboxObserverBaseBlock = VoxelClipboxCoordinates.GetObserverBaseBlock( observer );
 			}
 			else
 			{
@@ -2118,9 +2121,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private void UpdateGpuClipboxStreaming()
 	{
 		var observer = GetGpuObserverCanonicalSample();
-		if ( _gpuClipboxObserverInitialized && observer == _gpuClipboxObserverCanonicalSample ) return;
+		var observerBaseBlock = GetStableGpuClipboxObserverBaseBlock( observer );
+		// A clipbox plan changes only when its quantized base block changes. Tracking
+		// raw voxel samples restarted the same pending plan every frame while a
+		// player moved inside one block, duplicating seam generations and readbacks.
+		if ( _gpuClipboxObserverInitialized && observerBaseBlock == _gpuClipboxObserverBaseBlock ) return;
 		_gpuClipboxObserverInitialized = true;
-		_gpuClipboxObserverCanonicalSample = observer;
+		_gpuClipboxObserverBaseBlock = observerBaseBlock;
 		var updateStart = System.Diagnostics.Stopwatch.GetTimestamp();
 		if ( !_gpuTerrainBackend.QueueClipboxObserver( observer ) ) return;
 		_gpuDesiredBlockCount = _gpuTerrainBackend.DesiredBlockCount;
@@ -2132,6 +2139,24 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var updateMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( updateStart ).TotalMilliseconds;
 		if ( updateMilliseconds >= 8.0 && System.Threading.Interlocked.Increment( ref _slowGpuStreamingLogCount ) <= 32 )
 			Log.Info( $"Voxel GPU clipbox streaming hitch trace: {updateMilliseconds:F2}ms, observer={observer}, active={_gpuDesiredBlockCount:N0}." );
+	}
+
+	private Vector3Int GetStableGpuClipboxObserverBaseBlock( Vector3Int observer )
+	{
+		if ( !_gpuClipboxObserverInitialized ) return VoxelClipboxCoordinates.GetObserverBaseBlock( observer );
+		return new Vector3Int(
+			GetStableGpuClipboxObserverAxis( observer.x, _gpuClipboxObserverBaseBlock.x ),
+			GetStableGpuClipboxObserverAxis( observer.y, _gpuClipboxObserverBaseBlock.y ),
+			GetStableGpuClipboxObserverAxis( observer.z, _gpuClipboxObserverBaseBlock.z ) );
+	}
+
+	private static int GetStableGpuClipboxObserverAxis( int sample, int currentBlock )
+	{
+		const int hysteresisSamples = 1;
+		var minimum = (long)currentBlock * VoxelClipboxConfig.CellsPerBlock;
+		var maximumExclusive = minimum + VoxelClipboxConfig.CellsPerBlock;
+		if ( sample >= minimum - hysteresisSamples && sample < maximumExclusive + hysteresisSamples ) return currentBlock;
+		return VoxelClipboxCoordinates.FloorDiv( sample, VoxelClipboxConfig.CellsPerBlock );
 	}
 
 	private Vector3Int GetGpuObserverCanonicalSample()
