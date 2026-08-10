@@ -626,7 +626,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		var readbackMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( readbackStart ).TotalMilliseconds;
 		var readbackBytes = (long)maximumVertexEnd * 44 + (long)maximumIndexEnd * sizeof( uint );
 
-		var positionTolerance = System.MathF.Max( 0.0001f, _voxelSize * 0.0001f );
+		var positionTolerance = System.MathF.Max( 0.0001f, _voxelSize * 0.0005f );
 		var regularPositions = new Dictionary<SeamPositionKey, Vector3>();
 		var triangleOwners = new Dictionary<SeamTriangleKey, SeamTriangleOwner>();
 		var invalidIndices = 0;

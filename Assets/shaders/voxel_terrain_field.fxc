@@ -46,10 +46,20 @@ float VoxelTerrainSimplexNoise( float2 point, int seed )
 	return 70.0f * value;
 }
 
+float EvaluateTerrainSurfaceHeight( float2 canonicalSample, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	return simplexBaseHeight + VoxelTerrainSimplexNoise( canonicalSample * simplexFrequency, simplexSeed ) * simplexAmplitude;
+}
+
+float EvaluateTerrainDensityFromSurfaceHeight( float canonicalSampleZ, float surfaceHeight, float sdfClampDistance )
+{
+	return clamp( canonicalSampleZ - surfaceHeight, -sdfClampDistance, sdfClampDistance );
+}
+
 float EvaluateTerrainDensity( float3 canonicalSample, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
 {
-	float surfaceHeight = simplexBaseHeight + VoxelTerrainSimplexNoise( canonicalSample.xy * simplexFrequency, simplexSeed ) * simplexAmplitude;
-	return clamp( canonicalSample.z - surfaceHeight, -sdfClampDistance, sdfClampDistance );
+	float surfaceHeight = EvaluateTerrainSurfaceHeight( canonicalSample.xy, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	return EvaluateTerrainDensityFromSurfaceHeight( canonicalSample.z, surfaceHeight, sdfClampDistance );
 }
 
 struct VoxelEditOperation
@@ -92,9 +102,8 @@ float VoxelSmoothMinimum( float first, float second, float smoothing )
 	return lerp( second, first, blend ) - smoothing * blend * (1.0f - blend);
 }
 
-float EvaluateEditedTerrainDensity( float3 canonicalSample, uint editOperationCount, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+float ApplyTerrainEdits( float3 canonicalSample, uint editOperationCount, float density, float sdfClampDistance )
 {
-	float density = EvaluateTerrainDensity( canonicalSample, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
 	[loop] for ( uint index = 0; index < editOperationCount; index++ )
 	{
 		VoxelEditOperation edit = VoxelEditOperations[index];
@@ -107,7 +116,20 @@ float EvaluateEditedTerrainDensity( float3 canonicalSample, uint editOperationCo
 		else if ( edit.Operation == 2 ) density = VoxelSmoothMinimum( density, shape, edit.PositionAndSmoothness.w );
 		else if ( edit.Operation == 3 ) density = -VoxelSmoothMinimum( -density, shape, edit.PositionAndSmoothness.w );
 	}
-	return clamp( density, -sdfClampDistance, sdfClampDistance );
+	density = clamp( density, -sdfClampDistance, sdfClampDistance );
+	return abs( density ) < 0.001f ? 0.001f : density;
+}
+
+float EvaluateEditedTerrainDensityFromSurfaceHeight( float3 canonicalSample, uint editOperationCount, float surfaceHeight, float sdfClampDistance )
+{
+	float density = EvaluateTerrainDensityFromSurfaceHeight( canonicalSample.z, surfaceHeight, sdfClampDistance );
+	return ApplyTerrainEdits( canonicalSample, editOperationCount, density, sdfClampDistance );
+}
+
+float EvaluateEditedTerrainDensity( float3 canonicalSample, uint editOperationCount, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
+{
+	float surfaceHeight = EvaluateTerrainSurfaceHeight( canonicalSample.xy, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
+	return EvaluateEditedTerrainDensityFromSurfaceHeight( canonicalSample, editOperationCount, surfaceHeight, sdfClampDistance );
 }
 
 float3 EvaluateEditedTerrainGradient( float3 canonicalSample, uint editOperationCount, float sampleStep, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )

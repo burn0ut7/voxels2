@@ -22,7 +22,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	private static readonly string[] ComputeShaderNames =
 	{
 		"shaders/voxel_gpu_count_clear_cs.shader",
-		"shaders/voxel_gpu_transvoxel_density_cs.shader",
+		"shaders/voxel_gpu_density_material_v1_cs.shader",
 		"shaders/voxel_gpu_classify_regular_cs.shader",
 		"shaders/voxel_gpu_scan_regular_cs.shader",
 		"shaders/voxel_gpu_scan_regular_cs.shader",
@@ -42,6 +42,8 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 
 	private readonly ComputeShader[] _phases = new ComputeShader[PhaseCount];
 	private readonly GpuBuffer<GpuBlockInput> _blocks;
+	private readonly GpuBuffer<VoxelGpuBlockRequest> _requests;
+	private readonly GpuBuffer<VoxelGpuEditOp> _editOperations;
 	private readonly GpuBuffer<float> _densitySamples;
 	private readonly GpuBuffer<uint> _regularLookup;
 	private readonly int _regularGeometryCountsOffset;
@@ -62,6 +64,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	private readonly Sandbox.Rendering.CommandList _computeCommands;
 	private readonly CameraComponent _camera;
 	private readonly VoxelMeshData _cpuReference;
+	private readonly float[] _cpuDensity;
 	private readonly Vector3 _drawOrigin;
 	private readonly int _chunkSize;
 	private readonly int _sampleSize;
@@ -103,19 +106,26 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		SceneWorld sceneWorld,
 		CameraComponent camera,
 		VoxelMeshData cpuReference,
+		float[] cpuDensity,
 		Vector3 sampleOrigin,
 		Vector3 drawOrigin,
 		int chunkSize,
 		float voxelSize,
-		float sdfClampDistance )
+		float sdfClampDistance,
+		float simplexFrequency,
+		float simplexAmplitude,
+		float simplexBaseHeight,
+		int simplexSeed )
 		: base( sceneWorld )
 	{
 		if ( camera is null ) throw new System.ArgumentNullException( nameof( camera ) );
 		if ( cpuReference is null ) throw new System.ArgumentNullException( nameof( cpuReference ) );
+		if ( cpuDensity is null ) throw new System.ArgumentNullException( nameof( cpuDensity ) );
 		if ( chunkSize < 1 ) throw new System.ArgumentOutOfRangeException( nameof( chunkSize ) );
 
 		_camera = camera;
 		_cpuReference = cpuReference;
+		_cpuDensity = cpuDensity;
 		_drawOrigin = drawOrigin;
 		_chunkSize = chunkSize;
 		var sampleSize = checked( chunkSize + 1 );
@@ -125,6 +135,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		_voxelSize = voxelSize;
 		_sdfClampDistance = sdfClampDistance;
 		_haloSampleCount = checked( haloSize * haloSize * haloSize );
+		if ( cpuDensity.Length != _haloSampleCount ) throw new System.ArgumentException( "CPU proof density must contain exactly one halo.", nameof( cpuDensity ) );
 		_cellCount = checked( chunkSize * chunkSize * chunkSize );
 		_edgeSlotCount = checked( sampleSize * sampleSize * sampleSize * 3 );
 		_edgeGroupCount = (_edgeSlotCount + 255) / 256;
@@ -134,6 +145,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		_maximumIndexCount = System.Math.Max( 393_216, checked( cpuReference.Indices.Count * MaximumBatchSize * 2 ) );
 
 		var blockInputs = new GpuBlockInput[MaximumBatchSize];
+		var requests = new VoxelGpuBlockRequest[MaximumBatchSize];
 		for ( var block = 0; block < blockInputs.Length; block++ )
 		{
 			var gridX = block % 16;
@@ -144,9 +156,19 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 				new Vector4( sampleOrigin + blockOffset, 0.0f ),
 				new Vector4( drawOrigin + new Vector3( blockOffset.x, blockOffset.y, 0.0f ), 0.0f )
 			);
+			requests[block] = new VoxelGpuBlockRequest
+			{
+				SampleOrigin = new Vector4( sampleOrigin + Vector3.Up * topologyOffset, 0.0f ),
+				SampleScale = new Vector4( 1.0f, 1.0f, 1.0f, 0.0f ),
+				Generation = 1,
+				ResidentSlot = (uint)block
+			};
 		}
 		_blocks = new GpuBuffer<GpuBlockInput>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Blocks" );
 		_blocks.SetData( blockInputs );
+		_requests = new GpuBuffer<VoxelGpuBlockRequest>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Requests" );
+		_requests.SetData( requests );
+		_editOperations = new GpuBuffer<VoxelGpuEditOp>( VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Edits" );
 		_densitySamples = new GpuBuffer<float>( checked( _haloSampleCount * MaximumBatchSize ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Proof Density" );
 		_regularGeometryCountsOffset = VoxelTransvoxelTables.RegularCellClass.Length;
 		_regularTriangleIndicesOffset = _regularGeometryCountsOffset + VoxelTransvoxelTables.RegularGeometryCounts.Length;
@@ -172,7 +194,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		for ( var phase = 0; phase < PhaseCount; phase++ )
 		{
 			_phases[phase] = new ComputeShader( ComputeShaderNames[phase] );
-			BindShader( _phases[phase], sampleSize, haloSize, voxelSize, sdfClampDistance );
+			BindShader( _phases[phase], sampleSize, haloSize, voxelSize, sdfClampDistance, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
 		}
 		_phases[0].Attributes.Set( "AllocationPass", 0 );
 		_phases[2].Attributes.Set( "PublicationPass", 0 );
@@ -195,6 +217,8 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 
 		_gpuBufferBytes =
 			(long)MaximumBatchSize * 32 +
+			(long)MaximumBatchSize * 64 +
+			(long)VoxelEditJournal.MaximumGpuOperations * 80 +
 			(long)_haloSampleCount * MaximumBatchSize * sizeof( float ) +
 			(long)(VoxelTransvoxelTables.RegularCellClass.Length + VoxelTransvoxelTables.RegularGeometryCounts.Length +
 				VoxelTransvoxelTables.RegularTriangleIndices.Length + VoxelTransvoxelTables.RegularVertexData.Length) * sizeof( uint ) +
@@ -304,7 +328,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		foreach ( var buffer in new GpuBuffer[] { _cells, _edgeFlags, _edgeVertexIds, _statistics, _edgeGroupSums, _cellGroupSums, _blockCounts } ) Graphics.ResourceBarrierTransition( buffer, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_phases[0].Dispatch( System.Math.Max( _cellCount, _edgeSlotCount ) * _currentBatchSize, 1, 1 ); ImmediateBarrier( _cells, _edgeFlags, _edgeVertexIds );
-		_phases[1].Dispatch( _haloSampleCount * _currentBatchSize, 1, 1 ); ImmediateBarrier( _densitySamples );
+		_phases[1].Dispatch( _haloSize * _haloSize * _currentBatchSize, 1, 1 ); ImmediateBarrier( _densitySamples );
 		_phases[2].Attributes.Set( "PublicationPass", 0 );
 		_phases[2].Dispatch( _cellCount * _currentBatchSize, 1, 1 ); ImmediateBarrier( _cells, _edgeFlags, _statistics );
 		_phases[3].Attributes.Set( "ScanPass", 0 );
@@ -336,7 +360,7 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 	private void BindCommandAttributes( Sandbox.Rendering.CommandList commands, int allocationPass )
 	{
 		var attributes = commands.Attributes;
-		attributes.Set( "Blocks", _blocks ); attributes.Set( "DensitySamples", _densitySamples ); attributes.Set( "RegularLookup", _regularLookup );
+		attributes.Set( "Blocks", _blocks ); attributes.Set( "BlockRequests", _requests ); attributes.Set( "VoxelEditOperations", _editOperations ); attributes.Set( "DensitySamples", _densitySamples ); attributes.Set( "RegularLookup", _regularLookup );
 		attributes.Set( "Cells", _cells ); attributes.Set( "EdgeFlags", _edgeFlags ); attributes.Set( "EdgeVertexIds", _edgeVertexIds );
 		attributes.Set( "OutputVertices", _vertices ); attributes.Set( "OutputIndices", _indices ); attributes.Set( "Statistics", _statistics );
 		attributes.Set( "EdgeGroupSums", _edgeGroupSums ); attributes.Set( "CellGroupSums", _cellGroupSums ); attributes.Set( "BlockCounts", _blockCounts );
@@ -383,7 +407,36 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 			}
 			if ( vertexCount != _expectedVertexCount || indexCount != _expectedIndexCount )
 			{
-				CompleteFailureLocked( $"batch {_currentBatchSize} pooled counts differ: expected={_expectedVertexCount:N0}/{_expectedIndexCount:N0}, GPU={vertexCount:N0}/{indexCount:N0}, firstBlockScan={firstBlockCounts[0]:N0}/{firstBlockCounts[1]:N0}" );
+				var gpuDensity = new float[_haloSampleCount];
+				_densitySamples.GetData( gpuDensity, 0, gpuDensity.Length );
+				var firstMismatch = -1;
+				var signMismatches = 0;
+				var maximumDifference = 0.0f;
+				var gpuMinimum = float.MaxValue;
+				var gpuMaximum = float.MinValue;
+				var signMismatchDetails = new List<string>( 8 );
+				for ( var index = 0; index < gpuDensity.Length; index++ )
+				{
+					var difference = System.MathF.Abs( gpuDensity[index] - _cpuDensity[index] );
+					if ( firstMismatch < 0 && difference > 0.0001f ) firstMismatch = index;
+					if ( (gpuDensity[index] < 0.0f) != (_cpuDensity[index] < 0.0f) )
+					{
+						signMismatches++;
+						if ( signMismatchDetails.Count < 8 )
+						{
+							var z = index / (_haloSize * _haloSize);
+							var remainder = index - z * _haloSize * _haloSize;
+							var y = remainder / _haloSize;
+							var x = remainder - y * _haloSize;
+							signMismatchDetails.Add( $"{x},{y},{z}:{_cpuDensity[index]:F4}/{gpuDensity[index]:F4}" );
+						}
+					}
+					maximumDifference = System.MathF.Max( maximumDifference, difference );
+					gpuMinimum = System.MathF.Min( gpuMinimum, gpuDensity[index] );
+					gpuMaximum = System.MathF.Max( gpuMaximum, gpuDensity[index] );
+				}
+				var mismatchValues = firstMismatch < 0 ? "none" : $"{_cpuDensity[firstMismatch]:F4}/{gpuDensity[firstMismatch]:F4}";
+				CompleteFailureLocked( $"batch {_currentBatchSize} pooled counts differ: expected={_expectedVertexCount:N0}/{_expectedIndexCount:N0}, GPU={vertexCount:N0}/{indexCount:N0}, firstBlockScan={firstBlockCounts[0]:N0}/{firstBlockCounts[1]:N0}, densityFirstMismatch={firstMismatch} cpu/gpu={mismatchValues}, signMismatches={signMismatches:N0} [{string.Join( ";", signMismatchDetails )}], maxDifference={maximumDifference:F4}, gpuRange=[{gpuMinimum:F4},{gpuMaximum:F4}]" );
 				return;
 			}
 
@@ -501,10 +554,16 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		int sampleSize,
 		int haloSize,
 		float voxelSize,
-		float sdfClampDistance )
+		float sdfClampDistance,
+		float simplexFrequency,
+		float simplexAmplitude,
+		float simplexBaseHeight,
+		int simplexSeed )
 	{
 		var attributes = shader.Attributes;
 		attributes.Set( "Blocks", _blocks );
+		attributes.Set( "BlockRequests", _requests );
+		attributes.Set( "VoxelEditOperations", _editOperations );
 		attributes.Set( "DensitySamples", _densitySamples );
 		attributes.Set( "RegularLookup", _regularLookup );
 		attributes.Set( "RegularGeometryCountsOffset", _regularGeometryCountsOffset );
@@ -535,6 +594,10 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		attributes.Set( "MaxIndices", _maximumIndexCount );
 		attributes.Set( "VoxelSize", voxelSize );
 		attributes.Set( "SdfClampDistance", sdfClampDistance );
+		attributes.Set( "SimplexFrequency", simplexFrequency );
+		attributes.Set( "SimplexAmplitude", simplexAmplitude );
+		attributes.Set( "SimplexBaseHeight", simplexBaseHeight );
+		attributes.Set( "SimplexSeed", simplexSeed );
 	}
 
 	private void SetBatchSize( int batchSize )
@@ -596,7 +659,16 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 			var key = PositionKey( localPosition, tolerance );
 			if ( !cpuNormals.TryGetValue( key, out var cpuNormal ) )
 			{
-				failure = $"GPU vertex {index:N0} has no CPU position match at {localPosition}";
+				var nearestDistance = float.MaxValue;
+				var nearestPosition = Vector3.Zero;
+				foreach ( var cpuVertex in cpu.Vertices )
+				{
+					var distance = (cpuVertex.Position - localPosition).Length;
+					if ( distance >= nearestDistance ) continue;
+					nearestDistance = distance;
+					nearestPosition = cpuVertex.Position;
+				}
+				failure = $"GPU vertex {index:N0} has no CPU position match at {localPosition}; nearest={nearestPosition}, error={nearestDistance:F6}";
 				return false;
 			}
 			if ( Vector3.Dot( cpuNormal, gpuVertices[index].normal ) < 0.999f )
@@ -706,6 +778,8 @@ internal sealed class VoxelGpuTransvoxelProof : SceneCustomObject, System.IDispo
 		_computeCommands.Reset();
 		_densitySamples.Dispose();
 		_blocks.Dispose();
+		_requests.Dispose();
+		_editOperations.Dispose();
 		_regularLookup.Dispose();
 		_cells.Dispose();
 		_edgeFlags.Dispose();

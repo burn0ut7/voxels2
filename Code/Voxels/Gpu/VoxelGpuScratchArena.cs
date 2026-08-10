@@ -139,7 +139,7 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_clear.Attributes.Set( "AllocationPass", 0 );
 		_clear.Dispatch( System.Math.Max( _cellCount, _edgeSlotCount ) * count, 1, 1 );
 		Barrier( _cells, _edgeFlags, _edgeVertexIds );
-		_density.Dispatch( _haloSampleCount * count, 1, 1 );
+		_density.Dispatch( _haloSize * _haloSize * count, 1, 1 );
 		Barrier( _densitySamples );
 		_classify.Attributes.Set( "PublicationPass", 0 );
 		_classify.Dispatch( _cellCount * count, 1, 1 );

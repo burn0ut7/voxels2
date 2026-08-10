@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 34;
+	private const int SuiteVersion = 35;
 	private const int InfinityPathSampleCount = 1024;
 	private const int RealtimeSurfaceEditCount = 80;
 	private static string[] AllRequiredScenarios => new[]
@@ -59,6 +59,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"gpu_cpu_collision_rebuild_cost",
 		"gpu_transvoxel_regular_proof",
 		"gpu_persistent_static_set",
+		"gpu_camera_sweep_generation",
 		"gpu_production_render_integration",
 		"gpu_player_infinity_streaming",
 		"gpu_player_line_streaming",
@@ -162,6 +163,8 @@ public sealed class VoxelTerrainBenchmark : Component
 	private long _phase4RegularSoakStartTimestamp;
 	private VoxelGpuPhase2BProofResult _pendingRegularClipboxProof;
 	private VoxelGpuClipboxSeamProofReport? _pendingLod5OwnershipProof;
+	private CameraComponent _cameraSweepCamera;
+	private Rotation _cameraSweepOriginalRotation;
 	private VoxelCallCountSnapshot _collisionProximityBaseline;
 	private VoxelCallCountSnapshot _gpuCollisionBaseline;
 	private static readonly string[] GpuLifecycleScenarioNames =
@@ -238,7 +241,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		{
 			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
 			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership", "gpu_realtime_surface_edits_20hz", "gpu_cpu_collision_rebuild_cost",
-			"gpu_persistent_static_set", "gpu_production_render_integration",
+			"gpu_persistent_static_set", "gpu_camera_sweep_generation", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
 			"gpu_player_clipbox_oscillation",
 			"gpu_allocator_churn", "gpu_replacement_failure", "gpu_pool_exhaustion", "gpu_return_origin_stability",
@@ -734,6 +737,8 @@ public sealed class VoxelTerrainBenchmark : Component
 				}
 				break;
 			case BenchmarkPhase.StartGpuPersistentStatic:
+				_holdBenchmarkPlayersAtOrigin = true;
+				HoldBenchmarkPlayersAtOrigin();
 				BeginScenario( "gpu_persistent_static_set", "Static fixed-LOD blocks count asynchronously, emit into persistent pools, and publish through one multi-draw renderer" );
 				_manager.VisualBackend = VoxelVisualBackendMode.GpuPersistentFixedLod;
 				_manager.GpuTerrainRuleVersion = 1;
@@ -750,6 +755,33 @@ public sealed class VoxelTerrainBenchmark : Component
 					CompleteScenario( gpuTerrain: diagnostics, gpuPhase2BProof: proof );
 					if ( !proof.Passed ) { FailRun( $"Phase 2B static backend failed: {proof.Failure}" ); break; }
 					_gpuLifecycleScenarioIndex = 0;
+					_phase = BenchmarkPhase.StartGpuCameraSweepGeneration;
+				}
+				break;
+			case BenchmarkPhase.StartGpuCameraSweepGeneration:
+				BeginScenario( "gpu_camera_sweep_generation", "Player camera rapidly sweeps every direction while a cold GPU terrain set generates and becomes visible" );
+				_cameraSweepCamera = Scene.Camera;
+				if ( _cameraSweepCamera is null )
+				{
+					FailRun( "gpu_camera_sweep_generation requires the player camera" );
+					break;
+				}
+				_cameraSweepOriginalRotation = _cameraSweepCamera.WorldRotation;
+				_manager.GenerateGpuTerrainWorld();
+				_phaseStartTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+				_phase = BenchmarkPhase.RunGpuCameraSweepGeneration;
+				break;
+			case BenchmarkPhase.RunGpuCameraSweepGeneration:
+				{
+					var elapsedSeconds = System.Diagnostics.Stopwatch.GetElapsedTime( _phaseStartTimestamp ).TotalSeconds;
+					_cameraSweepCamera.WorldRotation = new Angles( 12.0f * System.MathF.Sin( (float)elapsedSeconds * 5.0f ), (float)elapsedSeconds * 1080.0f, 0.0f );
+					if ( !_manager.IsTerrainSettled || elapsedSeconds < 1.0 ) break;
+					_cameraSweepCamera.WorldRotation = _cameraSweepOriginalRotation;
+					_cameraSweepCamera = null;
+					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
+					var proof = VoxelGpuPhase2BProof.ValidateStatic( "camera_sweep_generation", diagnostics, _manager.ConfiguredChunkCount );
+					CompleteScenario( gpuTerrain: diagnostics, gpuPhase2BProof: proof );
+					if ( !proof.Passed ) { FailRun( $"GPU camera sweep generation failed: {proof.Failure}" ); break; }
 					_phase = BenchmarkPhase.StartGpuProductionRender;
 				}
 				break;
@@ -769,6 +801,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				}
 				break;
 			case BenchmarkPhase.StartGpuMovementInfinity:
+				_holdBenchmarkPlayersAtOrigin = false;
 				BeginPlayerTraversal( TraversalPath.Infinity, "gpu_player_infinity_streaming", "Actual player flies an infinity loop while the fixed-LOD GPU backend replaces residents" );
 				_phase = BenchmarkPhase.RunGpuMovementInfinity;
 				break;
@@ -824,6 +857,8 @@ public sealed class VoxelTerrainBenchmark : Component
 					: BenchmarkPhase.StartGpuAsyncReadbackSaturation;
 				break;
 			case BenchmarkPhase.StartGpuAsyncReadbackSaturation:
+				_holdBenchmarkPlayersAtOrigin = true;
+				HoldBenchmarkPlayersAtOrigin();
 				BeginScenario( "gpu_async_readback_saturation", "Two full 128-block batches exercise bounded asynchronous compact-count publication without geometry readback" );
 				_manager.ChunkRadius = _originalChunkRadius;
 				_manager.GenerateWorld();
@@ -890,6 +925,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				}
 				break;
 			case BenchmarkPhase.StartInfinityTraversal:
+				_holdBenchmarkPlayersAtOrigin = false;
 				BeginPlayerTraversal( TraversalPath.Infinity, "player_infinity_streaming", "Actual player flies one or more constant-speed infinity loops while terrain streams" );
 				break;
 			case BenchmarkPhase.RunInfinityTraversal:
@@ -1751,6 +1787,11 @@ public sealed class VoxelTerrainBenchmark : Component
 
 	private void RestoreWorldSettings()
 	{
+		if ( _cameraSweepCamera is not null )
+		{
+			_cameraSweepCamera.WorldRotation = _cameraSweepOriginalRotation;
+			_cameraSweepCamera = null;
+		}
 		if ( !_worldSettingsCaptured || _manager is null ) return;
 		_worldSettingsCaptured = false;
 		var changed = _manager.ChunkRadius != _originalChunkRadius ||
@@ -2384,6 +2425,8 @@ public sealed class VoxelTerrainBenchmark : Component
 		WaitGpuTransvoxelProof,
 		StartGpuPersistentStatic,
 		WaitGpuPersistentStatic,
+		StartGpuCameraSweepGeneration,
+		RunGpuCameraSweepGeneration,
 		StartGpuProductionRender,
 		WaitGpuProductionRender,
 		StartGpuMovementInfinity,

@@ -2,8 +2,8 @@ MODES
 {
 	Default();
 }
-// GPU LOD crack plan: shared canonical terrain field live-reload marker.
-// Versioned persistent terrain Pass A density rules with revisioned sparse edits.
+// GPU LOD crack plan: stable near-zero terrain field with one height evaluation per column.
+// Versioned persistent terrain Pass A density rules with revisioned sparse edits and vertical column reuse.
 CS
 {
 	#include "system.fxc"
@@ -39,12 +39,23 @@ CS
 	[numthreads( 64, 1, 1 )]
 	void MainCs( uint3 id : SV_DispatchThreadID )
 	{
-		uint count = (uint)HaloSampleCount * (uint)BatchSize;
+		uint columnSampleCount = (uint)HaloSize * (uint)HaloSize;
+		uint count = columnSampleCount * (uint)BatchSize;
 		if ( id.x >= count ) return;
-		uint block = id.x / (uint)HaloSampleCount;
-		uint localIndex = id.x - block * (uint)HaloSampleCount;
-		float3 localSample = float3( Decode3D( localIndex, HaloSize ) ) - 1.0f;
-		float3 sample = BlockRequests[block].SampleOrigin.xyz + localSample * BlockRequests[block].SampleScale.xyz;
-		DensitySamples[id.x] = EvaluateEditedTerrainDensity( sample, (uint)BlockRequests[block].SampleScale.w, SdfClampDistance, SimplexFrequency, SimplexAmplitude, SimplexBaseHeight, SimplexSeed );
+		uint block = id.x / columnSampleCount;
+		uint localColumn = id.x - block * columnSampleCount;
+		uint localY = localColumn / (uint)HaloSize;
+		uint localX = localColumn - localY * (uint)HaloSize;
+		float2 localSampleXY = float2( localX, localY ) - 1.0f;
+		float2 sampleXY = BlockRequests[block].SampleOrigin.xy + localSampleXY * BlockRequests[block].SampleScale.xy;
+		float surfaceHeight = SimplexBaseHeight + VoxelTerrainSimplexNoise( sampleXY * SimplexFrequency, SimplexSeed ) * SimplexAmplitude;
+		[loop] for ( uint localZ = 0; localZ < (uint)HaloSize; localZ++ )
+		{
+			float sampleZ = BlockRequests[block].SampleOrigin.z + ((float)localZ - 1.0f) * BlockRequests[block].SampleScale.z;
+			float3 sample = float3( sampleXY, sampleZ );
+			uint localIndex = localX + localY * (uint)HaloSize + localZ * (uint)HaloSize * (uint)HaloSize;
+			uint outputIndex = block * (uint)HaloSampleCount + localIndex;
+			DensitySamples[outputIndex] = EvaluateEditedTerrainDensityFromSurfaceHeight( sample, (uint)BlockRequests[block].SampleScale.w, surfaceHeight, SdfClampDistance );
+		}
 	}
 }

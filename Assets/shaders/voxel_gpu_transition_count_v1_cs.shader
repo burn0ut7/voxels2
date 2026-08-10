@@ -2,7 +2,7 @@ MODES
 {
 	Default();
 }
-// Transvoxel shared fine-face density and sparse-edit ownership.
+// Transvoxel shared fine-face density with stable near-zero classification and sparse-edit ownership.
 CS
 {
 	#include "system.fxc"

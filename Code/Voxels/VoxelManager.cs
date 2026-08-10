@@ -867,25 +867,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		var coordinate = Vector3Int.Zero;
-		if ( !TryGetChunk( coordinate, out _ ) )
-		{
-			GenerateChunk( coordinate );
-			Log.Info( "Voxel GPU Transvoxel proof generated its origin chunk for the proof-only CPU reference." );
-		}
-		VoxelChunk chunk;
-		float[] halo;
-		lock ( _sdfLock )
-		{
-			if ( !_chunks.TryGetValue( coordinate, out chunk ) )
-			{
-				Log.Error( "Voxel GPU Transvoxel proof requires the origin chunk to be loaded." );
-				return;
-			}
-			halo = CreateSdfHalo( chunk );
-		}
-
-		var cpuReference = VoxelTransvoxelMesher.Build( halo, ChunkSize, VoxelSize );
 		var sampleOrigin = GetChunkVoxelOrigin( coordinate );
+		var halo = CreateGpuProofSdfHalo( sampleOrigin );
+		var cpuReference = VoxelTransvoxelMesher.Build( halo, ChunkSize, VoxelSize );
 		var drawOrigin = new Vector3( sampleOrigin.x, sampleOrigin.y, sampleOrigin.z ) * VoxelSize +
 			Vector3.Up * ChunkSize * VoxelSize * 2.0f;
 		try
@@ -894,11 +878,16 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				Scene.SceneWorld,
 				Scene.Camera,
 				cpuReference,
+				halo,
 				sampleOrigin,
 				drawOrigin,
 				ChunkSize,
 				VoxelSize,
-				SdfClampDistance
+				SdfClampDistance,
+				SimplexFrequency,
+				SimplexAmplitude,
+				SimplexBaseHeight,
+				SimplexSeed
 			);
 			_gpuTransvoxelProof.Run();
 			Log.Info(
@@ -919,6 +908,23 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public void ClearGpuTransvoxelProof()
 	{
 		DisposeGpuTransvoxelProof();
+	}
+
+	private float[] CreateGpuProofSdfHalo( Vector3Int sampleOrigin )
+	{
+		var haloSize = ChunkSize + 3;
+		var halo = new float[checked( haloSize * haloSize * haloSize )];
+		CountCall( ref _callSdfHaloSnapshots );
+		CountCall( ref _callSdfHaloSamplesCopied, halo.Length );
+		for ( var z = 0; z < haloSize; z++ )
+		for ( var y = 0; y < haloSize; y++ )
+		for ( var x = 0; x < haloSize; x++ )
+		{
+			var canonicalSample = new Vector3( sampleOrigin.x + x - 1, sampleOrigin.y + y - 1, sampleOrigin.z + z - 1 );
+			var distance = EvaluateProceduralDistance( canonicalSample );
+			halo[x + haloSize * (y + haloSize * z)] = System.MathF.Abs( distance ) < 0.001f ? 0.001f : distance;
+		}
+		return halo;
 	}
 
 	[Button]
