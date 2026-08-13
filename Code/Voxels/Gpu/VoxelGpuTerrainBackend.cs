@@ -44,8 +44,12 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
 	private readonly List<(VoxelEditOp Operation, uint Revision)> _fixedLodEdits = new();
+	private readonly Dictionary<Vector3Int, uint> _bakedEditRevisions = new();
 	private int _editOperationCount;
 	private readonly VoxelGpuEditOp[] _editOperations = new VoxelGpuEditOp[VoxelEditJournal.MaximumGpuOperations];
+	private VoxelGpuEditBrick[] _bakedEditBricks = new VoxelGpuEditBrick[1];
+	private float[] _bakedEditDensities = new float[1];
+	private int _bakedEditBrickCount;
 	private readonly Dictionary<VoxelVisualBlockKey, int> _desiredRanks = new();
 	private readonly List<VoxelVisualBlockKey> _leavingScratch = new();
 	private readonly List<VoxelVisualBlockKey> _transitionLeavingScratch = new();
@@ -222,6 +226,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_transitionBatches[index] = new BatchContext( _transitionScheduledScratch[index], _transitionSlotScratch[index] );
 		}
 		if ( _editOperationCount > 0 ) _transitionScratchRing[1].SetEditOperations( _editOperations, _editOperationCount );
+		_transitionScratchRing[1].SetBakedEditBricks( _bakedEditBricks, _bakedEditBrickCount, _bakedEditDensities );
 	}
 
 	public void QueueStaticSet( IEnumerable<Vector3Int> coordinates, int ruleVersion ) => UpdateDesiredSet( coordinates, ruleVersion );
@@ -234,6 +239,31 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		foreach ( var scratch in _scratchRing ) scratch.SetEditOperations( operations, operationCount );
 		foreach ( var scratch in _transitionScratchRing ) scratch.SetEditOperations( operations, operationCount );
 		_editOperationCount = operationCount;
+	}
+
+	public void SetBakedEditBricks( VoxelGpuEditBrick[] bricks, int count, float[] densities )
+	{
+		InitializeTransitionPipeline();
+		if ( bricks is null || count < 0 || count > VoxelEditBrickStore.MaximumBakedBricks || bricks.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
+		var requiredSamples = checked( System.Math.Max( 1, count * VoxelEditBrick.SampleCount ) );
+		if ( densities is null || densities.Length < requiredSamples ) throw new System.ArgumentException( "Baked edit density data is smaller than the submitted brick set.", nameof( densities ) );
+		_bakedEditBricks = count == 0 ? new VoxelGpuEditBrick[1] : bricks.ToArray();
+		_bakedEditDensities = count == 0 ? new float[1] : densities.ToArray();
+		_bakedEditBrickCount = count;
+		_bakedEditRevisions.Clear();
+		var maximumRevision = 0u;
+		for ( var index = 0; index < count; index++ )
+		{
+			var coordinate = new Vector3Int(
+				(int)System.MathF.Round( _bakedEditBricks[index].OriginAndSize.x / VoxelEditBrickStore.BrickSize ),
+				(int)System.MathF.Round( _bakedEditBricks[index].OriginAndSize.y / VoxelEditBrickStore.BrickSize ),
+				(int)System.MathF.Round( _bakedEditBricks[index].OriginAndSize.z / VoxelEditBrickStore.BrickSize ) );
+			_bakedEditRevisions[coordinate] = _bakedEditBricks[index].WorldRevision;
+			maximumRevision = System.Math.Max( maximumRevision, _bakedEditBricks[index].WorldRevision );
+		}
+		_fixedLodEdits.RemoveAll( edit => edit.Revision <= maximumRevision );
+		foreach ( var scratch in _scratchRing ) scratch.SetBakedEditBricks( _bakedEditBricks, count, _bakedEditDensities );
+		foreach ( var scratch in _transitionScratchRing ) scratch.SetBakedEditBricks( _bakedEditBricks, count, _bakedEditDensities );
 	}
 
 	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )
@@ -514,6 +544,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			var revision = key.EditRevision;
 			foreach ( var edit in _fixedLodEdits )
 				if ( VoxelEditInvalidation.OverlapsVisualBlock( edit.Operation, key, _chunkSize ) ) revision = System.Math.Max( revision, edit.Revision );
+			var blockOrigin = VoxelGpuCanonicalCoordinates.CanonicalBlockOriginSamples( key.Coordinate, key.Lod, _chunkSize );
+			var blockStep = _chunkSize * (1 << key.Lod );
+			var blockBounds = new BBox( blockOrigin - Vector3.One * (blockStep * 0.5f), blockOrigin + Vector3.One * (blockStep + blockStep * 0.5f) );
+			foreach ( var baked in _bakedEditRevisions )
+			{
+				var bakedOrigin = new Vector3( baked.Key.x * VoxelEditBrickStore.BrickSize, baked.Key.y * VoxelEditBrickStore.BrickSize, baked.Key.z * VoxelEditBrickStore.BrickSize );
+				if ( blockBounds.Overlaps( new BBox( bakedOrigin, bakedOrigin + Vector3.One * VoxelEditBrickStore.BrickSize ) ) ) revision = System.Math.Max( revision, baked.Value );
+			}
 			_desiredKeyInputScratch.Add( key with { EditRevision = revision } );
 		}
 		UpdateDesiredKeys( _desiredKeyInputScratch );
@@ -1387,7 +1425,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private int AppendRelevantEditIndices( BBox evaluationBounds, uint editRevision, uint[] destination, ref int cursor )
 	{
 		var start = cursor;
-		var operationCount = (int)VoxelGpuEditDispatch.GetOperationCount( editRevision, _editOperationCount );
+		// Edit revisions are world revisions, while the GPU receives only the
+		// active suffix after baked operations have been compacted. Resolve the
+		// world revision back to an active-operation prefix before building the
+		// per-block index list.
+		var operationCount = VoxelGpuEditDispatch.GetActiveOperationCount( _editOperations, _editOperationCount, editRevision );
 		for ( var index = 0; index < operationCount; index++ )
 		{
 			var operation = _editOperations[index];

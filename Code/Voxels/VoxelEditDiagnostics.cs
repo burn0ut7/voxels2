@@ -15,6 +15,9 @@ internal static class VoxelEditDiagnostics
 				"phase5_voxel_brush_raycast" => RunBrushRaycast(),
 				"phase5_gpu_edit_revision_binding" => RunGpuEditRevisionBinding(),
 				"phase5_incremental_edit_replay" => RunIncrementalEditReplay(),
+				"phase5_edit_journal_bake_threshold" => RunEditJournalBakeThreshold(),
+				"phase5_baked_rule_version_mismatch" => RunBakedRuleVersionMismatch(),
+				"phase5_edit_persistence_roundtrip" => RunEditPersistenceRoundtrip(),
 				_ => new VoxelEditProofReport( false, $"Unknown Phase Five edit scenario '{scenario}'.", 0, 0, 0 )
 			};
 		}
@@ -125,7 +128,12 @@ internal static class VoxelEditDiagnostics
 		try { VoxelGpuEditDispatch.GetOperationCount( 4, 3 ); }
 		catch ( System.InvalidOperationException ) { rejected = true; }
 		Require( rejected, "GPU blocks accepted an edit revision beyond the uploaded journal" );
-		return new VoxelEditProofReport( true, string.Empty, 4, 3, 1 );
+		var compactedOperations = new VoxelGpuEditOp[3];
+		compactedOperations[0].WorldRevision = 80;
+		compactedOperations[1].WorldRevision = 81;
+		compactedOperations[2].WorldRevision = 90;
+		Require( VoxelGpuEditDispatch.GetActiveOperationCount( compactedOperations, 3, 81 ) == 2, "compacted GPU journal did not resolve a world revision to the active suffix prefix" );
+		return new VoxelEditProofReport( true, string.Empty, 6, 3, 1 );
 	}
 
 	private static VoxelEditProofReport RunIncrementalEditReplay()
@@ -171,6 +179,70 @@ internal static class VoxelEditDiagnostics
 			cases++;
 		}
 		return new VoxelEditProofReport( true, string.Empty, cases + operations.Length, allOperations.Length, 0 );
+	}
+
+	private static VoxelEditProofReport RunEditJournalBakeThreshold()
+	{
+		var journal = new VoxelEditJournal();
+		for ( var index = 0; index < VoxelEditJournal.DefaultBakeThreshold; index++ )
+			journal.Append( Operation( VoxelEditShape.Sphere, VoxelCsgOperation.Subtract, new Vector3( 0, 0, 0 ), new Vector3( 4, 0, 0 ) ) );
+		var sample = new Vector3( 0, 0, 0 );
+		var before = journal.EvaluateDistance( sample, -1.0f );
+		var report = journal.BakeIfNeeded( point => point.z, 1 );
+		Require( report.Baked && report.BakedOperations == VoxelEditJournal.DefaultBakeThreshold - VoxelEditJournal.RetainedRecentOperations, "edit journal did not compact the oldest operations at the configured threshold" );
+		Require( journal.Count == VoxelEditJournal.RetainedRecentOperations && journal.BakedBrickCount > 0, "bake did not leave a bounded recent journal and sparse bricks" );
+		var after = journal.EvaluateDistance( sample, -1.0f );
+		Require( System.MathF.Abs( before - after ) <= 0.00001f, $"baked replay changed authoritative SDF: before={before}, after={after}" );
+		return new VoxelEditProofReport( true, string.Empty, report.BakedBrickCount * VoxelEditBrick.SampleCount, report.BakedOperations + report.RemainingOperations, report.BakedBrickCount );
+	}
+
+	private static VoxelEditProofReport RunBakedRuleVersionMismatch()
+	{
+		var operations = new List<VoxelEditOp>();
+		for ( var index = 0; index < 4; index++ )
+		{
+			var operation = Operation( VoxelEditShape.Sphere, VoxelCsgOperation.Subtract, Vector3.Zero, new Vector3( 3, 0, 0 ) );
+			operation.WorldRevision = (uint)(index + 1);
+			operation.EditId = (ulong)(index + 1);
+			operations.Add( operation );
+		}
+		var store = new VoxelEditBrickStore();
+		var bake = store.Bake( operations, operations.Count, point => point.z, 7 );
+		Require( bake.Baked, "rule-version fixture could not create a baked brick" );
+		using var stream = new System.IO.MemoryStream();
+		using ( var writer = new System.IO.BinaryWriter( stream, System.Text.Encoding.UTF8, true ) ) store.Write( writer );
+		stream.Position = 0;
+		using var reader = new System.IO.BinaryReader( stream, System.Text.Encoding.UTF8, true );
+		_ = VoxelEditBrickStore.Read( reader, 8, out var mismatch );
+		Require( mismatch, "baked edit bricks accepted a mismatched terrain rule version" );
+		return new VoxelEditProofReport( true, string.Empty, VoxelEditBrick.SampleCount, operations.Count, bake.BakedBrickCount );
+	}
+
+	private static VoxelEditProofReport RunEditPersistenceRoundtrip()
+	{
+		const string path = "voxel-terrain-edits/phase5-proof-roundtrip.bin";
+		try
+		{
+			var source = new VoxelEditJournal();
+			for ( var index = 0; index < VoxelEditJournal.DefaultBakeThreshold; index++ )
+				source.Append( Operation( VoxelEditShape.Sphere, VoxelCsgOperation.SmoothSubtract, new Vector3( 2, -3, 0 ), new Vector3( 4, 0, 0 ), 0.5f ) );
+			source.BakeIfNeeded( point => point.z, 3 );
+			var sourceDistance = source.EvaluateDistance( new Vector3( 2, -3, 0 ), -1.0f );
+			var save = source.Save( path, 3 );
+			Require( save.Succeeded, $"edit journal persistence save failed: {save.Failure}" );
+			var loaded = new VoxelEditJournal();
+			var load = loaded.Load( path, 3 );
+			Require( load.Succeeded && load.Found && loaded.BakedBrickCount == source.BakedBrickCount && loaded.Count == source.Count, "edit journal persistence did not restore active and baked state" );
+			var loadedDistance = loaded.EvaluateDistance( new Vector3( 2, -3, 0 ), -1.0f );
+			Require( System.MathF.Abs( sourceDistance - loadedDistance ) <= 0.00001f, "edit journal persistence changed the authoritative SDF" );
+			var mismatch = new VoxelEditJournal().Load( path, 4 );
+			Require( mismatch.RuleVersionMismatch && !mismatch.Succeeded, "edit journal persistence accepted a rule-version mismatch" );
+			return new VoxelEditProofReport( true, string.Empty, loaded.BakedBrickCount * VoxelEditBrick.SampleCount + loaded.Count, loaded.Count, loaded.BakedBrickCount );
+		}
+		finally
+		{
+			if ( FileSystem.Data.FileExists( path ) ) FileSystem.Data.DeleteFile( path );
+		}
 	}
 
 	private static VoxelEditOp Operation( VoxelEditShape shape, VoxelCsgOperation operation, Vector3 position, Vector3 size, float smoothness = 0.0f ) => new()

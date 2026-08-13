@@ -100,6 +100,7 @@ internal static class VoxelGpuContractValidation
 		AssertGpuStride<VoxelGpuAllocationDescriptor>( 64 );
 		AssertGpuStride<VoxelGpuResidentDescriptor>( 80 );
 		AssertGpuStride<VoxelGpuEditOp>( 80 );
+		AssertGpuStride<VoxelGpuEditBrick>( 32 );
 	}
 
 	private static void AssertGpuStride<T>( int expected ) where T : unmanaged

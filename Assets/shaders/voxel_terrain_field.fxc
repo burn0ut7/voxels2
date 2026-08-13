@@ -82,6 +82,67 @@ struct VoxelEditOperation
 StructuredBuffer<VoxelEditOperation> VoxelEditOperations < Attribute( "VoxelEditOperations" ); >;
 StructuredBuffer<uint> VoxelEditIndices < Attribute( "VoxelEditIndices" ); >;
 
+struct VoxelEditBrick
+{
+	float4 OriginAndSize;
+	uint SampleOffset;
+	uint WorldRevision;
+	uint RuleVersion;
+	uint Reserved;
+};
+
+StructuredBuffer<VoxelEditBrick> VoxelEditBricks < Attribute( "VoxelEditBricks" ); >;
+StructuredBuffer<float> VoxelEditBrickDensities < Attribute( "VoxelEditBrickDensities" ); >;
+uint VoxelEditBrickCount < Attribute( "VoxelEditBrickCount" ); >;
+int VoxelEditBrickSize < Attribute( "VoxelEditBrickSize" ); >;
+
+float ReadVoxelEditBrickDensity( VoxelEditBrick brick, int x, int y, int z )
+{
+	uint sampleSize = (uint)VoxelEditBrickSize + 1u;
+	uint index = (uint)x + sampleSize * ((uint)y + sampleSize * (uint)z);
+	return VoxelEditBrickDensities[brick.SampleOffset + index];
+}
+
+bool TryGetVoxelEditBrickDensity( float3 canonicalSample, out float density )
+{
+	[loop] for ( uint brickIndex = 0; brickIndex < VoxelEditBrickCount; brickIndex++ )
+	{
+		VoxelEditBrick brick = VoxelEditBricks[brickIndex];
+		float3 local = canonicalSample - brick.OriginAndSize.xyz;
+		if ( any( local < 0.0f ) || any( local > brick.OriginAndSize.www ) ) continue;
+		int x0 = clamp( (int)floor( local.x ), 0, VoxelEditBrickSize );
+		int y0 = clamp( (int)floor( local.y ), 0, VoxelEditBrickSize );
+		int z0 = clamp( (int)floor( local.z ), 0, VoxelEditBrickSize );
+		int x1 = min( VoxelEditBrickSize, x0 + 1 );
+		int y1 = min( VoxelEditBrickSize, y0 + 1 );
+		int z1 = min( VoxelEditBrickSize, z0 + 1 );
+		float3 fraction = frac( local );
+		if ( x0 == x1 ) fraction.x = 0.0f;
+		if ( y0 == y1 ) fraction.y = 0.0f;
+		if ( z0 == z1 ) fraction.z = 0.0f;
+		float c000 = ReadVoxelEditBrickDensity( brick, x0, y0, z0 );
+		float c100 = ReadVoxelEditBrickDensity( brick, x1, y0, z0 );
+		float c010 = ReadVoxelEditBrickDensity( brick, x0, y1, z0 );
+		float c110 = ReadVoxelEditBrickDensity( brick, x1, y1, z0 );
+		float c001 = ReadVoxelEditBrickDensity( brick, x0, y0, z1 );
+		float c101 = ReadVoxelEditBrickDensity( brick, x1, y0, z1 );
+		float c011 = ReadVoxelEditBrickDensity( brick, x0, y1, z1 );
+		float c111 = ReadVoxelEditBrickDensity( brick, x1, y1, z1 );
+		float lower = lerp( lerp( c000, c100, fraction.x ), lerp( c010, c110, fraction.x ), fraction.y );
+		float upper = lerp( lerp( c001, c101, fraction.x ), lerp( c011, c111, fraction.x ), fraction.y );
+		density = lerp( lower, upper, fraction.z );
+		return true;
+	}
+	density = 0.0f;
+	return false;
+}
+
+float ApplyVoxelEditBrick( float3 canonicalSample, float density )
+{
+	float bakedDensity;
+	return TryGetVoxelEditBrickDensity( canonicalSample, bakedDensity ) ? bakedDensity : density;
+}
+
 float3 VoxelRotateInverse( float3 point, float4 rotation )
 {
 	float3 inverseVector = -rotation.xyz;
@@ -152,12 +213,14 @@ float EvaluateIndexedTerrainDensity( float3 canonicalSample, uint editIndexOffse
 {
 	float surfaceHeight = EvaluateTerrainSurfaceHeight( canonicalSample.xy, simplexFrequency, simplexAmplitude, simplexBaseHeight, simplexSeed );
 	float density = EvaluateTerrainDensityFromSurfaceHeight( canonicalSample.z, surfaceHeight, sdfClampDistance );
+	density = ApplyVoxelEditBrick( canonicalSample, density );
 	return ApplyIndexedTerrainEdits( canonicalSample, editIndexOffset, editIndexCount, density, sdfClampDistance );
 }
 
 float EvaluateEditedTerrainDensityFromSurfaceHeight( float3 canonicalSample, uint editOperationCount, float surfaceHeight, float sdfClampDistance )
 {
 	float density = EvaluateTerrainDensityFromSurfaceHeight( canonicalSample.z, surfaceHeight, sdfClampDistance );
+	density = ApplyVoxelEditBrick( canonicalSample, density );
 	return ApplyTerrainEdits( canonicalSample, editOperationCount, density, sdfClampDistance );
 }
 

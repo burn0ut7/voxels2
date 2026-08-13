@@ -14,6 +14,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private const int MaximumCollisionLookaheadChunks = 64;
 	private const int MaximumCollisionBuildsPerFrame = 1;
 	private const int MaximumConcurrentCollisionBuilds = 1;
+	private const int MinimumEditBakeThreshold = 32;
+	private const int MaximumEditBakeThreshold = 512;
 	private const int MaximumChunkTimingHistory = 65536;
 	private const int MaximumBatchTimingHistory = 4096;
 	private const int GpuPoolReferenceRadius = 32;
@@ -160,6 +162,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private bool _playerSafetyActive;
 	private bool _protectAllPlayers;
 	private bool _worldRegenerationRequested;
+	private bool _editsLoaded;
+	private VoxelEditPersistenceReport _lastEditPersistenceReport;
+	private VoxelEditBakeReport _lastEditBakeReport;
+	private bool _editCapacityWarningIssued;
 	private WorldConfiguration _generationConfiguration;
 
 	[Property, Group( "World" ), Range( MinimumChunkSize, MaximumChunkSize )]
@@ -170,6 +176,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	[Property, Group( "World" )]
 	public bool GenerateInEditor { get; set; }
+
+	[Property, Group( "Editing" )]
+	public bool PersistEdits { get; set; } = true;
+
+	[Property, Group( "Editing" )]
+	public string EditPersistenceKey { get; set; } = "default";
+
+	[Property, Group( "Editing" ), Range( MinimumEditBakeThreshold, MaximumEditBakeThreshold )]
+	public int EditBakeThreshold { get; set; } = VoxelEditJournal.DefaultBakeThreshold;
 
 	[Property, Group( "World" ), Range( 1.0f, 128.0f )]
 	public float VoxelSize { get; set; } = 16.0f;
@@ -313,6 +328,10 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int ActiveChunkGameObjectCount => _chunkGameObjects.Count;
 	public uint WorldEditRevision => _editJournal.WorldRevision;
 	public int ActiveEditOperationCount => _editJournal.Count;
+	public int BakedEditBrickCount => _editJournal.BakedBrickCount;
+	public long BakedEditSampleCount => _editJournal.BakedSampleCount;
+	[Property, ReadOnly, Group( "Editing" )]
+	public string EditPersistenceStatus => $"key={GetEditPersistenceKey()}; active={_editJournal.Count}; bakedBricks={_editJournal.BakedBrickCount}; lastBake={_lastEditBakeReport.Baked}; lastSave={_lastEditPersistenceReport.Succeeded}; lastLoad={_lastEditPersistenceReport.Found}; mismatch={_lastEditPersistenceReport.RuleVersionMismatch}; failure={_lastEditPersistenceReport.Failure}";
 	public int ChunkDiameter => ChunkRadius * 2;
 	public int ConfiguredChunkCount => GpuTerrainLodPolicy == VoxelGpuTerrainLodPolicy.RegularClipbox && VisualBackend == VoxelVisualBackendMode.GpuPersistentFixedLod ? GpuClipboxConfig.ExpectedActiveRegularCount : checked( ChunkDiameter * ChunkDiameter );
 	[Property, ReadOnly, Group( "Rendering" )]
@@ -412,10 +431,13 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		CollisionBuildsPerFrame = System.Math.Clamp( CollisionBuildsPerFrame, 1, MaximumCollisionBuildsPerFrame );
 		CollisionBuildConcurrency = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
 		DetailedChunkLogLimit = System.Math.Clamp( DetailedChunkLogLimit, 0, MaximumDetailedChunkLogs );
+		EditBakeThreshold = System.Math.Clamp( EditBakeThreshold, MinimumEditBakeThreshold, MaximumEditBakeThreshold );
+		if ( string.IsNullOrWhiteSpace( EditPersistenceKey ) ) EditPersistenceKey = "default";
 	}
 
 	protected override void OnEnabled()
 	{
+		if ( !_editsLoaded ) LoadPersistedEdits();
 		_worldRegenerationRequested = true;
 	}
 
@@ -483,6 +505,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	protected override void OnDisabled()
 	{
+		SavePersistedEdits();
 		_playerSafetyActive = false;
 		_protectAllPlayers = false;
 		_protectedPlayerIds.Clear();
@@ -497,6 +520,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	protected override void OnDestroy()
 	{
+		SavePersistedEdits();
 		DisposeGpuTransvoxelProof();
 		DisposeGpuTransitionCaseProof();
 		DisposeGpuTerrainBackend();
@@ -504,6 +528,46 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		ClearChunkColliders();
 		ClearChunkGameObjects();
 		ResetWorldGeneration();
+	}
+
+	private string GetEditPersistenceKey()
+	{
+		var source = string.IsNullOrWhiteSpace( EditPersistenceKey ) ? "default" : EditPersistenceKey.Trim();
+		var builder = new System.Text.StringBuilder( System.Math.Min( 64, source.Length ) );
+		foreach ( var character in source )
+		{
+			if ( builder.Length >= 64 ) break;
+			builder.Append( char.IsLetterOrDigit( character ) || character is '_' or '-' ? character : '_' );
+		}
+		return builder.Length == 0 ? "default" : builder.ToString();
+	}
+
+	private string GetEditPersistencePath() => $"voxel-terrain-edits/{GetEditPersistenceKey()}.bin";
+
+	private void LoadPersistedEdits()
+	{
+		_editsLoaded = true;
+		if ( !PersistEdits )
+		{
+			_lastEditPersistenceReport = new VoxelEditPersistenceReport( true, false, false, _editJournal.Count, _editJournal.BakedBrickCount, "persistence-disabled" );
+			return;
+		}
+
+		_lastEditPersistenceReport = _editJournal.Load( GetEditPersistencePath(), checked( (uint)GpuTerrainRuleVersion ) );
+		if ( !_lastEditPersistenceReport.Succeeded && _lastEditPersistenceReport.RuleVersionMismatch )
+			Log.Warning( $"Voxel edit persistence ignored because the stored rule version does not match the active rule: key={GetEditPersistenceKey()}, path={GetEditPersistencePath()}." );
+		else if ( !_lastEditPersistenceReport.Succeeded )
+			Log.Warning( $"Voxel edit persistence could not be loaded: key={GetEditPersistenceKey()}, path={GetEditPersistencePath()}, failure={_lastEditPersistenceReport.Failure}." );
+		else if ( _lastEditPersistenceReport.Found )
+			Log.Info( $"Voxel edit persistence loaded: key={GetEditPersistenceKey()}, active={_lastEditPersistenceReport.ActiveOperations:N0}, bakedBricks={_lastEditPersistenceReport.BakedBricks:N0}." );
+	}
+
+	private void SavePersistedEdits()
+	{
+		if ( !_editsLoaded || !PersistEdits ) return;
+		_lastEditPersistenceReport = _editJournal.Save( GetEditPersistencePath(), checked( (uint)GpuTerrainRuleVersion ) );
+		if ( !_lastEditPersistenceReport.Succeeded )
+			Log.Warning( $"Voxel edit persistence could not be saved: key={GetEditPersistenceKey()}, path={GetEditPersistencePath()}, failure={_lastEditPersistenceReport.Failure}." );
 	}
 
 
@@ -803,6 +867,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				clipboxConfig );
 			var editSnapshot = _editJournal.CreateGpuSnapshot( out var editCount );
 			_gpuTerrainBackend.SetEditOperations( editSnapshot, editCount );
+			var bakedEditBricks = _editJournal.CreateGpuBrickSnapshot( out var bakedEditDensities );
+			_gpuTerrainBackend.SetBakedEditBricks( bakedEditBricks, _editJournal.BakedBrickCount, bakedEditDensities );
 			if ( clipboxConfig.HasValue )
 			{
 				_gpuDesiredBlockCount = clipboxConfig.Value.ExpectedActiveRegularCount;
@@ -1480,11 +1546,25 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		long testedSamples = 0;
 		long changedSamples = 0;
 		HashSet<Vector3Int> visualDirtyChunks;
+		_lastEditBakeReport = default;
 		lock ( _sdfLock )
 		{
 			writeWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( writeWaitStart );
 			var sdfMutationStart = System.Diagnostics.Stopwatch.GetTimestamp();
-			operation = _editJournal.Append( requestedOperation );
+			try
+			{
+				operation = _editJournal.Append( requestedOperation );
+				_editCapacityWarningIssued = false;
+			}
+			catch ( System.InvalidOperationException exception )
+			{
+				if ( !_editCapacityWarningIssued )
+				{
+					Log.Warning( $"Voxel edit rejected at the bounded journal capacity: {exception.Message}" );
+					_editCapacityWarningIssued = true;
+				}
+				return 0;
+			}
 			var affectedChunks = VoxelEditInvalidation.GetCpuChunks( operation, ChunkSize );
 			CountCall( ref _callBrushChunkTests, affectedChunks.Count );
 			foreach ( var coordinate in affectedChunks )
@@ -1495,6 +1575,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				changedSamples += changed;
 				if ( changed > 0 ) changedChunks.Add( coordinate );
 			}
+			_lastEditBakeReport = _editJournal.BakeIfNeeded( EvaluateProceduralDistance, checked( (uint)GpuTerrainRuleVersion ), EditBakeThreshold );
 			// A regular mesh samples one voxel beyond each chunk face. Include
 			// neighbouring visual chunks even when the edit did not change their
 			// stored interior samples; otherwise a boundary vertex can retain the
@@ -1531,6 +1612,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			var snapshot = _editJournal.CreateGpuSnapshot( out var editCount );
 			gpuDirtyBlocks = _gpuTerrainBackend.QueueEdit( snapshot, editCount, operation, operation.WorldRevision );
+			var bakedEditBricks = _editJournal.CreateGpuBrickSnapshot( out var bakedEditDensities );
+			_gpuTerrainBackend.SetBakedEditBricks( bakedEditBricks, _editJournal.BakedBrickCount, bakedEditDensities );
 			gpuEditTiming = _gpuTerrainBackend.LastEditQueueTiming;
 		}
 		var gpuQueueElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( gpuQueueStart );
@@ -1541,6 +1624,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			Log.Info(
 				$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
 				$"dirtyCpuChunks={changedChunks.Count:N0}, visualDirtyCpuChunks={visualDirtyChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
+				$"bakedBricks={_editJournal.BakedBrickCount:N0}, bakedOperations={_lastEditBakeReport.BakedOperations:N0}, " +
 				$"cpuCollisionDirtyNearby={collisionDirtyCount:N0}, collisionStaleDeferred={changedChunks.Count - collisionDirtyCount:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
 				$"sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, sdfMutation={sdfMutationElapsed.TotalMilliseconds:F2}ms, " +
 				$"cpuQueue={cpuQueueElapsed.TotalMilliseconds:F2}ms, gpuQueue={gpuQueueElapsed.TotalMilliseconds:F2}ms " +
@@ -1612,7 +1696,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		CountCall( ref _callBrushRaycastEditCandidates, operations.Length );
 		float EvaluateCanonicalDistance( Vector3 canonicalSample )
 		{
-			return VoxelEditJournal.EvaluateDistance( operations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
+			return _editJournal.EvaluateDistance( operations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
 		}
 
 		var minimumStep = System.MathF.Max( 1.0f, VoxelSize * 0.125f ) / VoxelSize;
@@ -1665,15 +1749,15 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var chunkMinimum = new Vector3( chunkOrigin.x, chunkOrigin.y, chunkOrigin.z );
 		var chunkMaximum = chunkMinimum + new Vector3( chunk.Size );
 		var operations = _editJournal.CreateOperationSnapshot( new BBox( chunkMinimum, chunkMaximum ) );
-		if ( operations.Length == 0 ) return;
+		if ( operations.Length == 0 && _editJournal.BakedBrickCount == 0 ) return;
 		for ( var z = 0; z < sampleSize; z++ )
 		for ( var y = 0; y < sampleSize; y++ )
 		for ( var x = 0; x < sampleSize; x++ )
 		{
 			var canonicalSample = new Vector3( chunkOrigin.x + x, chunkOrigin.y + y, chunkOrigin.z + z );
 			var existing = chunk.GetVoxel( x, y, z );
-			var distance = VoxelEditJournal.EvaluateDistance( operations, canonicalSample, existing.Distance );
-			var material = VoxelEditJournal.EvaluateMaterial( operations, canonicalSample, distance, existing.Material == VoxelMaterial.Air ? VoxelMaterial.Terrain : existing.Material );
+			var distance = _editJournal.EvaluateDistance( canonicalSample, existing.Distance );
+			var material = _editJournal.EvaluateMaterial( canonicalSample, distance, existing.Material == VoxelMaterial.Air ? VoxelMaterial.Terrain : existing.Material );
 			chunk.SetVoxel( x, y, z, new Voxel( distance, material ) );
 		}
 	}
@@ -2018,7 +2102,9 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		}
 
 		var canonicalSample = new Vector3( worldSample.x, worldSample.y, worldSample.z );
-		return VoxelEditJournal.EvaluateDistance( localOperations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
+		return _editJournal.BakedBrickCount > 0
+			? _editJournal.EvaluateDistance( canonicalSample, EvaluateProceduralDistance( canonicalSample ) )
+			: VoxelEditJournal.EvaluateDistance( localOperations, canonicalSample, EvaluateProceduralDistance( canonicalSample ) );
 	}
 
 	private static int FloorDiv( int value, int divisor )

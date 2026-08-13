@@ -41,6 +41,9 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase5_voxel_brush_raycast",
 		"phase5_gpu_edit_revision_binding",
 		"phase5_incremental_edit_replay",
+		"phase5_edit_journal_bake_threshold",
+		"phase5_baked_rule_version_mismatch",
+		"phase5_edit_persistence_roundtrip",
 		"phase4_transition_all_512_cases",
 		"phase4_transition_six_orientations",
 		"phase4_transition_plane",
@@ -227,7 +230,10 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase5_edit_eviction_reentry",
 		"phase5_voxel_brush_raycast",
 		"phase5_gpu_edit_revision_binding",
-		"phase5_incremental_edit_replay"
+		"phase5_incremental_edit_replay",
+		"phase5_edit_journal_bake_threshold",
+		"phase5_baked_rule_version_mismatch",
+		"phase5_edit_persistence_roundtrip"
 	};
 	private static readonly string[] Phase4IndirectScenarioNames =
 	{
@@ -260,7 +266,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		VoxelTerrainBenchmarkMode.GpuOnly => new[]
 		{
-			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_guaranteed_outer_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
+			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_guaranteed_outer_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase5_edit_journal_bake_threshold", "phase5_baked_rule_version_mismatch", "phase5_edit_persistence_roundtrip", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
 			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership", "gpu_realtime_surface_edits_20hz", "gpu_accumulated_surface_edits_20hz", "gpu_aimed_brush_edits_20hz", "gpu_far_aimed_brush_edits_20hz", "gpu_cpu_collision_rebuild_cost",
 			"gpu_lod6_transition_ownership",
 			"gpu_persistent_static_set", "gpu_camera_sweep_generation", "gpu_production_render_integration",
@@ -271,7 +277,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
-			"cold_generation", "collision_backlog_frame_budget", "collision_proximity_edit_filter", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_guaranteed_outer_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
+			"cold_generation", "collision_backlog_frame_budget", "collision_proximity_edit_filter", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_guaranteed_outer_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase5_edit_journal_bake_threshold", "phase5_baked_rule_version_mismatch", "phase5_edit_persistence_roundtrip", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
 			"high_speed_collision_streaming", "player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
 			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz", "player_post_edit_line_streaming"
 		},

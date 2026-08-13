@@ -195,8 +195,8 @@ If the current code already contains part of a later phase, preserve working cod
 | Phase 2B — Persistent fixed-LOD GPU backend | Complete. Persistent pools, asynchronous count readback, transactional allocation, generation-safe publication, and bounded multi-draw are live. |
 | **Phase 3A — Production render integration** | **Complete for the current s&box renderer.** Standard lit Forward/Depth terrain rendering is live; the engine's generic indirect path reports `IndirectFirstInstance=false`, so the bounded world-space vertex fallback is retained and explicitly reported. |
 | **Phase 3B — Fixed-LOD movement streaming** | **Complete.** Actual player observers drive same-frame desired-set deltas, bounded queues, persistent residents, CPU frustum culling, and the required GPU traversal scenarios. |
-| Phase 4 — 3D clipbox LOD and transitions | After fixed-LOD streaming passes. |
-| Phase 5 — Sparse edits and CPU collision integration | After LOD correctness. |
+| Phase 4 — 3D clipbox LOD and transitions | Complete. The canonical clipbox planner, regular/transition ownership, coherent streaming, and required movement proofs are live. |
+| Phase 5 — Sparse edits and CPU collision integration | Complete. CPU-authoritative sparse edits, bounded baked bricks, recent-operation replay, persistence, GPU propagation, invalidation, and collision integration are live and covered by the required edit proofs. |
 | Phase 6 — Final adoption campaign | After all mandatory behavior exists. |
 
 Do not start Phase 4 merely because the current batch proof renders multiple blocks.

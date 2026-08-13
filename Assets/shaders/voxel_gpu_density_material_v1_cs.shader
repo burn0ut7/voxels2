@@ -54,7 +54,7 @@ CS
 		[loop] for ( uint localZ = 0; localZ < (uint)HaloSize; localZ++ )
 		{
 			float sampleZ = request.SampleOrigin.z + ((float)localZ - 1.0f) * request.SampleScale.z;
-			densities[localZ] = EvaluateTerrainDensityFromSurfaceHeight( sampleZ, surfaceHeight, SdfClampDistance );
+			densities[localZ] = ApplyVoxelEditBrick( float3( sampleXY, sampleZ ), EvaluateTerrainDensityFromSurfaceHeight( sampleZ, surfaceHeight, SdfClampDistance ) );
 		}
 		uint editIndexOffset = (uint)request.SampleOrigin.w;
 		uint editIndexCount = (uint)request.SampleScale.w;

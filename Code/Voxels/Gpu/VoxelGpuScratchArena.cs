@@ -26,6 +26,8 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	private readonly GpuBuffer<VoxelGpuAllocationDescriptor> _allocations;
 	private readonly GpuBuffer<VoxelGpuEditOp> _editOperations;
 	private readonly GpuBuffer<uint> _editIndices;
+	private readonly GpuBuffer<VoxelGpuEditBrick> _bakedEditBricks;
+	private readonly GpuBuffer<float> _bakedEditDensities;
 	private readonly int _chunkSize;
 	private readonly int _sampleSize;
 	private readonly int _haloSize;
@@ -48,6 +50,7 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	private int _completedCount;
 	private long _readbackTimestamp;
 	private int _batchSize;
+	private int _bakedEditBrickCount;
 	private ArenaState _state;
 	private bool _disposed;
 
@@ -89,6 +92,8 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_allocations = new GpuBuffer<VoxelGpuAllocationDescriptor>( MaximumBatchSize, GpuBuffer.UsageFlags.Structured, "Voxel GPU Batch Allocations" );
 		_editOperations = new GpuBuffer<VoxelGpuEditOp>( VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Active Edits" );
 		_editIndices = new GpuBuffer<uint>( MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Batch Edit Indices" );
+		_bakedEditBricks = new GpuBuffer<VoxelGpuEditBrick>( VoxelEditBrickStore.MaximumBakedBricks, GpuBuffer.UsageFlags.Structured, "Voxel GPU Baked Edit Bricks" );
+		_bakedEditDensities = new GpuBuffer<float>( checked( VoxelEditBrickStore.MaximumBakedBricks * VoxelEditBrick.SampleCount ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Baked Edit Densities" );
 
 		_clear = new ComputeShader( "shaders/voxel_gpu_count_clear_cs.shader" );
 		_density = new ComputeShader( "shaders/voxel_gpu_density_material_v1_cs.shader" );
@@ -108,6 +113,8 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			(long)MaximumBatchSize * (sizeof( uint ) * 2 + 32 + 64) +
 			(long)VoxelEditJournal.MaximumGpuOperations * 80 +
 			(long)MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations * sizeof( uint ) +
+			(long)VoxelEditBrickStore.MaximumBakedBricks * 32 +
+			(long)VoxelEditBrickStore.MaximumBakedBricks * VoxelEditBrick.SampleCount * sizeof( float ) +
 			(long)_regularLookup.ElementCount * sizeof( uint );
 	}
 
@@ -115,6 +122,17 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 	{
 		if ( operations is null || count < 0 || count > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
 		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
+	}
+
+	public void SetBakedEditBricks( VoxelGpuEditBrick[] bricks, int count, float[] densities )
+	{
+		if ( bricks is null || count < 0 || count > VoxelEditBrickStore.MaximumBakedBricks || bricks.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
+		var requiredSamples = checked( System.Math.Max( 1, count * VoxelEditBrick.SampleCount ) );
+		if ( densities is null || densities.Length < requiredSamples ) throw new System.ArgumentException( "Baked edit density data is smaller than the submitted brick set.", nameof( densities ) );
+		if ( count > 0 ) _bakedEditBricks.SetData( new System.Span<VoxelGpuEditBrick>( bricks, 0, count ) );
+		if ( count > 0 ) _bakedEditDensities.SetData( new System.Span<float>( densities, 0, requiredSamples ) );
+		_bakedEditBrickCount = count;
+		_density.Attributes.Set( "VoxelEditBrickCount", count );
 	}
 
 	public bool TrySubmitCount( VoxelGpuBlockRequest[] requests, int count, uint[] editIndices, int editIndexCount, out double submissionMilliseconds )
@@ -137,6 +155,8 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_statistics.Clear();
 		Graphics.ResourceBarrierTransition( _editOperations, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _editIndices, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		Graphics.ResourceBarrierTransition( _bakedEditBricks, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		Graphics.ResourceBarrierTransition( _bakedEditDensities, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _densitySamples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _regularLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		foreach ( var buffer in new GpuBuffer[] { _cells, _edgeFlags, _edgeVertexIds, _statistics, _edgeGroupSums, _cellGroupSums, _blockCounts, _countResults } )
@@ -243,6 +263,10 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			shader.Attributes.Set( "CountResults", _countResults );
 			shader.Attributes.Set( "DrawIndexCounter", _unusedDrawCounter );
 			shader.Attributes.Set( "Allocations", _allocations );
+			shader.Attributes.Set( "VoxelEditBricks", _bakedEditBricks );
+			shader.Attributes.Set( "VoxelEditBrickDensities", _bakedEditDensities );
+			shader.Attributes.Set( "VoxelEditBrickCount", _bakedEditBrickCount );
+			shader.Attributes.Set( "VoxelEditBrickSize", VoxelEditBrickStore.BrickSize );
 			shader.Attributes.Set( "ChunkSize", _chunkSize );
 			shader.Attributes.Set( "SampleSize", _sampleSize );
 			shader.Attributes.Set( "HaloSize", _haloSize );
@@ -301,9 +325,9 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			if ( _disposed ) return;
 			_disposed = true;
 		}
-		_requests.Dispose(); _densitySamples.Dispose(); _regularLookup.Dispose(); _cells.Dispose(); _edgeFlags.Dispose();
-		_edgeVertexIds.Dispose(); _statistics.Dispose(); _edgeGroupSums.Dispose(); _cellGroupSums.Dispose(); _blockCounts.Dispose();
-		_unusedDrawCounter.Dispose(); _countResults.Dispose(); _allocations.Dispose(); _editOperations.Dispose(); _editIndices.Dispose();
+		_requests?.Dispose(); _densitySamples?.Dispose(); _regularLookup?.Dispose(); _cells?.Dispose(); _edgeFlags?.Dispose();
+		_edgeVertexIds?.Dispose(); _statistics?.Dispose(); _edgeGroupSums?.Dispose(); _cellGroupSums?.Dispose(); _blockCounts?.Dispose();
+		_unusedDrawCounter?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose(); _editOperations?.Dispose(); _editIndices?.Dispose(); _bakedEditBricks?.Dispose(); _bakedEditDensities?.Dispose();
 	}
 
 	private enum ArenaState { Idle, CountSubmitted, CountReady, EmitReady }

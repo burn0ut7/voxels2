@@ -1,3 +1,4 @@
+using System.IO;
 using System.Runtime.InteropServices;
 
 public enum VoxelEditShape : uint
@@ -47,13 +48,20 @@ internal readonly record struct VoxelEditEvaluationOp( VoxelEditOp Operation, BB
 internal sealed class VoxelEditJournal
 {
 	public const int MaximumGpuOperations = 1024;
+	public const int DefaultBakeThreshold = 96;
+	public const int RetainedRecentOperations = 32;
+	private const int FileMagic = 0x5645444A;
+	private const int FileVersion = 1;
 	private readonly object _gate = new();
 	private readonly List<VoxelEditOp> _operations = new();
+	private VoxelEditBrickStore _bakedBricks = new();
 	private ulong _nextEditId = 1;
 	private uint _worldRevision;
 
 	public int Count { get { lock ( _gate ) return _operations.Count; } }
 	public uint WorldRevision { get { lock ( _gate ) return _worldRevision; } }
+	public int BakedBrickCount { get { lock ( _gate ) return _bakedBricks.Count; } }
+	public long BakedSampleCount { get { lock ( _gate ) return _bakedBricks.SampleCountTotal; } }
 
 	public VoxelEditOp Append( VoxelEditOp operation )
 	{
@@ -74,7 +82,29 @@ internal sealed class VoxelEditJournal
 	}
 
 	public float EvaluateDistance( Vector3 canonicalSample, float proceduralDistance )
-		=> EvaluateDistance( CreateOperationSnapshot(), canonicalSample, proceduralDistance );
+	{
+		lock ( _gate )
+		{
+			var distance = _bakedBricks.TrySample( canonicalSample, out var bakedDistance, out _ ) ? bakedDistance : proceduralDistance;
+			foreach ( var operation in _operations ) distance = ApplyDistance( operation, canonicalSample, distance );
+			return distance;
+		}
+	}
+
+	public float EvaluateDistance( IReadOnlyList<VoxelEditEvaluationOp> operations, Vector3 canonicalSample, float proceduralDistance )
+	{
+		lock ( _gate )
+		{
+			var distance = _bakedBricks.TrySample( canonicalSample, out var bakedDistance, out _ ) ? bakedDistance : proceduralDistance;
+			foreach ( var evaluation in operations )
+			{
+				var operation = evaluation.Operation;
+				if ( operation.Operation == VoxelCsgOperation.MaterialPaint || !evaluation.Bounds.Contains( canonicalSample ) ) continue;
+				distance = ApplyDistance( distance, ShapeDistance( operation, canonicalSample ), operation.Operation, operation.Smoothness );
+			}
+			return distance;
+		}
+	}
 
 	public static float EvaluateDistance( IReadOnlyList<VoxelEditOp> operations, Vector3 canonicalSample, float proceduralDistance )
 	{
@@ -84,7 +114,7 @@ internal sealed class VoxelEditJournal
 		return distance;
 	}
 
-	public static float EvaluateDistance( IReadOnlyList<VoxelEditEvaluationOp> operations, Vector3 canonicalSample, float proceduralDistance )
+	public static float EvaluateDistanceWithBounds( IReadOnlyList<VoxelEditEvaluationOp> operations, Vector3 canonicalSample, float proceduralDistance )
 	{
 		var distance = proceduralDistance;
 		foreach ( var evaluation in operations )
@@ -103,7 +133,16 @@ internal sealed class VoxelEditJournal
 	}
 
 	public VoxelMaterial EvaluateMaterial( Vector3 canonicalSample, float distance, VoxelMaterial proceduralMaterial )
-		=> EvaluateMaterial( CreateOperationSnapshot(), canonicalSample, distance, proceduralMaterial );
+	{
+		lock ( _gate )
+		{
+			var baseMaterial = _bakedBricks.TrySample( canonicalSample, out var bakedDistance, out var bakedMaterial ) ? bakedMaterial : proceduralMaterial;
+			var effectiveDistance = _bakedBricks.TrySample( canonicalSample, out bakedDistance, out _ ) ? bakedDistance : distance;
+			var material = effectiveDistance < 0.0f ? baseMaterial : VoxelMaterial.Air;
+			foreach ( var operation in _operations ) material = ApplyMaterial( operation, canonicalSample, effectiveDistance, material );
+			return effectiveDistance < 0.0f ? material : VoxelMaterial.Air;
+		}
+	}
 
 	public static VoxelMaterial EvaluateMaterial( IReadOnlyList<VoxelEditOp> operations, Vector3 canonicalSample, float distance, VoxelMaterial proceduralMaterial )
 	{
@@ -162,6 +201,88 @@ internal sealed class VoxelEditJournal
 				if ( BoundsIntersect( GetBounds( operation ), bounds ) ) matching.Add( operation );
 			}
 			return matching.ToArray();
+		}
+	}
+
+	public VoxelEditBakeReport BakeIfNeeded( System.Func<Vector3, float> proceduralDistance, uint ruleVersion, int bakeThreshold = DefaultBakeThreshold )
+	{
+		if ( proceduralDistance is null ) throw new System.ArgumentNullException( nameof( proceduralDistance ) );
+		lock ( _gate )
+		{
+			if ( bakeThreshold < 1 ) throw new System.ArgumentOutOfRangeException( nameof( bakeThreshold ) );
+			if ( _operations.Count < bakeThreshold ) return new VoxelEditBakeReport( false, string.Empty, 0, _operations.Count, _bakedBricks.Count, 0, 0 );
+			var bakeCount = System.Math.Max( 1, _operations.Count - RetainedRecentOperations );
+			var report = _bakedBricks.Bake( _operations, bakeCount, proceduralDistance, ruleVersion );
+			if ( !report.Baked ) return report;
+			_operations.RemoveRange( 0, bakeCount );
+			return report with { RemainingOperations = _operations.Count };
+		}
+	}
+
+	public VoxelGpuEditBrick[] CreateGpuBrickSnapshot( out float[] samples )
+	{
+		lock ( _gate ) return _bakedBricks.CreateGpuBricks( out samples );
+	}
+
+	public VoxelEditPersistenceReport Save( string path, uint ruleVersion )
+	{
+		lock ( _gate )
+		{
+			try
+			{
+				using var stream = new MemoryStream();
+				using ( var writer = new BinaryWriter( stream, System.Text.Encoding.UTF8, true ) )
+				{
+					writer.Write( FileMagic );
+					writer.Write( FileVersion );
+					writer.Write( ruleVersion );
+					writer.Write( _worldRevision );
+					writer.Write( _nextEditId );
+					_bakedBricks.Write( writer );
+					writer.Write( _operations.Count );
+					foreach ( var operation in _operations ) WriteOperation( writer, operation );
+				}
+				FileSystem.Data.CreateDirectory( "voxel-terrain-edits" );
+				FileSystem.Data.WriteAllBytes( path, stream.ToArray() );
+				return new VoxelEditPersistenceReport( true, true, false, _operations.Count, _bakedBricks.Count, string.Empty );
+			}
+			catch ( System.Exception exception )
+			{
+				return new VoxelEditPersistenceReport( false, true, false, _operations.Count, _bakedBricks.Count, exception.Message );
+			}
+		}
+	}
+
+	public VoxelEditPersistenceReport Load( string path, uint ruleVersion )
+	{
+		lock ( _gate )
+		{
+			if ( !FileSystem.Data.FileExists( path ) ) return new VoxelEditPersistenceReport( true, false, false, _operations.Count, _bakedBricks.Count, string.Empty );
+			try
+			{
+				using var stream = new MemoryStream( FileSystem.Data.ReadAllBytes( path ).ToArray(), false );
+				using var reader = new BinaryReader( stream, System.Text.Encoding.UTF8, true );
+				if ( reader.ReadInt32() != FileMagic || reader.ReadInt32() != FileVersion ) throw new System.IO.InvalidDataException( "Voxel edit persistence format is not supported." );
+				var storedRuleVersion = reader.ReadUInt32();
+				var worldRevision = reader.ReadUInt32();
+				var nextEditId = reader.ReadUInt64();
+				var loadedBricks = VoxelEditBrickStore.Read( reader, ruleVersion, out var ruleVersionMismatch );
+				var operationCount = reader.ReadInt32();
+				if ( operationCount < 0 || operationCount > MaximumGpuOperations ) throw new System.IO.InvalidDataException( "Voxel edit persistence exceeded its bounded active journal capacity." );
+				var loadedOperations = new List<VoxelEditOp>( operationCount );
+				for ( var index = 0; index < operationCount; index++ ) loadedOperations.Add( ReadOperation( reader ) );
+				if ( storedRuleVersion != ruleVersion || ruleVersionMismatch ) return new VoxelEditPersistenceReport( false, true, true, _operations.Count, _bakedBricks.Count, $"Persisted terrain rule version {storedRuleVersion} does not match the active version {ruleVersion}." );
+				_bakedBricks = loadedBricks;
+				_operations.Clear();
+				_operations.AddRange( loadedOperations );
+				_worldRevision = worldRevision;
+				_nextEditId = System.Math.Max( nextEditId, _operations.Count == 0 ? 1UL : _operations[^1].EditId + 1 );
+				return new VoxelEditPersistenceReport( true, true, false, _operations.Count, _bakedBricks.Count, string.Empty );
+			}
+			catch ( System.Exception exception )
+			{
+				return new VoxelEditPersistenceReport( false, true, false, _operations.Count, _bakedBricks.Count, exception.Message );
+			}
 		}
 	}
 
@@ -263,6 +384,52 @@ internal sealed class VoxelEditJournal
 
 	private static float SmoothMaximum( float first, float second, float smoothing ) => -SmoothMinimum( -first, -second, smoothing );
 
+	private static void WriteOperation( BinaryWriter writer, VoxelEditOp operation )
+	{
+		writer.Write( operation.EditId );
+		writer.Write( operation.WorldRevision );
+		writer.Write( (uint)operation.Shape );
+		writer.Write( (uint)operation.Operation );
+		writer.Write( operation.Position.x );
+		writer.Write( operation.Position.y );
+		writer.Write( operation.Position.z );
+		writer.Write( operation.Rotation.x );
+		writer.Write( operation.Rotation.y );
+		writer.Write( operation.Rotation.z );
+		writer.Write( operation.Rotation.w );
+		writer.Write( operation.Size.x );
+		writer.Write( operation.Size.y );
+		writer.Write( operation.Size.z );
+		writer.Write( operation.Smoothness );
+		writer.Write( operation.MaterialId );
+	}
+
+	private static VoxelEditOp ReadOperation( BinaryReader reader )
+	{
+		return new VoxelEditOp
+		{
+			EditId = reader.ReadUInt64(),
+			WorldRevision = reader.ReadUInt32(),
+			Shape = (VoxelEditShape)reader.ReadUInt32(),
+			Operation = (VoxelCsgOperation)reader.ReadUInt32(),
+			Position = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() ),
+			Rotation = ReadRotation( reader ),
+			Size = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() ),
+			Smoothness = reader.ReadSingle(),
+			MaterialId = reader.ReadUInt16()
+		};
+	}
+
+	private static Rotation ReadRotation( BinaryReader reader )
+	{
+		var rotation = Rotation.Identity;
+		rotation.x = reader.ReadSingle();
+		rotation.y = reader.ReadSingle();
+		rotation.z = reader.ReadSingle();
+		rotation.w = reader.ReadSingle();
+		return rotation;
+	}
+
 	private static void Validate( VoxelEditOp operation )
 	{
 		if ( !System.Enum.IsDefined( operation.Shape ) ) throw new System.ArgumentOutOfRangeException( nameof( operation.Shape ) );
@@ -337,6 +504,14 @@ internal static class VoxelGpuEditDispatch
 		if ( uploadedOperationCount < 0 || uploadedOperationCount > VoxelEditJournal.MaximumGpuOperations ) throw new System.ArgumentOutOfRangeException( nameof( uploadedOperationCount ) );
 		if ( editRevision > (uint)uploadedOperationCount ) throw new System.InvalidOperationException( $"GPU block edit revision {editRevision} exceeds the uploaded journal length {uploadedOperationCount}." );
 		return editRevision;
+	}
+
+	public static int GetActiveOperationCount( VoxelGpuEditOp[] operations, int uploadedOperationCount, uint worldRevision )
+	{
+		if ( operations is null || uploadedOperationCount < 0 || uploadedOperationCount > VoxelEditJournal.MaximumGpuOperations || operations.Length < System.Math.Max( 1, uploadedOperationCount ) ) throw new System.ArgumentOutOfRangeException( nameof( uploadedOperationCount ) );
+		var count = 0;
+		while ( count < uploadedOperationCount && operations[count].WorldRevision <= worldRevision ) count++;
+		return count;
 	}
 }
 
