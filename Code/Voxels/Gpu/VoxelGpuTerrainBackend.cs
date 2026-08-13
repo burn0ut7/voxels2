@@ -7,6 +7,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly VoxelGpuScratchArena[] _scratchRing;
 	private readonly VoxelGpuTransitionScratchArena _transitionScratch;
 	private VoxelGpuTransitionScratchArena[] _transitionScratchRing;
+	private readonly uint[] _bakedEditLookup = new uint[VoxelEditBrickStore.BakedBrickLookupCapacity];
 	private readonly VoxelGpuMeshPool _pool;
 	private readonly VoxelGpuResidentTable _residents;
 	private readonly VoxelGpuTerrainRenderer _renderer;
@@ -226,7 +227,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			_transitionBatches[index] = new BatchContext( _transitionScheduledScratch[index], _transitionSlotScratch[index] );
 		}
 		if ( _editOperationCount > 0 ) _transitionScratchRing[1].SetEditOperations( _editOperations, _editOperationCount );
-		_transitionScratchRing[1].SetBakedEditBricks( _bakedEditBricks, _bakedEditBrickCount, _bakedEditDensities );
+		_transitionScratchRing[1].SetBakedEditBricks( _bakedEditBricks, _bakedEditBrickCount, _bakedEditDensities, _bakedEditLookup );
 	}
 
 	public void QueueStaticSet( IEnumerable<Vector3Int> coordinates, int ruleVersion ) => UpdateDesiredSet( coordinates, ruleVersion );
@@ -249,6 +250,17 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		if ( densities is null || densities.Length < requiredSamples ) throw new System.ArgumentException( "Baked edit density data is smaller than the submitted brick set.", nameof( densities ) );
 		_bakedEditBricks = count == 0 ? new VoxelGpuEditBrick[1] : bricks.ToArray();
 		_bakedEditDensities = count == 0 ? new float[1] : densities.ToArray();
+		System.Array.Clear( _bakedEditLookup, 0, _bakedEditLookup.Length );
+		for ( var index = 0; index < count; index++ )
+		{
+			var coordinate = new Vector3Int(
+				(int)System.MathF.Round( _bakedEditBricks[index].OriginAndSize.x / VoxelEditBrickStore.BrickSize ),
+				(int)System.MathF.Round( _bakedEditBricks[index].OriginAndSize.y / VoxelEditBrickStore.BrickSize ),
+				(int)System.MathF.Round( _bakedEditBricks[index].OriginAndSize.z / VoxelEditBrickStore.BrickSize ) );
+			var slot = BakedEditLookupHash( coordinate ) & (VoxelEditBrickStore.BakedBrickLookupCapacity - 1);
+			while ( _bakedEditLookup[slot] != 0 ) slot = (slot + 1) & (VoxelEditBrickStore.BakedBrickLookupCapacity - 1);
+			_bakedEditLookup[slot] = (uint)index + 1;
+		}
 		_bakedEditBrickCount = count;
 		_bakedEditRevisions.Clear();
 		var maximumRevision = 0u;
@@ -262,8 +274,20 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			maximumRevision = System.Math.Max( maximumRevision, _bakedEditBricks[index].WorldRevision );
 		}
 		_fixedLodEdits.RemoveAll( edit => edit.Revision <= maximumRevision );
-		foreach ( var scratch in _scratchRing ) scratch.SetBakedEditBricks( _bakedEditBricks, count, _bakedEditDensities );
-		foreach ( var scratch in _transitionScratchRing ) scratch.SetBakedEditBricks( _bakedEditBricks, count, _bakedEditDensities );
+		foreach ( var scratch in _scratchRing ) scratch.SetBakedEditBricks( _bakedEditBricks, count, _bakedEditDensities, _bakedEditLookup );
+		foreach ( var scratch in _transitionScratchRing ) scratch.SetBakedEditBricks( _bakedEditBricks, count, _bakedEditDensities, _bakedEditLookup );
+	}
+
+	private static int BakedEditLookupHash( Vector3Int coordinate )
+	{
+		unchecked
+		{
+			uint value = (uint)coordinate.x * 73856093u ^ (uint)coordinate.y * 19349663u ^ (uint)coordinate.z * 83492791u;
+			value ^= value >> 13;
+			value *= 1274126177u;
+			value ^= value >> 16;
+			return (int)value;
+		}
 	}
 
 	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )

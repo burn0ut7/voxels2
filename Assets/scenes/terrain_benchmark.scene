@@ -119,6 +119,13 @@
           "CpuMeshUploadsPerFrame": 4,
           "DetailedChunkLogLimit": 0,
           "LogGeneration": false,
+          "PersistEdits": false,
+          "EditPersistenceKey": "benchmark-ephemeral",
+          "VisualBackend": "GpuPersistentFixedLod",
+          "GpuTerrainLodPolicy": "RegularClipbox",
+          "GpuClipboxBlocksPerAxis": 8,
+          "GpuClipboxLevelCount": 4,
+          "GpuClipboxMatchChunkRadius": false,
           "SdfClampDistance": 8,
           "TerrainMaterial": null,
           "VoxelSize": 32

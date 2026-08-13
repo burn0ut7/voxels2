@@ -93,8 +93,18 @@ struct VoxelEditBrick
 
 StructuredBuffer<VoxelEditBrick> VoxelEditBricks < Attribute( "VoxelEditBricks" ); >;
 StructuredBuffer<float> VoxelEditBrickDensities < Attribute( "VoxelEditBrickDensities" ); >;
+StructuredBuffer<uint> VoxelEditBrickLookup < Attribute( "VoxelEditBrickLookup" ); >;
 uint VoxelEditBrickCount < Attribute( "VoxelEditBrickCount" ); >;
 int VoxelEditBrickSize < Attribute( "VoxelEditBrickSize" ); >;
+uint VoxelEditBrickLookupMask < Attribute( "VoxelEditBrickLookupMask" ); >;
+
+uint VoxelEditBrickHash( int3 coordinate )
+{
+	uint value = (uint)coordinate.x * 73856093u ^ (uint)coordinate.y * 19349663u ^ (uint)coordinate.z * 83492791u;
+	value ^= value >> 13;
+	value *= 1274126177u;
+	return value ^ (value >> 16);
+}
 
 float ReadVoxelEditBrickDensity( VoxelEditBrick brick, int x, int y, int z )
 {
@@ -105,11 +115,22 @@ float ReadVoxelEditBrickDensity( VoxelEditBrick brick, int x, int y, int z )
 
 bool TryGetVoxelEditBrickDensity( float3 canonicalSample, out float density )
 {
-	[loop] for ( uint brickIndex = 0; brickIndex < VoxelEditBrickCount; brickIndex++ )
+	int3 coordinate = (int3)floor( canonicalSample / (float)VoxelEditBrickSize );
+	uint lookupSlot = VoxelEditBrickHash( coordinate ) & VoxelEditBrickLookupMask;
+	[loop] for ( uint probe = 0; probe <= VoxelEditBrickLookupMask; probe++ )
 	{
+		uint encodedIndex = VoxelEditBrickLookup[lookupSlot];
+		if ( encodedIndex == 0 ) break;
+		uint brickIndex = encodedIndex - 1u;
 		VoxelEditBrick brick = VoxelEditBricks[brickIndex];
+		int3 brickCoordinate = (int3)round( brick.OriginAndSize.xyz / (float)VoxelEditBrickSize );
+		if ( any( brickCoordinate != coordinate ) )
+		{
+			lookupSlot = (lookupSlot + 1u) & VoxelEditBrickLookupMask;
+			continue;
+		}
 		float3 local = canonicalSample - brick.OriginAndSize.xyz;
-		if ( any( local < 0.0f ) || any( local > brick.OriginAndSize.www ) ) continue;
+		if ( any( local < 0.0f ) || any( local > brick.OriginAndSize.www ) ) break;
 		int x0 = clamp( (int)floor( local.x ), 0, VoxelEditBrickSize );
 		int y0 = clamp( (int)floor( local.y ), 0, VoxelEditBrickSize );
 		int z0 = clamp( (int)floor( local.z ), 0, VoxelEditBrickSize );

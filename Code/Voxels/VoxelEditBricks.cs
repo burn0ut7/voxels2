@@ -100,6 +100,7 @@ internal sealed class VoxelEditBrickStore
 	public const int SampleSize = BrickSize + 1;
 	public const int SampleCount = SampleSize * SampleSize * SampleSize;
 	public const int MaximumBakedBricks = 1024;
+	public const int BakedBrickLookupCapacity = 2048;
 	private const int FileMagic = 0x56454442;
 	private const int FileVersion = 1;
 	private readonly Dictionary<Vector3Int, VoxelEditBrick> _bricks = new();
@@ -142,6 +143,17 @@ internal sealed class VoxelEditBrickStore
 		{
 			var distances = new float[SampleCount];
 			var materials = new byte[SampleCount];
+			var brickOrigin = new Vector3( coordinate.x * BrickSize, coordinate.y * BrickSize, coordinate.z * BrickSize );
+			var brickMaximum = brickOrigin + Vector3.One * BrickSize;
+			var relevantOperations = new List<VoxelEditOp>();
+			for ( var operationIndex = 0; operationIndex < operationCount; operationIndex++ )
+			{
+				var operationBounds = VoxelEditJournal.GetBounds( operations[operationIndex] );
+				if ( operationBounds.Maxs.x < brickOrigin.x || operationBounds.Mins.x > brickMaximum.x ||
+					operationBounds.Maxs.y < brickOrigin.y || operationBounds.Mins.y > brickMaximum.y ||
+					operationBounds.Maxs.z < brickOrigin.z || operationBounds.Mins.z > brickMaximum.z ) continue;
+				relevantOperations.Add( operations[operationIndex] );
+			}
 			for ( var z = 0; z <= BrickSize; z++ )
 			for ( var y = 0; y <= BrickSize; y++ )
 			for ( var x = 0; x <= BrickSize; x++ )
@@ -154,9 +166,8 @@ internal sealed class VoxelEditBrickStore
 					distance = priorDistance;
 					material = priorMaterial;
 				}
-				for ( var operationIndex = 0; operationIndex < operationCount; operationIndex++ )
+				foreach ( var operation in relevantOperations )
 				{
-					var operation = operations[operationIndex];
 					distance = VoxelEditJournal.ApplyDistance( operation, canonicalSample, distance );
 					var sourceMaterial = material == VoxelMaterial.Air ? VoxelMaterial.Terrain : material;
 					material = VoxelEditJournal.ApplyMaterial( operation, canonicalSample, distance, sourceMaterial );

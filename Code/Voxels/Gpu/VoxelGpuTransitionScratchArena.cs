@@ -15,6 +15,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	private readonly GpuBuffer<uint> _editIndices;
 	private readonly GpuBuffer<VoxelGpuEditBrick> _bakedEditBricks;
 	private readonly GpuBuffer<float> _bakedEditDensities;
+	private readonly GpuBuffer<uint> _bakedEditLookup;
 	private readonly int _chunkSize;
 	private readonly int _transitionCellsPerAxis;
 	private readonly int _transitionCellCount;
@@ -64,10 +65,11 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		_editIndices = new GpuBuffer<uint>( MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Edit Indices" );
 		_bakedEditBricks = new GpuBuffer<VoxelGpuEditBrick>( VoxelEditBrickStore.MaximumBakedBricks, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Baked Edit Bricks" );
 		_bakedEditDensities = new GpuBuffer<float>( checked( VoxelEditBrickStore.MaximumBakedBricks * VoxelEditBrick.SampleCount ), GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Baked Edit Densities" );
+		_bakedEditLookup = new GpuBuffer<uint>( VoxelEditBrickStore.BakedBrickLookupCapacity, GpuBuffer.UsageFlags.Structured, "Voxel GPU Transition Baked Edit Lookup" );
 		_count = new ComputeShader( "shaders/voxel_gpu_transition_count_v1_cs.shader" );
 		_emit = new ComputeShader( "shaders/voxel_gpu_transition_emit_v1_cs.shader" );
 		BindAttributes();
-		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64) + (long)VoxelEditJournal.MaximumGpuOperations * 80 + (long)MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations * sizeof( uint ) + (long)VoxelEditBrickStore.MaximumBakedBricks * 32 + (long)VoxelEditBrickStore.MaximumBakedBricks * VoxelEditBrick.SampleCount * sizeof( float );
+		CapacityBytes = (long)MaximumBatchSize * 64 + (long)MaximumBatchSize * _transitionCellCount * SampleCount * sizeof( float ) + (long)_lookup.ElementCount * sizeof( uint ) + (long)MaximumBatchSize * (32 + 64) + (long)VoxelEditJournal.MaximumGpuOperations * 80 + (long)MaximumBatchSize * VoxelEditJournal.MaximumGpuOperations * sizeof( uint ) + (long)VoxelEditBrickStore.MaximumBakedBricks * 32 + (long)VoxelEditBrickStore.MaximumBakedBricks * VoxelEditBrick.SampleCount * sizeof( float ) + (long)VoxelEditBrickStore.BakedBrickLookupCapacity * sizeof( uint );
 	}
 
 	public void SetEditOperations( VoxelGpuEditOp[] operations, int count )
@@ -76,13 +78,15 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		if ( count > 0 ) _editOperations.SetData( new System.Span<VoxelGpuEditOp>( operations, 0, count ) );
 	}
 
-	public void SetBakedEditBricks( VoxelGpuEditBrick[] bricks, int count, float[] densities )
+	public void SetBakedEditBricks( VoxelGpuEditBrick[] bricks, int count, float[] densities, uint[] lookup )
 	{
 		if ( bricks is null || count < 0 || count > VoxelEditBrickStore.MaximumBakedBricks || bricks.Length < System.Math.Max( 1, count ) ) throw new System.ArgumentOutOfRangeException( nameof( count ) );
 		var requiredSamples = checked( System.Math.Max( 1, count * VoxelEditBrick.SampleCount ) );
 		if ( densities is null || densities.Length < requiredSamples ) throw new System.ArgumentException( "Baked edit density data is smaller than the submitted brick set.", nameof( densities ) );
 		if ( count > 0 ) _bakedEditBricks.SetData( new System.Span<VoxelGpuEditBrick>( bricks, 0, count ) );
 		if ( count > 0 ) _bakedEditDensities.SetData( new System.Span<float>( densities, 0, requiredSamples ) );
+		if ( lookup is null || lookup.Length != VoxelEditBrickStore.BakedBrickLookupCapacity ) throw new System.ArgumentException( "Baked edit lookup has an invalid capacity.", nameof( lookup ) );
+		_bakedEditLookup.SetData( lookup );
 		_bakedEditBrickCount = count;
 		foreach ( var shader in new[] { _count, _emit } ) shader.Attributes.Set( "VoxelEditBrickCount", count );
 	}
@@ -105,6 +109,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 		Graphics.ResourceBarrierTransition( _editIndices, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _bakedEditBricks, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _bakedEditDensities, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
+		Graphics.ResourceBarrierTransition( _bakedEditLookup, Sandbox.Rendering.ResourceState.NonPixelShaderResource );
 		Graphics.ResourceBarrierTransition( _samples, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		Graphics.ResourceBarrierTransition( _countResults, Sandbox.Rendering.ResourceState.UnorderedAccess );
 		_count.Attributes.Set( "BatchSize", count );
@@ -199,6 +204,8 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "VoxelEditIndices", _editIndices );
 			shader.Attributes.Set( "VoxelEditBricks", _bakedEditBricks );
 			shader.Attributes.Set( "VoxelEditBrickDensities", _bakedEditDensities );
+			shader.Attributes.Set( "VoxelEditBrickLookup", _bakedEditLookup );
+			shader.Attributes.Set( "VoxelEditBrickLookupMask", VoxelEditBrickStore.BakedBrickLookupCapacity - 1 );
 			shader.Attributes.Set( "VoxelEditBrickCount", _bakedEditBrickCount );
 			shader.Attributes.Set( "VoxelEditBrickSize", VoxelEditBrickStore.BrickSize );
 		}
@@ -223,7 +230,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 	public void Dispose()
 	{
 		lock ( _stateLock ) _disposed = true;
-		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose(); _editOperations?.Dispose(); _editIndices?.Dispose(); _bakedEditBricks?.Dispose(); _bakedEditDensities?.Dispose();
+		_requests?.Dispose(); _samples?.Dispose(); _lookup?.Dispose(); _countResults?.Dispose(); _allocations?.Dispose(); _editOperations?.Dispose(); _editIndices?.Dispose(); _bakedEditBricks?.Dispose(); _bakedEditDensities?.Dispose(); _bakedEditLookup?.Dispose();
 	}
 
 	private enum ArenaState { Idle, CountSubmitted, CountReady, EmitReady }
