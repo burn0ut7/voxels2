@@ -8,7 +8,8 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 43;
+	private const int SuiteVersion = 44;
+	private const string BenchmarkWorldScene = "basic_example";
 	private const int InfinityPathSampleCount = 512;
 
 	private static readonly ScenarioDefinition[] RequiredScenarios =
@@ -50,12 +51,6 @@ public sealed class VoxelTerrainBenchmark : Component
 	private bool _runRequested;
 	private bool _worldSettingsCaptured;
 	private bool _originalCaptureCallCounts;
-	private bool _originalPersistEdits;
-	private VoxelVisualBackendMode _originalVisualBackend;
-	private VoxelGpuTerrainLodPolicy _originalLodPolicy;
-	private int _originalClipboxBlocks;
-	private int _originalClipboxLevels;
-	private bool _originalClipboxMatchRadius;
 
 	[Property, Group( "Run" )]
 	public bool RunOnStart { get; set; } = true;
@@ -210,12 +205,6 @@ public sealed class VoxelTerrainBenchmark : Component
 		CaptureSettings();
 		_manager.CaptureCallCounts = true;
 		_manager.SetBenchmarkPlayerProtection( true );
-		_manager.PersistEdits = false;
-		_manager.VisualBackend = VoxelVisualBackendMode.GpuPersistentFixedLod;
-		_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
-		_manager.GpuClipboxBlocksPerAxis = 8;
-		_manager.GpuClipboxLevelCount = 4;
-		_manager.GpuClipboxMatchChunkRadius = false;
 		BeginScenario( RequiredScenarios[_scenarioIndex] );
 		try
 		{
@@ -226,7 +215,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		{
 			FailRun( $"GPU terrain startup failed: {exception.Message}" );
 		}
-		Log.Info( $"Voxel terrain benchmark {_runId} started in GPU-only mode at revision {Revision} (dirty={WorkingTreeDirty})." );
+		Log.Info( $"Voxel terrain benchmark {_runId} started in GPU-only mode on {BenchmarkWorldScene} at revision {Revision} (dirty={WorkingTreeDirty})." );
 	}
 
 	private void BeginScenario( ScenarioDefinition definition )
@@ -493,12 +482,6 @@ public sealed class VoxelTerrainBenchmark : Component
 		if ( _worldSettingsCaptured ) return;
 		_worldSettingsCaptured = true;
 		_originalCaptureCallCounts = _manager.CaptureCallCounts;
-		_originalPersistEdits = _manager.PersistEdits;
-		_originalVisualBackend = _manager.VisualBackend;
-		_originalLodPolicy = _manager.GpuTerrainLodPolicy;
-		_originalClipboxBlocks = _manager.GpuClipboxBlocksPerAxis;
-		_originalClipboxLevels = _manager.GpuClipboxLevelCount;
-		_originalClipboxMatchRadius = _manager.GpuClipboxMatchChunkRadius;
 	}
 
 	private void RestoreSettings()
@@ -506,12 +489,6 @@ public sealed class VoxelTerrainBenchmark : Component
 		if ( !_worldSettingsCaptured || _manager is null ) return;
 		_manager.SetBenchmarkPlayerProtection( false );
 		_manager.CaptureCallCounts = _originalCaptureCallCounts;
-		_manager.PersistEdits = _originalPersistEdits;
-		_manager.VisualBackend = _originalVisualBackend;
-		_manager.GpuTerrainLodPolicy = _originalLodPolicy;
-		_manager.GpuClipboxBlocksPerAxis = _originalClipboxBlocks;
-		_manager.GpuClipboxLevelCount = _originalClipboxLevels;
-		_manager.GpuClipboxMatchChunkRadius = _originalClipboxMatchRadius;
 		_worldSettingsCaptured = false;
 	}
 
@@ -523,7 +500,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		var required = string.Join( ",", RequiredScenarios.Select( scenario => $"\"{Json( scenario.Name )}\"" ) );
 		var executed = string.Join( ",", _results.Select( result => $"\"{Json( result.Name )}\"" ) );
 		var scenarios = string.Join( ",\n", _results.Select( result => "    " + SerializeScenarioJson( result ) ) );
-		var latest = $"{{\n  \"run_id\":\"{Json( _runId )}\",\n  \"suite_version\":{SuiteVersion},\n  \"benchmark_mode\":\"GpuOnly\",\n  \"suite_complete\":{complete.ToString().ToLowerInvariant()},\n  \"failure\":\"{Json( _failureReason )}\",\n  \"revision\":\"{Json( Revision )}\",\n  \"working_tree_dirty\":{WorkingTreeDirty.ToString().ToLowerInvariant()},\n  \"required_scenarios\":[{required}],\n  \"executed_scenarios\":[{executed}],\n  \"scenarios\":[\n{scenarios}\n  ]\n}}";
+		var latest = $"{{\n  \"run_id\":\"{Json( _runId )}\",\n  \"suite_version\":{SuiteVersion},\n  \"benchmark_mode\":\"GpuOnly\",\n  \"world_scene\":\"{BenchmarkWorldScene}\",\n  \"suite_complete\":{complete.ToString().ToLowerInvariant()},\n  \"failure\":\"{Json( _failureReason )}\",\n  \"revision\":\"{Json( Revision )}\",\n  \"working_tree_dirty\":{WorkingTreeDirty.ToString().ToLowerInvariant()},\n  \"required_scenarios\":[{required}],\n  \"executed_scenarios\":[{executed}],\n  \"scenarios\":[\n{scenarios}\n  ]\n}}";
 		FileSystem.Data.WriteAllText( LatestJsonPath, latest );
 		FileSystem.Data.WriteAllText( LatestMarkdownPath, BuildMarkdown( complete ) );
 		AppendHistoryJsonLines();
@@ -555,7 +532,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		var builder = new System.Text.StringBuilder();
 		builder.AppendLine( "# Voxel Terrain Benchmark" ).AppendLine();
 		builder.AppendLine( $"- Run: `{_runId}`" );
-		builder.AppendLine( $"- Mode: GPU-only" );
+		builder.AppendLine( $"- Mode: GPU-only on `{BenchmarkWorldScene}`" );
 		builder.AppendLine( $"- Revision: `{Revision}` (dirty={WorkingTreeDirty})" );
 		builder.AppendLine( $"- completeness: **{(complete ? "COMPLETE" : "FAILED/INCOMPLETE")}** ({_results.Count}/{RequiredScenarios.Length})" ).AppendLine();
 		builder.AppendLine( "| Scenario | Result | Avg FPS | Frame p95 | Edits | Traversal updates |" ).AppendLine( "|---|---:|---:|---:|---:|---:|" );

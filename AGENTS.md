@@ -31,7 +31,7 @@ Each feature has exactly one authoritative implementation and one ownership boun
 
 ## Voxel performance corpus
 
-- `Assets/scenes/terrain_benchmark.scene` and `Code/Voxels/VoxelTerrainBenchmark.cs` define the authoritative voxel performance suite. Maintain one suite and one reporting pipeline; do not create narrower alternate benchmarks for individual optimizations.
+- `Assets/scenes/basic_example.scene` and `Code/Voxels/VoxelTerrainBenchmark.cs` define the authoritative voxel performance suite. Maintain one world, one suite, and one reporting pipeline; do not create narrower alternate benchmarks for individual optimizations.
 - Running the suite is optional. When it runs, every registered scenario must execute in its declared order, including cold generation, varied edits, bulk editing, sustained world-wide digging, and sustained placement. A missing, duplicated, timed-out, faulted, or skipped scenario makes the run incomplete and the report a failure.
 - New terrain behavior that affects generation, meshing, collision, editing, streaming, persistence, memory, file/cache I/O, rendering, or networking must extend the authoritative suite and its required scenario manifest in the same change. Mark unavailable systems explicitly; never synthesize passing data for an implementation that does not exist.
 - Keep profiling coverage always-on inside an active suite run: frame pacing and FPS distribution, stutters, latency, CPU/GPU timings, allocations and GC, process and render memory, topology/work totals, call/work-unit counts, collision, and applicable file/cache and network metrics. Only the decision to start diagnostics is optional.

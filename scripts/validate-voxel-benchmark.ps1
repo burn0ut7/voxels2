@@ -22,6 +22,8 @@ $historyJsonlPath = Join-Path $ReportDirectory 'history.jsonl'
 $historyCsvPath = Join-Path $ReportDirectory 'history.csv'
 $latestMarkdownPath = Join-Path $ReportDirectory 'latest-report.md'
 $dashboardPath = Join-Path $ReportDirectory 'dashboard.html'
+$basicScenePath = Join-Path $ProjectRoot 'Assets\scenes\basic_example.scene'
+$compatibilityScenePath = Join-Path $ProjectRoot 'Assets\scenes\terrain_benchmark.scene'
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure([string] $Message) { $failures.Add($Message) }
@@ -31,12 +33,20 @@ function Require-Property($Object, [string] $Name, [string] $Context) {
 }
 
 foreach ($path in @($latestJsonPath, $historyJsonlPath, $historyCsvPath, $latestMarkdownPath, $dashboardPath)) { Require-Path $path }
+Require-Path $basicScenePath
+Require-Path $compatibilityScenePath
 if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+
+$basicScene = Get-Content -LiteralPath $basicScenePath -Raw
+$compatibilityScene = Get-Content -LiteralPath $compatibilityScenePath -Raw
+if ($basicScene -notmatch '"__type": "VoxelManager"' -or $basicScene -notmatch '"__type": "VoxelTerrainBenchmark"') { Add-Failure 'basic_example.scene is missing the authoritative voxel benchmark world/components' }
+if ($compatibilityScene -match '"__type": "VoxelManager"' -or $compatibilityScene -match '"__type": "VoxelTerrainBenchmark"') { Add-Failure 'terrain_benchmark.scene still contains a duplicate voxel world or benchmark component' }
 
 $report = Get-Content -LiteralPath $latestJsonPath -Raw | ConvertFrom-Json
 if ($report.benchmark_mode -ne 'GpuOnly') { Add-Failure "Latest report benchmark_mode is '$($report.benchmark_mode)', expected GpuOnly" }
 if ($report.suite_complete -ne $true) { Add-Failure 'Latest report is not marked complete' }
-if ([int]$report.suite_version -lt 43) { Add-Failure 'Latest report uses the legacy suite version' }
+if ([int]$report.suite_version -lt 44) { Add-Failure 'Latest report uses the legacy suite version' }
+if ($report.world_scene -ne 'basic_example') { Add-Failure "Latest report world_scene is '$($report.world_scene)', expected basic_example" }
 
 $requiredFromReport = @($report.required_scenarios)
 $executedFromReport = @($report.executed_scenarios)
