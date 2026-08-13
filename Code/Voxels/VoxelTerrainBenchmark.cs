@@ -73,7 +73,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	[Property, Group( "Editing" ), Range( 0.01f, 0.25f )]
 	public float SustainedEditIntervalSeconds { get; set; } = 0.05f;
 
-	[Property, Group( "Player Journey" ), Range( 128.0f, 10000.0f )]
+	[Property, Group( "Player Journey" ), Range( 128.0f, 100000.0f )]
 	public float TraversalDistance { get; set; } = 2048.0f;
 
 	[Property, Group( "Player Journey" ), Range( 1.0f, 5000.0f )]
@@ -535,6 +535,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		builder.AppendLine( $"- Mode: GPU-only on `{BenchmarkWorldScene}`" );
 		builder.AppendLine( $"- Revision: `{Revision}` (dirty={WorkingTreeDirty})" );
 		builder.AppendLine( $"- completeness: **{(complete ? "COMPLETE" : "FAILED/INCOMPLETE")}** ({_results.Count}/{RequiredScenarios.Length})" ).AppendLine();
+		builder.AppendLine( $"- Effective traversal workload: **{TraversalDistance:F0} units** at **{TraversalSpeed:F0} units/s**; these are immutable benchmark inputs and must not be reduced or changed between runs." );
 		builder.AppendLine( "| Scenario | Result | Avg FPS | Frame p95 | Edits | Traversal updates |" ).AppendLine( "|---|---:|---:|---:|---:|---:|" );
 		foreach ( var result in _results ) builder.AppendLine( $"| `{result.Name}` | {(result.Passed ? "PASS" : "FAIL")} | {result.AverageFramesPerSecond:F1} | {result.FrameP95Milliseconds:F2} ms | {result.EditCount} | {result.TraversalUpdates} |" );
 		builder.AppendLine().AppendLine( "The suite intentionally measures the GPU terrain path only. Player movement still uses normal collision so the traversal scenarios represent gameplay." );

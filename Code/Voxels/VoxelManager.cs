@@ -49,6 +49,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	private readonly Dictionary<Vector3Int, ChunkCollisionState> _chunkColliders = new();
 	private readonly Queue<Vector3Int> _collisionGenerationQueue = new();
 	private readonly HashSet<Vector3Int> _collisionGenerationQueuedChunks = new();
+	private readonly Dictionary<Vector3Int, System.Threading.Tasks.Task<CollisionChunkGenerationResult>> _collisionGenerationTasks = new();
 	private readonly Queue<Vector3Int> _collisionBuildQueue = new();
 	private readonly HashSet<Vector3Int> _collisionQueuedChunks = new();
 	private readonly HashSet<Vector3Int> _collisionDesiredChunks = new();
@@ -1470,7 +1471,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private int GetPendingCollisionBuildCount()
 	{
-		var pending = _collisionGenerationQueue.Count + _collisionBuildQueue.Count;
+		var pending = _collisionGenerationQueue.Count + _collisionGenerationTasks.Count + _collisionBuildQueue.Count;
 		foreach ( var state in _chunkColliders.Values )
 		{
 			if ( state.Task is not null || state.ReadyResult.HasValue || state.Dirty ||
@@ -2358,6 +2359,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		_coherentCollisionEditBatches.Clear();
 		_collisionGenerationQueue.Clear();
 		_collisionGenerationQueuedChunks.Clear();
+		_collisionGenerationTasks.Clear();
 		_collisionBuildQueue.Clear();
 		_collisionQueuedChunks.Clear();
 		_collisionDesiredChunks.Clear();
@@ -2841,22 +2843,52 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private void PumpCollisionGenerationQueue()
 	{
-		var start = System.Diagnostics.Stopwatch.GetTimestamp();
-		var generated = 0;
-		while ( _collisionGenerationQueue.TryDequeue( out var coordinate ) )
+		foreach ( var pair in _collisionGenerationTasks.ToArray() )
+		{
+			var task = pair.Value;
+			if ( !task.IsCompleted ) continue;
+
+			_collisionGenerationTasks.Remove( pair.Key );
+			if ( task.IsFaulted )
+			{
+				Log.Error( $"Voxel CPU collision SDF generation failed for chunk {pair.Key}: {task.Exception?.GetBaseException().Message}" );
+				continue;
+			}
+			if ( task.IsCanceled ) continue;
+
+			var result = task.Result;
+			if ( !_collisionDesiredChunks.Contains( pair.Key ) ) continue;
+			lock ( _sdfLock )
+			{
+				if ( !_chunks.ContainsKey( pair.Key ) ) _chunks.Add( pair.Key, result.Chunk );
+			}
+			_lastCollisionChunkGenerationTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+			_lastCollisionGeneratedChunk = pair.Key;
+			_lastCollisionChunkGenerationMilliseconds = result.GenerationMilliseconds;
+			_collisionChunksGenerated++;
+			if ( _staleCollisionChunks.Contains( pair.Key ) ) MarkDesiredCollisionStale( pair.Key );
+			QueueCollisionBuild( pair.Key );
+		}
+
+		var workerLimit = System.Math.Clamp( CollisionBuildConcurrency, 1, MaximumConcurrentCollisionBuilds );
+		while ( _collisionGenerationTasks.Count < workerLimit && _collisionGenerationQueue.TryDequeue( out var coordinate ) )
 		{
 			_collisionGenerationQueuedChunks.Remove( coordinate );
-			if ( !_collisionDesiredChunks.Contains( coordinate ) || _chunks.ContainsKey( coordinate ) ) continue;
+			if ( !_collisionDesiredChunks.Contains( coordinate ) || _collisionGenerationTasks.ContainsKey( coordinate ) ) continue;
+			lock ( _sdfLock )
+			{
+				if ( _chunks.ContainsKey( coordinate ) ) continue;
+			}
+
+			var chunkSize = ChunkSize;
+			var sdfClampDistance = SdfClampDistance;
 			var generationStart = System.Diagnostics.Stopwatch.GetTimestamp();
-			GenerateChunk( coordinate );
-			_lastCollisionChunkGenerationTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-			_lastCollisionGeneratedChunk = coordinate;
-			_lastCollisionChunkGenerationMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( generationStart, _lastCollisionChunkGenerationTimestamp ).TotalMilliseconds;
-			_collisionChunksGenerated++;
-			if ( _staleCollisionChunks.Contains( coordinate ) ) MarkDesiredCollisionStale( coordinate );
-			QueueCollisionBuild( coordinate );
-			generated++;
-			if ( generated >= 1 || System.Diagnostics.Stopwatch.GetElapsedTime( start ).TotalMilliseconds >= CpuMainThreadBudgetMilliseconds ) break;
+			_collisionGenerationTasks[coordinate] = GameTask.RunInThreadAsync( () =>
+			{
+				var chunk = new VoxelChunk( coordinate, chunkSize, sdfClampDistance );
+				FillChunk( chunk, chunkSize );
+				return new CollisionChunkGenerationResult( chunk, System.Diagnostics.Stopwatch.GetElapsedTime( generationStart ).TotalMilliseconds );
+			} );
 		}
 	}
 
@@ -3639,6 +3671,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 
 	private readonly record struct CpuBuildResult( int Generation, VoxelMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime, double MeshQueueMilliseconds, long WorkerCompletedTimestamp );
 	private readonly record struct CollisionBuildResult( int Generation, VoxelCollisionMeshData Mesh, System.TimeSpan SnapshotWaitTime, System.TimeSpan SnapshotTime, System.TimeSpan MeshingTime );
+	private readonly record struct CollisionChunkGenerationResult( VoxelChunk Chunk, double GenerationMilliseconds );
 	private readonly record struct CollisionObserver( Vector3Int Current, Vector3Int Lookahead );
 	private readonly record struct ChunkStreamTimingEvent( long Sequence, double SdfGenerationMilliseconds, double MeshQueueMilliseconds, double SdfSnapshotMilliseconds, double WorkerMeshMilliseconds, double PublicationWaitMilliseconds, double UploadMilliseconds, double RequestToRenderMilliseconds );
 	private readonly record struct BatchTimingEvent( long Sequence, double ElapsedMilliseconds );

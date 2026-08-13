@@ -467,7 +467,7 @@
           "ChunkSize": 32,
           "CollisionBuildConcurrency": 1,
           "CollisionBuildsPerFrame": 1,
-          "CollisionChunkRadius": 4,
+          "CollisionChunkRadius": 2,
           "CollisionLookaheadSeconds": 0.75,
           "CpuChunkBuildConcurrency": 4,
           "CpuMainThreadBudgetMilliseconds": 4,
@@ -555,8 +555,8 @@
           "ScenarioTimeoutSeconds": 180,
           "SustainedEditCount": 80,
           "SustainedEditIntervalSeconds": 0.05,
-          "TraversalDistance": 2048,
-          "TraversalSpeed": 700,
+          "TraversalDistance": 100000,
+          "TraversalSpeed": 5000,
           "WarmupFrames": 30
         }
       ],

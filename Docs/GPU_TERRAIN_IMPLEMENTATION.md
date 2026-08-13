@@ -1659,6 +1659,18 @@ BLOCKED_BY_LATER_PHASE
 
 A fixed-LOD phase is not failed merely because transition edits belong to a later phase. All scenarios still appear in reports.
 
+## 15.7 Immutable traversal workload
+
+The authoritative suite runs only in `Assets/scenes/basic_example.scene`. The serialized
+`VoxelTerrainBenchmark.TraversalDistance` and `TraversalSpeed` values are fixed workload
+inputs, not tuning knobs. They must remain unchanged between benchmark runs and must never
+be reduced to improve FPS or shorten a test. Any performance comparison with different
+distance or speed is invalid and must be reported as a different workload, not as an
+improvement.
+
+Every Markdown report records both values beside the scenario table. Reviewers must reject
+reports that omit them or compare runs with mismatched traversal inputs.
+
 ---
 
 # 16. Benchmark Scenarios by Phase

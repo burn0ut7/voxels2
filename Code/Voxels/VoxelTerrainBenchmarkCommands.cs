@@ -11,6 +11,16 @@ internal static class VoxelTerrainBenchmarkCommands
 			return;
 		}
 
+		// The benchmark is owned by basic_example. When that world is already
+		// running, invoking the command must not reload it and inject another
+		// startup/pipeline-cache hitch into the measurement.
+		var benchmark = activeScene.GetAllComponents<VoxelTerrainBenchmark>().FirstOrDefault();
+		if ( benchmark is not null )
+		{
+			benchmark.RunBenchmark();
+			return;
+		}
+
 		if ( !activeScene.LoadFromFile( benchmarkScene ) )
 		{
 			Log.Error( $"Voxel terrain benchmark could not load {benchmarkScene}." );
