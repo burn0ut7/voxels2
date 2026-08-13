@@ -279,6 +279,19 @@ internal static class VoxelEditInvalidation
 		return EnumerateBlocks( bounds, chunkSize, 0, new Vector3Int( 0, 0, -chunkSize ) );
 	}
 
+	/// <summary>
+	/// Returns chunks whose mesher input can change because the one-sample halo
+	/// crosses the edit bounds. The stored voxel payload may be unchanged in
+	/// these neighbours, but their boundary vertices are not authoritative until
+	/// their halo is rebuilt as well.
+	/// </summary>
+	public static HashSet<Vector3Int> GetCpuVisualChunks( VoxelEditOp operation, int chunkSize )
+	{
+		var bounds = VoxelEditJournal.GetBounds( operation );
+		var halo = Vector3.One;
+		return EnumerateBlocks( new BBox( bounds.Mins - halo, bounds.Maxs + halo ), chunkSize, 0, new Vector3Int( 0, 0, -chunkSize ) );
+	}
+
 	public static HashSet<VoxelVisualBlockKey> GetVisualBlocks( VoxelEditOp operation, IEnumerable<VoxelVisualBlockKey> candidates, int chunkSize )
 	{
 		var result = new HashSet<VoxelVisualBlockKey>();

@@ -13,6 +13,8 @@ internal readonly record struct VoxelClipboxConfig
 	public int StableTransitionSlotCount => checked( (LevelCount - 1) * 6 * BlocksPerAxis * BlocksPerAxis );
 	public int ExpectedActiveRegularCount => checked( BlocksPerAxis * BlocksPerAxis * BlocksPerAxis +
 		(LevelCount - 1) * (BlocksPerAxis * BlocksPerAxis * BlocksPerAxis - (BlocksPerAxis / 2) * (BlocksPerAxis / 2) * (BlocksPerAxis / 2)) );
+	public int NominalCoverageRadius => GetNominalCoverageRadius( BlocksPerAxis, LevelCount );
+	public int GuaranteedCoverageRadius => GetGuaranteedCoverageRadius( BlocksPerAxis, LevelCount );
 
 	public VoxelClipboxConfig( int blocksPerAxis, int levelCount, ushort ruleVersion = 0, uint editRevision = 0 )
 	{
@@ -31,4 +33,25 @@ internal readonly record struct VoxelClipboxConfig
 
 	public static VoxelClipboxConfig DevelopmentDefault => new( 8, 4 );
 	public static VoxelClipboxConfig FastCorrectness => new( 4, 2 );
+
+	public static int GetNominalCoverageRadius( int blocksPerAxis, int levelCount ) =>
+		checked( blocksPerAxis * (1 << (levelCount - 1)) / 2 );
+
+	public static int GetGuaranteedCoverageRadius( int blocksPerAxis, int levelCount )
+	{
+		if ( levelCount < 1 || levelCount > MaximumLevelCount ) throw new System.ArgumentOutOfRangeException( nameof( levelCount ) );
+		// Level origins must move in two-block increments so adjacent LOD boundaries
+		// stay aligned. An observer can therefore approach within two outer-level
+		// blocks of the leading edge before that level recenters. Nominal radius
+		// alone overstates the distance that is available in every direction.
+		var guaranteedBlocks = System.Math.Max( 0, blocksPerAxis / 2 - 2 );
+		return checked( guaranteedBlocks * (1 << (levelCount - 1)) );
+	}
+
+	public static int GetLevelCountForGuaranteedRadius( int blocksPerAxis, int radius )
+	{
+		var levelCount = 1;
+		while ( GetGuaranteedCoverageRadius( blocksPerAxis, levelCount ) < radius && levelCount < MaximumLevelCount ) levelCount++;
+		return levelCount;
+	}
 }

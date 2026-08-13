@@ -2,7 +2,7 @@ MODES
 {
 	Default();
 }
-// Transvoxel per-owned-face secondary ownership with stable zero-density normals.
+// Transvoxel per-owned-face secondary ownership with stable unclamped zero-density normals.
 CS
 {
 	#include "system.fxc"

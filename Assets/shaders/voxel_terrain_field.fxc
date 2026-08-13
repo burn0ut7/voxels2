@@ -53,7 +53,12 @@ float EvaluateTerrainSurfaceHeight( float2 canonicalSample, float simplexFrequen
 
 float EvaluateTerrainDensityFromSurfaceHeight( float canonicalSampleZ, float surfaceHeight, float sdfClampDistance )
 {
-	return clamp( canonicalSampleZ - surfaceHeight, -sdfClampDistance, sdfClampDistance );
+	// Persistent GPU LODs interpolate this value across increasingly large
+	// sample steps. Clamping to the LOD0 storage range makes both ends of a
+	// coarse edge saturate at equal magnitude and moves its zero crossing toward
+	// the edge midpoint (most visibly at LOD6). Keep the procedural field's true
+	// signed distance; GPU buffers store floats and do not require CPU quantizing.
+	return canonicalSampleZ - surfaceHeight;
 }
 
 float EvaluateTerrainDensity( float3 canonicalSample, float sdfClampDistance, float simplexFrequency, float simplexAmplitude, float simplexBaseHeight, int simplexSeed )
@@ -115,7 +120,6 @@ float ApplyTerrainEditShape( VoxelEditOperation edit, float3 canonicalSample, fl
 
 float FinalizeEditedTerrainDensity( float density, float sdfClampDistance )
 {
-	density = clamp( density, -sdfClampDistance, sdfClampDistance );
 	return abs( density ) < 0.001f ? 0.001f : density;
 }
 

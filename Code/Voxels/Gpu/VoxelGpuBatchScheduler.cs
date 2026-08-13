@@ -2,6 +2,7 @@ internal sealed class VoxelGpuBatchScheduler
 {
 	private readonly Queue<ScheduledRequest> _requests = new();
 	private readonly Queue<ScheduledRequest> _retainedScratch = new();
+	private readonly List<ScheduledRequest> _priorityScratch = new();
 	private readonly Dictionary<VoxelVisualBlockKey, uint> _latestGenerations = new();
 	private readonly object _sync = new();
 	private readonly int _maximumPendingRequests;
@@ -74,6 +75,31 @@ internal sealed class VoxelGpuBatchScheduler
 					_retainedScratch.Enqueue( request );
 			}
 			while ( _retainedScratch.Count > 0 ) _requests.Enqueue( _retainedScratch.Dequeue() );
+			return _requests.Count;
+		}
+	}
+
+	public int PruneAndPrioritize( HashSet<VoxelVisualBlockKey> desiredKeys, IReadOnlyDictionary<VoxelVisualBlockKey, int> desiredRanks )
+	{
+		if ( desiredKeys is null ) throw new System.ArgumentNullException( nameof( desiredKeys ) );
+		if ( desiredRanks is null ) throw new System.ArgumentNullException( nameof( desiredRanks ) );
+		lock ( _sync )
+		{
+			_priorityScratch.Clear();
+			while ( _requests.Count > 0 )
+			{
+				var request = _requests.Dequeue();
+				if ( desiredKeys.Contains( request.Key ) && _latestGenerations.TryGetValue( request.Key, out var generation ) && generation == request.Generation )
+					_priorityScratch.Add( request );
+			}
+			_priorityScratch.Sort( (left, right) =>
+			{
+				var leftRank = desiredRanks.TryGetValue( left.Key, out var leftValue ) ? leftValue : int.MaxValue;
+				var rightRank = desiredRanks.TryGetValue( right.Key, out var rightValue ) ? rightValue : int.MaxValue;
+				var rank = leftRank.CompareTo( rightRank );
+				return rank != 0 ? rank : left.RequestedTimestamp.CompareTo( right.RequestedTimestamp );
+			} );
+			foreach ( var request in _priorityScratch ) _requests.Enqueue( request );
 			return _requests.Count;
 		}
 	}

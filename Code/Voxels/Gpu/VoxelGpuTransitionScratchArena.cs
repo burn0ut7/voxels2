@@ -170,7 +170,7 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "TriangleOffset", _triangleOffset );
 			shader.Attributes.Set( "VertexOffset", _vertexOffset );
 			shader.Attributes.Set( "VoxelSize", _voxelSize );
-			shader.Attributes.Set( "SdfClampDistance", _sdfClampDistance );
+			shader.Attributes.Set( "SdfClampDistance", GetGpuInterpolationClampDistance() );
 			shader.Attributes.Set( "SimplexFrequency", _simplexFrequency );
 			shader.Attributes.Set( "SimplexAmplitude", _simplexAmplitude );
 			shader.Attributes.Set( "SimplexBaseHeight", _simplexBaseHeight );
@@ -179,6 +179,9 @@ internal sealed class VoxelGpuTransitionScratchArena : System.IDisposable
 			shader.Attributes.Set( "VoxelEditIndices", _editIndices );
 		}
 	}
+
+	private float GetGpuInterpolationClampDistance() =>
+		_sdfClampDistance * (1 << VoxelClipboxConfig.MaximumLevelCount);
 
 	private static GpuBuffer<uint> CreateLookupBuffer()
 	{

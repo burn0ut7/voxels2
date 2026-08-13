@@ -72,6 +72,9 @@ internal static class VoxelClipboxPlannerProof
 				case "phase4_neighbor_difference":
 					ValidateConfigurations( true, ref cases, ref configurations, ref activeRegularCount, ref stableRegularSlots );
 					break;
+				case "phase4_guaranteed_outer_coverage":
+					ValidateGuaranteedOuterCoverage( ref cases );
+					break;
 				case "phase4_four_level_b4_movement":
 					ValidateFourLevelStreaming( 4, ref cases, ref activeRegularCount, ref stableRegularSlots );
 					break;
@@ -93,6 +96,25 @@ internal static class VoxelClipboxPlannerProof
 		catch ( Exception exception )
 		{
 			return new VoxelClipboxPlannerProofReport( false, exception.Message, cases, configurations, activeRegularCount, stableRegularSlots, -1 );
+		}
+	}
+
+	private static void ValidateGuaranteedOuterCoverage( ref int cases )
+	{
+		const int blocksPerAxis = 8;
+		foreach ( var radius in new[] { 8, 9, 16, 32, 64, 128 } )
+		{
+			var levelCount = VoxelClipboxConfig.GetLevelCountForGuaranteedRadius( blocksPerAxis, radius );
+			var config = new VoxelClipboxConfig( blocksPerAxis, levelCount );
+			if ( config.GuaranteedCoverageRadius < radius ) throw new InvalidOperationException( $"B{blocksPerAxis} L{levelCount} only guarantees {config.GuaranteedCoverageRadius} chunks for requested radius {radius}." );
+
+			var spacing = 1 << (levelCount - 1);
+			var observerBaseBlock = new Vector3Int( spacing * 2 - 1, spacing * 2 - 1, spacing * 2 - 1 );
+			var origin = VoxelClipboxCoordinates.GetLevelOrigin( observerBaseBlock, levelCount - 1, blocksPerAxis );
+			var maximumExclusive = (origin + blocksPerAxis) * spacing;
+			var leadingCoverage = System.Math.Min( maximumExclusive.x - observerBaseBlock.x, System.Math.Min( maximumExclusive.y - observerBaseBlock.y, maximumExclusive.z - observerBaseBlock.z ) );
+			if ( leadingCoverage < radius ) throw new InvalidOperationException( $"B{blocksPerAxis} L{levelCount} exposes its leading edge after {leadingCoverage} chunks for requested radius {radius}." );
+			cases++;
 		}
 	}
 

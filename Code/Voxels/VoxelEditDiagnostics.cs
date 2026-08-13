@@ -64,7 +64,12 @@ internal static class VoxelEditDiagnostics
 		Require( visual.Count >= 2 && !visual.Contains( candidates[^1] ), "visual invalidation was not local and deterministic" );
 		var repeat = VoxelEditInvalidation.GetVisualBlocks( edit, candidates, 32 );
 		Require( visual.SetEquals( repeat ), "visual invalidation changed between identical calls" );
-		return new VoxelEditProofReport( true, string.Empty, 8, 1, visual.Count );
+		var interiorEdgeEdit = Operation( VoxelEditShape.Sphere, VoxelCsgOperation.Subtract, new Vector3( 31.5f, 0, 0 ), new Vector3( 0.25f, 0, 0 ) );
+		var storageChunks = VoxelEditInvalidation.GetCpuChunks( interiorEdgeEdit, 32 );
+		var visualChunks = VoxelEditInvalidation.GetCpuVisualChunks( interiorEdgeEdit, 32 );
+		Require( storageChunks.Contains( new Vector3Int( 0, 0, 0 ) ), "interior edit lost its owning storage chunk" );
+		Require( visualChunks.Count >= storageChunks.Count && visualChunks.Contains( new Vector3Int( 1, 0, 0 ) ), "one-sample halo did not invalidate the neighbouring visual chunk" );
+		return new VoxelEditProofReport( true, string.Empty, 10, 2, visual.Count + visualChunks.Count );
 	}
 
 	private static VoxelEditProofReport RunStaleGenerations()

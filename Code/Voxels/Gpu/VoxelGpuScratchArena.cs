@@ -255,7 +255,7 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 			shader.Attributes.Set( "RegularTriangleIndicesOffset", _regularTriangleIndicesOffset );
 			shader.Attributes.Set( "RegularVertexDataOffset", _regularVertexDataOffset );
 			shader.Attributes.Set( "VoxelSize", _voxelSize );
-			shader.Attributes.Set( "SdfClampDistance", _sdfClampDistance );
+			shader.Attributes.Set( "SdfClampDistance", GetGpuInterpolationClampDistance() );
 			shader.Attributes.Set( "DescriptorOffset", MaximumBatchSize * 2 );
 			shader.Attributes.Set( "TotalsOffset", MaximumBatchSize * 6 );
 		}
@@ -266,6 +266,9 @@ internal sealed class VoxelGpuScratchArena : System.IDisposable
 		_density.Attributes.Set( "VoxelEditOperations", _editOperations );
 		_density.Attributes.Set( "VoxelEditIndices", _editIndices );
 	}
+
+	private float GetGpuInterpolationClampDistance() =>
+		_sdfClampDistance * (1 << VoxelClipboxConfig.MaximumLevelCount);
 
 	private void SetBatchSize( int batchSize )
 	{

@@ -319,7 +319,8 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	public int EffectiveGpuClipboxLevelCount => ResolveGpuClipboxLevelCount();
 
 	[Property, ReadOnly, Group( "Rendering" )]
-	public int GpuClipboxCoverageRadius => checked( GpuClipboxBlocksPerAxis * (1 << (ResolveGpuClipboxLevelCount() - 1)) / 2 );
+	public int GpuClipboxCoverageRadius => VoxelClipboxConfig.GetGuaranteedCoverageRadius( GpuClipboxBlocksPerAxis, ResolveGpuClipboxLevelCount() );
+	public int GpuClipboxNominalCoverageRadius => VoxelClipboxConfig.GetNominalCoverageRadius( GpuClipboxBlocksPerAxis, ResolveGpuClipboxLevelCount() );
 
 	private VoxelClipboxConfig GpuClipboxConfig => new( GpuClipboxBlocksPerAxis, ResolveGpuClipboxLevelCount(), checked( (ushort)GpuTerrainRuleVersion ) );
 	public bool IsWorldGenerationPending => _worldGenerationPending;
@@ -818,7 +819,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 			}
 			_gpuTerrainBackend.SetRenderingEnabled( GpuTerrainRenderingEnabled );
 			_gpuTerrainBackend.SetProcessingEnabled( GpuTerrainProcessingEnabled );
-			Log.Info( $"Voxel persistent GPU terrain world scheduled: policy={GpuTerrainLodPolicy}, chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), clipbox={GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis} levels={EffectiveGpuClipboxLevelCount}, coverageRadius={GpuClipboxCoverageRadius}, matchRadius={GpuClipboxMatchChunkRadius}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
+			Log.Info( $"Voxel persistent GPU terrain world scheduled: policy={GpuTerrainLodPolicy}, chunks={DesiredChunkCount:N0}, residentCapacity={residentCapacity:N0}, staging={GpuStreamingStagingResidentCapacity:N0}, frustumPadding={GpuFrustumPaddingChunks:N0} chunk(s), clipbox={GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis}x{GpuClipboxBlocksPerAxis} levels={EffectiveGpuClipboxLevelCount}, guaranteedCoverageRadius={GpuClipboxCoverageRadius}, nominalCoverageRadius={GpuClipboxNominalCoverageRadius}, matchRadius={GpuClipboxMatchChunkRadius}, batchMax={VoxelGpuScratchArena.MaximumBatchSize:N0}, autoPool={GpuAutoScalePoolToChunkRadius}, vertexPool={FormatBytes( (long)EffectiveGpuVertexPoolCapacity * 44 )}, indexPool={FormatBytes( (long)EffectiveGpuIndexPoolCapacity * sizeof( uint ) )}, simplexFrequency={SimplexFrequency:F4}, simplexAmplitude={SimplexAmplitude:F1}, simplexBaseHeight={SimplexBaseHeight:F1}, simplexSeed={SimplexSeed}, rule={GpuTerrainRuleVersion}, geometryReadback=disabled." );
 		}
 		catch ( System.Exception exception )
 		{
@@ -1478,6 +1479,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		VoxelEditOp operation;
 		long testedSamples = 0;
 		long changedSamples = 0;
+		HashSet<Vector3Int> visualDirtyChunks;
 		lock ( _sdfLock )
 		{
 			writeWaitElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( writeWaitStart );
@@ -1493,6 +1495,11 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				changedSamples += changed;
 				if ( changed > 0 ) changedChunks.Add( coordinate );
 			}
+			// A regular mesh samples one voxel beyond each chunk face. Include
+			// neighbouring visual chunks even when the edit did not change their
+			// stored interior samples; otherwise a boundary vertex can retain the
+			// pre-edit halo and expose a crack until that chunk is revisited.
+			visualDirtyChunks = VoxelEditInvalidation.GetCpuVisualChunks( operation, ChunkSize );
 			sdfMutationElapsed = System.Diagnostics.Stopwatch.GetElapsedTime( sdfMutationStart );
 		}
 
@@ -1500,10 +1507,6 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		var collisionDirtyCount = 0;
 		foreach ( var coordinate in changedChunks )
 		{
-			if ( _cpuChunkStates.TryGetValue( coordinate, out var cpuState ) )
-			{
-				MarkCpuChunkDirty( cpuState );
-			}
 			_staleCollisionChunks.Add( coordinate );
 			if ( _collisionDesiredChunks.Contains( coordinate ) )
 			{
@@ -1511,7 +1514,12 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 				collisionDirtyCount++;
 			}
 		}
-		MergeCoherentVisualEditBatch( changedChunks );
+		foreach ( var coordinate in visualDirtyChunks )
+		{
+			if ( _cpuChunkStates.TryGetValue( coordinate, out var cpuState ) )
+				MarkCpuChunkDirty( cpuState );
+		}
+		MergeCoherentVisualEditBatch( visualDirtyChunks.ToList() );
 		MergeCoherentCollisionEditBatch( changedChunks );
 		ActivatePlayerSafetyForEdit( changedChunks );
 		PumpCpuChunkBuildQueue();
@@ -1532,7 +1540,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 		{
 			Log.Info(
 				$"Voxel edit: id={operation.EditId}, revision={operation.WorldRevision}, shape={operation.Shape}, operation={operation.Operation}, " +
-				$"dirtyCpuChunks={changedChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
+				$"dirtyCpuChunks={changedChunks.Count:N0}, visualDirtyCpuChunks={visualDirtyChunks.Count:N0}, dirtyGpuBlocks={gpuDirtyBlocks:N0}, activeJournal={_editJournal.Count:N0}, " +
 				$"cpuCollisionDirtyNearby={collisionDirtyCount:N0}, collisionStaleDeferred={changedChunks.Count - collisionDirtyCount:N0}, samplesTested/changed={testedSamples:N0}/{changedSamples:N0}, " +
 				$"sdfWriteWait={writeWaitElapsed.TotalMilliseconds:F2}ms, sdfMutation={sdfMutationElapsed.TotalMilliseconds:F2}ms, " +
 				$"cpuQueue={cpuQueueElapsed.TotalMilliseconds:F2}ms, gpuQueue={gpuQueueElapsed.TotalMilliseconds:F2}ms " +
@@ -1919,15 +1927,7 @@ public sealed class VoxelManager : Component, Component.ExecuteInEditor
 	{
 		if ( !GpuClipboxMatchChunkRadius ) return System.Math.Clamp( GpuClipboxLevelCount, 1, VoxelClipboxConfig.MaximumLevelCount );
 
-		var coverageRadius = GpuClipboxBlocksPerAxis / 2;
-		var levelCount = 1;
-		while ( coverageRadius < ChunkRadius && levelCount < VoxelClipboxConfig.MaximumLevelCount )
-		{
-			coverageRadius = checked( coverageRadius * 2 );
-			levelCount++;
-		}
-
-		return levelCount;
+		return VoxelClipboxConfig.GetLevelCountForGuaranteedRadius( GpuClipboxBlocksPerAxis, ChunkRadius );
 	}
 
 	private void ResolveGpuPoolCapacity()

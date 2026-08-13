@@ -13,7 +13,7 @@ public sealed class VoxelTerrainBenchmark : Component
 	private const string LatestMarkdownPath = ReportDirectory + "/latest-report.md";
 	private const string LatestJsonPath = ReportDirectory + "/latest-report.json";
 	private const string DashboardPath = ReportDirectory + "/dashboard.html";
-	private const int SuiteVersion = 41;
+	private const int SuiteVersion = 42;
 	private const int InfinityPathSampleCount = 1024;
 	private const int RealtimeSurfaceEditCount = 80;
 	private const float HighSpeedCollisionTraversalSpeed = 20000.0f;
@@ -27,6 +27,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_negative_coordinates",
 		"phase4_vertical_movement",
 		"phase4_regular_coverage",
+		"phase4_guaranteed_outer_coverage",
 		"phase4_no_lod_overlap",
 		"phase4_neighbor_difference",
 		"phase4_four_level_b4_movement",
@@ -56,6 +57,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_regular_b4_l4_stationary",
 		"phase4_regular_radius64_match",
 		"gpu_lod5_transition_ownership",
+		"gpu_lod6_transition_ownership",
 		"gpu_realtime_surface_edits_20hz",
 		"gpu_accumulated_surface_edits_20hz",
 		"gpu_aimed_brush_edits_20hz",
@@ -172,6 +174,12 @@ public sealed class VoxelTerrainBenchmark : Component
 	private long _phase4RegularSoakStartTimestamp;
 	private VoxelGpuPhase2BProofResult _pendingRegularClipboxProof;
 	private VoxelGpuClipboxSeamProofReport? _pendingLod5OwnershipProof;
+	private int _gpuLodOwnershipScenarioIndex;
+	private static readonly string[] GpuLodOwnershipScenarioNames = { "gpu_lod5_transition_ownership", "gpu_lod6_transition_ownership" };
+	private static readonly int[] GpuLodOwnershipLevelCounts = { 6, 7 };
+	private static readonly int[] GpuLodOwnershipExpectedRegular = { 2752, 3200 };
+	private static readonly int[] GpuLodOwnershipExpectedStable = { 3072, 3584 };
+	private static readonly int[] GpuLodOwnershipExpectedTransitions = { 1920, 2304 };
 	private CameraComponent _cameraSweepCamera;
 	private Rotation _cameraSweepOriginalRotation;
 	private VoxelCallCountSnapshot _collisionProximityBaseline;
@@ -192,6 +200,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_negative_coordinates",
 		"phase4_vertical_movement",
 		"phase4_regular_coverage",
+		"phase4_guaranteed_outer_coverage",
 		"phase4_no_lod_overlap",
 		"phase4_neighbor_difference",
 		"phase4_four_level_b4_movement",
@@ -234,9 +243,10 @@ public sealed class VoxelTerrainBenchmark : Component
 		"phase4_regular_radius64_match"
 	};
 	private static readonly int[] Phase4RegularBlocksPerAxis = { 4, 4, 8 };
-	private static readonly int[] Phase4RegularLevelCounts = { 2, 4, 5 };
-	private static readonly int[] Phase4RegularExpectedActiveCounts = { 120, 232, 2304 };
-	private static readonly int[] Phase4RegularExpectedStableSlots = { 128, 256, 2560 };
+	// Radius 64 now requires six levels under worst-case snapped-origin coverage.
+	private static readonly int[] Phase4RegularLevelCounts = { 2, 4, 6 };
+	private static readonly int[] Phase4RegularExpectedActiveCounts = { 120, 232, 2752 };
+	private static readonly int[] Phase4RegularExpectedStableSlots = { 128, 256, 3072 };
 	private const int FinalStationarySoakSeconds = 60;
 	private const string FinalStationaryScenarioName = "phase4_regular_b8_l4_stationary";
 
@@ -250,8 +260,9 @@ public sealed class VoxelTerrainBenchmark : Component
 	{
 		VoxelTerrainBenchmarkMode.GpuOnly => new[]
 		{
-			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
+			"phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_guaranteed_outer_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces",
 			"phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "phase4_regular_b4_l2_stationary", "phase4_regular_b4_l4_stationary", "phase4_regular_radius64_match", "gpu_lod5_transition_ownership", "gpu_realtime_surface_edits_20hz", "gpu_accumulated_surface_edits_20hz", "gpu_aimed_brush_edits_20hz", "gpu_far_aimed_brush_edits_20hz", "gpu_cpu_collision_rebuild_cost",
+			"gpu_lod6_transition_ownership",
 			"gpu_persistent_static_set", "gpu_camera_sweep_generation", "gpu_production_render_integration",
 			"gpu_player_infinity_streaming", "gpu_player_line_streaming", "gpu_player_diagonal_streaming",
 			"gpu_player_clipbox_oscillation", "high_speed_collision_streaming",
@@ -260,7 +271,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		},
 		VoxelTerrainBenchmarkMode.CpuOnly => new[]
 		{
-			"cold_generation", "collision_backlog_frame_budget", "collision_proximity_edit_filter", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
+			"cold_generation", "collision_backlog_frame_budget", "collision_proximity_edit_filter", "phase4_planner_counts", "phase4_planner_reference_equivalence", "phase4_negative_coordinates", "phase4_vertical_movement", "phase4_regular_coverage", "phase4_guaranteed_outer_coverage", "phase4_no_lod_overlap", "phase4_neighbor_difference", "phase4_four_level_b4_movement", "phase4_four_level_b8_movement", "phase4_four_level_stationary_soak", "phase4_transition_ownership", "phase5_sparse_edit_contract", "phase5_deterministic_invalidation", "phase5_stale_edit_generations", "phase5_edit_eviction_reentry", "phase5_voxel_brush_raycast", "phase5_gpu_edit_revision_binding", "phase5_incremental_edit_replay", "phase4_transition_all_512_cases", "phase4_transition_six_orientations", "phase4_transition_plane", "phase4_transition_sphere", "phase4_transition_cave", "phase4_transition_tangent_surface", "phase4_transition_watertight_edges", "phase4_transition_no_duplicate_faces", "phase4_indirect_1_to_1024", "phase4_indirect_boundary_49", "phase4_depth_opaque_parity", "phase4_command_list_active_range", "live_chunk_radius_reconfiguration", "player_infinity_streaming", "player_line_streaming",
 			"high_speed_collision_streaming", "player_diagonal_streaming", "chunk_seam_edit_coherence", "varied_edits", "bulk_edit",
 			"sustained_world_sweep_and_depth_dig_20hz", "sustained_world_spiral_place_20hz", "player_post_edit_line_streaming"
 		},
@@ -654,10 +665,11 @@ public sealed class VoxelTerrainBenchmark : Component
 				_manager.SetBenchmarkPlayerProtection( true );
 				_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
 				_manager.GpuClipboxBlocksPerAxis = 8;
-				_manager.GpuClipboxLevelCount = 6;
+				var startOwnershipIndex = _gpuLodOwnershipScenarioIndex;
+				_manager.GpuClipboxLevelCount = GpuLodOwnershipLevelCounts[startOwnershipIndex];
 				_manager.GpuClipboxMatchChunkRadius = false;
 				_manager.VisualBackend = VoxelVisualBackendMode.GpuPersistentFixedLod;
-				BeginScenario( "gpu_lod5_transition_ownership", "Production B8 L6 clipbox validates unique LOD-5 geometry ownership and non-coplanar transition deformation" );
+				BeginScenario( GpuLodOwnershipScenarioNames[startOwnershipIndex], $"Production B8 L{GpuLodOwnershipLevelCounts[startOwnershipIndex]} clipbox validates unique LOD-{GpuLodOwnershipLevelCounts[startOwnershipIndex] - 1} geometry ownership, vertical alignment, and transition deformation" );
 				_manager.GenerateGpuTerrainWorld();
 				_phase = BenchmarkPhase.WaitGpuLod5Ownership;
 				break;
@@ -666,14 +678,22 @@ public sealed class VoxelTerrainBenchmark : Component
 				{
 					var diagnostics = _manager.CaptureGpuTerrainDiagnostics();
 					_pendingLod5OwnershipProof = _manager.CaptureGpuClipboxSeamProofForBenchmark();
+					var ownershipIndex = _gpuLodOwnershipScenarioIndex;
 					var ownershipPassed = _pendingLod5OwnershipProof?.LodOwnershipPassed == true &&
-						diagnostics.RequestedBlocks == 2752 && diagnostics.ResidentBlocks == 2752 &&
-						diagnostics.ClipboxStableSlotCount == 3072 && diagnostics.ClipboxTransitionActiveSlotCount == 1920;
+						diagnostics.RequestedBlocks == GpuLodOwnershipExpectedRegular[ownershipIndex] && diagnostics.ResidentBlocks == GpuLodOwnershipExpectedRegular[ownershipIndex] &&
+						diagnostics.ClipboxStableSlotCount == GpuLodOwnershipExpectedStable[ownershipIndex] && diagnostics.ClipboxTransitionActiveSlotCount == GpuLodOwnershipExpectedTransitions[ownershipIndex];
 					if ( !ownershipPassed ) _sampler?.RecordFailure();
 					CompleteScenario( gpuTerrain: diagnostics, lod5OwnershipProof: _pendingLod5OwnershipProof );
 					if ( !ownershipPassed )
 					{
-						FailRun( $"LOD-5 transition ownership failed: {_pendingLod5OwnershipProof?.LodOwnershipFailure ?? "proof unavailable"}; regular={diagnostics.ResidentBlocks}/{diagnostics.RequestedBlocks}, stable={diagnostics.ClipboxStableSlotCount}, transitions={diagnostics.ClipboxTransitionActiveSlotCount}." );
+						FailRun( $"LOD-{GpuLodOwnershipLevelCounts[ownershipIndex] - 1} transition ownership failed: {_pendingLod5OwnershipProof?.LodOwnershipFailure ?? "proof unavailable"}; regular={diagnostics.ResidentBlocks}/{diagnostics.RequestedBlocks}, stable={diagnostics.ClipboxStableSlotCount}, transitions={diagnostics.ClipboxTransitionActiveSlotCount}." );
+						break;
+					}
+					_gpuLodOwnershipScenarioIndex++;
+					if ( _gpuLodOwnershipScenarioIndex < GpuLodOwnershipScenarioNames.Length )
+					{
+						_phase = BenchmarkPhase.StartGpuLod5Ownership;
+						StartWarmup();
 						break;
 					}
 					_phase = BenchmarkPhase.StartGpuRealtimeEdits;
@@ -883,6 +903,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementInfinity );
 				break;
 			case BenchmarkPhase.WaitGpuMovementInfinity:
+				MoveTraversalPlayer( _traversalStartWorldPosition );
 				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_infinity_streaming", BenchmarkPhase.StartGpuMovementLine );
 				break;
 			case BenchmarkPhase.StartGpuMovementLine:
@@ -893,6 +914,7 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementLine );
 				break;
 			case BenchmarkPhase.WaitGpuMovementLine:
+				MoveTraversalPlayer( _traversalStartWorldPosition );
 				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_line_streaming", BenchmarkPhase.StartGpuMovementDiagonal );
 				break;
 			case BenchmarkPhase.StartGpuMovementDiagonal:
@@ -903,9 +925,23 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementDiagonal );
 				break;
 			case BenchmarkPhase.WaitGpuMovementDiagonal:
-				if ( _manager.IsTerrainSettled ) CompleteGpuPlayerTraversal( "gpu_player_diagonal_streaming", BenchmarkPhase.StartGpuMovementVertical );
+				MoveTraversalPlayer( _traversalStartWorldPosition );
+				if ( _manager.IsTerrainSettled )
+				{
+					_phaseAfterHighSpeedCollisionTraversal = BenchmarkPhase.StartGpuLifecycleScenario;
+					CompleteGpuPlayerTraversal( "gpu_player_diagonal_streaming", BenchmarkPhase.StartGpuMovementVertical );
+				}
 				break;
 			case BenchmarkPhase.StartGpuMovementVertical:
+				_manager.GpuTerrainLodPolicy = VoxelGpuTerrainLodPolicy.RegularClipbox;
+				_manager.GpuClipboxBlocksPerAxis = 8;
+				_manager.GpuClipboxLevelCount = 7;
+				_manager.GpuClipboxMatchChunkRadius = false;
+				_manager.GenerateGpuTerrainWorld();
+				_phase = BenchmarkPhase.WaitGpuMovementVerticalSetup;
+				break;
+			case BenchmarkPhase.WaitGpuMovementVerticalSetup:
+				if ( !_manager.IsTerrainSettled ) break;
 				BeginPlayerTraversal( TraversalPath.Vertical, "gpu_player_clipbox_oscillation", "Actual player moves vertically across clipbox boundaries and back while coherent regular and transition revisions settle" );
 				_phase = BenchmarkPhase.RunGpuMovementVertical;
 				break;
@@ -913,19 +949,32 @@ public sealed class VoxelTerrainBenchmark : Component
 				RunPlayerTraversal( BenchmarkPhase.WaitGpuMovementVertical );
 				break;
 			case BenchmarkPhase.WaitGpuMovementVertical:
+				MoveTraversalPlayer( _traversalStartWorldPosition );
 				if ( _manager.IsTerrainSettled )
 				{
-					_phaseAfterHighSpeedCollisionTraversal = BenchmarkPhase.StartGpuLifecycleScenario;
 					CompleteGpuPlayerTraversal( "gpu_player_clipbox_oscillation", BenchmarkPhase.StartHighSpeedCollisionTraversal );
+					_manager.GpuTerrainLodPolicy = _originalGpuTerrainLodPolicy;
+					_manager.GpuClipboxBlocksPerAxis = _originalGpuClipboxBlocksPerAxis;
+					_manager.GpuClipboxLevelCount = _originalGpuClipboxLevelCount;
+					_manager.GpuClipboxMatchChunkRadius = _originalGpuClipboxMatchChunkRadius;
 				}
 				break;
 			case BenchmarkPhase.StartHighSpeedCollisionTraversal:
+				// GPU clipbox regeneration clears CPU colliders. Do not start the
+				// traversal until the required origin collider has republished; this
+				// keeps the scenario measuring traversal readiness instead of setup.
+				if ( _traversalPlayer is not null && !_manager.IsCollisionReadyAtWorldPosition( _traversalPlayer.WorldPosition ) )
+				{
+					HoldBenchmarkPlayersAtOrigin();
+					break;
+				}
 				BeginPlayerTraversal( TraversalPath.Line, "high_speed_collision_streaming", "Actual player traverses at 20,000 units/s while every occupied terrain chunk must already have collision", HighSpeedCollisionTraversalSpeed, true );
 				break;
 			case BenchmarkPhase.RunHighSpeedCollisionTraversal:
 				RunPlayerTraversal( BenchmarkPhase.WaitHighSpeedCollisionTraversal );
 				break;
 			case BenchmarkPhase.WaitHighSpeedCollisionTraversal:
+				MoveTraversalPlayer( _traversalStartWorldPosition );
 				if ( _manager.IsTerrainSettled ) CompleteHighSpeedCollisionTraversal();
 				break;
 			case BenchmarkPhase.StartGpuLifecycleScenario:
@@ -1196,6 +1245,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		_phase4TransitionScenarioIndex = 0;
 		_phase4IndirectScenarioIndex = 0;
 		_phase4RegularScenarioIndex = 0;
+		_gpuLodOwnershipScenarioIndex = 0;
 		_runId = System.DateTime.UtcNow.ToString( "yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture );
 		if ( Mode == VoxelTerrainBenchmarkMode.GpuOnly )
 		{
@@ -1453,6 +1503,10 @@ public sealed class VoxelTerrainBenchmark : Component
 
 		CompleteScenario( gpuTerrain: _manager.CaptureGpuTerrainDiagnostics() );
 		MoveTraversalPlayer( _traversalStartWorldPosition );
+		_manager.GpuTerrainLodPolicy = _originalGpuTerrainLodPolicy;
+		_manager.GpuClipboxBlocksPerAxis = _originalGpuClipboxBlocksPerAxis;
+		_manager.GpuClipboxLevelCount = _originalGpuClipboxLevelCount;
+		_manager.GpuClipboxMatchChunkRadius = _originalGpuClipboxMatchChunkRadius;
 		_phase = _phaseAfterHighSpeedCollisionTraversal;
 		StartWarmup();
 	}
@@ -2634,6 +2688,7 @@ public sealed class VoxelTerrainBenchmark : Component
 		RunGpuMovementDiagonal,
 		WaitGpuMovementDiagonal,
 		StartGpuMovementVertical,
+		WaitGpuMovementVerticalSetup,
 		RunGpuMovementVertical,
 		WaitGpuMovementVertical,
 		StartHighSpeedCollisionTraversal,

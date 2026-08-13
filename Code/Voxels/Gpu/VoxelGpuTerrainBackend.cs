@@ -39,6 +39,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private readonly HashSet<VoxelVisualBlockKey> _desiredTransitionKeys = new();
 	private readonly HashSet<VoxelVisualBlockKey> _desiredScratch = new();
 	private readonly HashSet<VoxelVisualBlockKey> _desiredTransitionScratch = new();
+	private readonly List<VoxelVisualBlockKey> _desiredTransitionOrderScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrder = new();
 	private readonly List<VoxelVisualBlockKey> _desiredOrderScratch = new();
 	private readonly List<VoxelVisualBlockKey> _desiredKeyInputScratch = new();
@@ -68,8 +69,10 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	private bool _disposed;
 	private int _slowRenderLogCount;
 	private int _slowDesiredSetLogCount;
+	private int _slowCommitLogCount;
 	private bool _processingEnabled = true;
 	private bool _clipboxRevisionPending;
+	private long _coalescedObserverUpdates;
 	private int _retireUndesiredRequested;
 	private int _worstPublishedRank = -1;
 	private readonly long _createdTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -236,6 +239,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 	public bool QueueClipboxObserver( Vector3Int observerCanonicalSample )
 	{
 		if ( _clipboxPlanner is null ) throw new System.InvalidOperationException( "Regular clipbox residency was not enabled for this GPU backend." );
+		// A newer observer sample will arrive next frame. Let the in-flight coherent
+		// regular+transition revision finish instead of invalidating its fine rings
+		// every frame and starving publication during continuous fast movement.
+		if ( _clipboxRevisionPending )
+		{
+			_coalescedObserverUpdates++;
+			return false;
+		}
 		if ( !_clipboxPlanner.Update( observerCanonicalSample ) )
 		{
 			_diagnostics.ClipboxStationaryUpdates++;
@@ -290,10 +301,15 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ClipboxTransitionChangedSlots = _clipboxPlanner.ChangedTransitionSlotCount;
 		_diagnostics.ClipboxTransitionActiveSlotCount = _clipboxPlanner.ActiveTransitionCount;
 		_clipboxCombinedKeySet.Clear();
-		foreach ( var assignment in _clipboxPlanner.CurrentSlots ) if ( assignment.Active ) _clipboxCombinedKeySet.Add( assignment.Key );
-		foreach ( var assignment in _clipboxPlanner.DesiredSlots ) if ( assignment.Active ) _clipboxCombinedKeySet.Add( assignment.Key );
 		_clipboxCombinedKeyScratch.Clear();
-		_clipboxCombinedKeyScratch.AddRange( _clipboxCombinedKeySet );
+		foreach ( var assignment in _clipboxPlanner.CurrentSlots )
+			if ( assignment.Active && _clipboxCombinedKeySet.Add( assignment.Key ) ) _clipboxCombinedKeyScratch.Add( assignment.Key );
+		// New coarse coverage is the player's visual safety net during movement.
+		// Put it ahead of fine replacement work so rapid observer revisions cannot
+		// leave the distant frontier behind a backlog of short-lived near blocks.
+		for ( var level = _clipboxPlanner.Config.LevelCount - 1; level >= 0; level-- )
+		foreach ( var assignment in _clipboxPlanner.DesiredSlots )
+			if ( assignment.Active && assignment.Lod == level && _clipboxCombinedKeySet.Add( assignment.Key ) ) _clipboxCombinedKeyScratch.Add( assignment.Key );
 		var combinedDesiredCount = _clipboxCombinedKeySet.Count;
 		var desiredCount = UpdateDesiredKeys( _clipboxCombinedKeyScratch );
 		if ( desiredCount != combinedDesiredCount )
@@ -359,7 +375,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			}
 			_desiredRanks.Clear();
 			for ( var index = 0; index < _desiredOrder.Count; index++ ) _desiredRanks[_desiredOrder[index]] = index;
-			_scheduler.PruneToDesired( _desiredKeys );
+			_scheduler.PruneAndPrioritize( _desiredKeys, _desiredRanks );
 			UpdateQueueDiagnostics();
 			UpdatePendingCountBatches();
 			_settledLogged = false;
@@ -433,12 +449,14 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		lock ( _desiredSync )
 		{
 			_desiredTransitionScratch.Clear();
+			_desiredTransitionOrderScratch.Clear();
 			_transitionRebuildKeys.Clear();
+			for ( var fineLevel = _clipboxPlanner.Config.LevelCount - 2; fineLevel >= 0; fineLevel-- )
 			foreach ( var entry in _clipboxTransitions.Desired )
 			{
-				if ( !entry.Active ) continue;
+				if ( !entry.Active || entry.FineLevel != fineLevel ) continue;
 				var transitionKey = VoxelClipboxTransitionPlanner.GetVisualKey( _clipboxPlanner.DesiredTransitions[entry.StableSlotId] );
-				_desiredTransitionScratch.Add( transitionKey );
+				if ( _desiredTransitionScratch.Add( transitionKey ) ) _desiredTransitionOrderScratch.Add( transitionKey );
 				if ( _transitionDependencyKeys.TryGetValue( transitionKey, out var previousDependency ) && previousDependency != entry.Key )
 				{
 					_transitionScheduler.Cancel( transitionKey );
@@ -453,7 +471,11 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 			{
 				if ( !assignment.Active ) continue;
 				var transitionKey = VoxelClipboxTransitionPlanner.GetVisualKey( assignment );
-				if ( _desiredTransitionScratch.Add( transitionKey ) ) _transitionDependencyKeys[transitionKey] = _clipboxTransitions.Current[assignment.StableSlotId].Key;
+				if ( _desiredTransitionScratch.Add( transitionKey ) )
+				{
+					_desiredTransitionOrderScratch.Add( transitionKey );
+					_transitionDependencyKeys[transitionKey] = _clipboxTransitions.Current[assignment.StableSlotId].Key;
+				}
 			}
 			_transitionLeavingScratch.Clear();
 			foreach ( var key in _desiredTransitionKeys ) if ( !_desiredTransitionScratch.Contains( key ) ) _transitionLeavingScratch.Add( key );
@@ -467,7 +489,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 				_desiredTransitionKeys.Remove( key );
 				_transitionDependencyKeys.Remove( key );
 			}
-			foreach ( var key in _desiredTransitionScratch )
+			foreach ( var key in _desiredTransitionOrderScratch )
 			{
 				_desiredTransitionKeys.Add( key );
 				if ( (!_transitionRebuildKeys.Contains( key ) && _residents.ContainsKey( key )) || !_pendingTransitionRequests.Add( key ) ) continue;
@@ -546,7 +568,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 					_diagnostics.BackpressureEvents++;
 				}
 			}
-			_scheduler.PruneToDesired( _desiredKeys );
+			_scheduler.PruneAndPrioritize( _desiredKeys, _desiredRanks );
 			UpdateQueueDiagnostics();
 			UpdatePendingCountBatches();
 			_settledLogged = false;
@@ -1072,6 +1094,7 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		builder.Append( ",\"zero_geometry_transitions\":" ).Append( zeroGeometryTransitions );
 		builder.Append( ",\"dependency_mismatches\":" ).Append( _diagnostics.ClipboxTransitionDependencyMismatches );
 		builder.Append( ",\"cancelled_stale\":" ).Append( _diagnostics.StalePublicationsRejected );
+		builder.Append( ",\"coalesced_observer_updates\":" ).Append( _coalescedObserverUpdates );
 		builder.Append( ",\"deferred_budget\":" ).Append( _diagnostics.CapacityDeferrals );
 		builder.Append( ",\"commit_latency_ms\":" ).Append( state == "committed" && _clipboxRevisionPlannedTimestamp != 0 ? Number( System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds ) : "null" ).Append( '}' );
 	}
@@ -1205,8 +1228,9 @@ internal sealed class VoxelGpuTerrainBackend : SceneCustomObject, System.IDispos
 		_diagnostics.ClipboxTransitionDependencyMismatches = _clipboxTransitions.DependencyMismatchCount;
 		RecordRevisionEvent( "committed" );
 		var commitLatencyMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime( _clipboxRevisionPlannedTimestamp ).TotalMilliseconds;
-		if ( _clipboxPlanner.Revision == 1 || commitLatencyMilliseconds >= 100.0 )
-			Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={commitLatencyMilliseconds:F2}, commitCpuMs={_lastClipboxCommitCpuMilliseconds:F2}, ownershipChanges={_lastClipboxOwnershipChanges:N0}, cullingCpuMs={_renderer.LastCullingMilliseconds:F2}, argumentBuildCpuMs={_renderer.LastArgumentBuildMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
+		if ( _clipboxPlanner.Revision == 1 ||
+			(commitLatencyMilliseconds >= 100.0 && System.Threading.Interlocked.Increment( ref _slowCommitLogCount ) <= 32) )
+			Log.Info( $"Voxel GPU clipbox revision committed: revision={_clipboxPlanner.Revision}, frame={_frameCounter}, observer={_clipboxPlanner.ObserverBaseBlock}, regular={_clipboxPlanner.ActiveRegularCount}/{_clipboxPlanner.ChangedSlotCount}, seam={_clipboxPlanner.ActiveTransitionCount}/{_clipboxPlanner.ChangedTransitionSlotCount}, latencyMs={commitLatencyMilliseconds:F2}, commitCpuMs={_lastClipboxCommitCpuMilliseconds:F2}, ownershipChanges={_lastClipboxOwnershipChanges:N0}, coalescedObserverUpdates={_coalescedObserverUpdates:N0}, cullingCpuMs={_renderer.LastCullingMilliseconds:F2}, argumentBuildCpuMs={_renderer.LastArgumentBuildMilliseconds:F2}, stale={_diagnostics.StalePublicationsRejected}, deferred={_diagnostics.CapacityDeferrals}." );
 	}
 
 	private int SetClipboxRenderOwnership()

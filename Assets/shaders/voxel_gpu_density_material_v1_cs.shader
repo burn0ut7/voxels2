@@ -3,7 +3,7 @@ MODES
 	Default();
 }
 // GPU LOD crack plan: stable near-zero terrain field with one height evaluation per column.
-// Versioned persistent terrain Pass A density rules with spatially filtered sparse edits and vertical column reuse.
+// Versioned persistent terrain Pass A unclamped float-density rules with spatially filtered sparse edits and vertical column reuse.
 CS
 {
 	#include "system.fxc"
